@@ -1,3 +1,22 @@
+# vvc-amvr-complexity
+
+Fork of the VVC Test Model (VTM) 24.0 — upstream:
+https://vcgit.hhi.fraunhofer.de/jvet/VVCSoftware_VTM (commit `69f5112ba`)
+
+Modifications: instrumentation counters for IMV and Affine AMVR
+mode evaluation and selection. Original code is licensed under
+the BSD 3-Clause license (see COPYING); modifications by Davi Oliz,
+research assistant at the *Tecnologias em Sistemas de Computação*
+research group (CNPq Directory of Research Groups), Instituto Federal
+de Educação, Ciência e Tecnologia do Rio Grande do Sul — Campus
+Farroupilha, Brazil (supervisor: Prof. Rogério Xavier de Azambuja),
+are released under the same terms.
+
+**Note:** JVET CTC test sequences are not included and are not
+covered by this license.
+
+---
+
 VTM reference software for VVC
 ==============================
 
