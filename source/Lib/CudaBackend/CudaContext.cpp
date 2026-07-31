@@ -70,7 +70,15 @@ CudaPinnedBuffer::~CudaPinnedBuffer() noexcept
 
 CudaPinnedBuffer::CudaPinnedBuffer(CudaPinnedBuffer &&other) noexcept = default;
 
-CudaPinnedBuffer &CudaPinnedBuffer::operator=(CudaPinnedBuffer &&other) noexcept = default;
+CudaPinnedBuffer &CudaPinnedBuffer::operator=(CudaPinnedBuffer &&other) noexcept
+{
+  if (this != &other)
+  {
+    reset();
+    m_impl = std::move(other.m_impl);
+  }
+  return *this;
+}
 
 void CudaPinnedBuffer::allocate(const std::size_t bytes)
 {
@@ -81,6 +89,10 @@ void CudaPinnedBuffer::allocate(const std::size_t bytes)
 #if VTM_ENABLE_CUDA
   void *allocation = cuda_backend::allocatePinnedHost(bytes);
   reset();
+  if (!m_impl)
+  {
+    m_impl.reset(new Impl);
+  }
   m_impl->allocation = allocation;
   m_impl->bytes      = bytes;
 #else
@@ -177,7 +189,8 @@ void requireOwnerThread(const std::thread::id &ownerThread)
 
 #if VTM_ENABLE_CUDA
 
-void requireRuntime(const CudaContext::Impl *impl)
+template<typename ContextImpl>
+void requireRuntime(const ContextImpl *impl)
 {
   if (impl->runtime == nullptr)
   {
@@ -256,17 +269,8 @@ void validatePicture(const CudaHostPictureDesc &picture)
   }
 }
 
-PictureMirror &findMirror(CudaContext::Impl *impl, const CudaMirrorHandle handle)
-{
-  const auto found = impl->mirrors.find(handle);
-  if (handle == 0 || found == impl->mirrors.end())
-  {
-    throw std::runtime_error("CUDA picture mirror handle is invalid or has been released");
-  }
-  return *found->second;
-}
-
-const PictureMirror &findMirror(const CudaContext::Impl *impl, const CudaMirrorHandle handle)
+template<typename ContextImpl>
+PictureMirror &findMirror(ContextImpl *impl, const CudaMirrorHandle handle)
 {
   const auto found = impl->mirrors.find(handle);
   if (handle == 0 || found == impl->mirrors.end())
@@ -314,7 +318,8 @@ void unstageHostPicture(PictureMirror &mirror)
   }
 }
 
-void releaseMirrorResources(CudaContext::Impl *impl, PictureMirror &mirror)
+template<typename ContextImpl>
+void releaseMirrorResources(ContextImpl *impl, PictureMirror &mirror)
 {
   cuda_backend::synchronizeRuntimeContext(impl->runtime);
   for (void *&allocation : mirror.deviceBases)
@@ -328,7 +333,8 @@ void releaseMirrorResources(CudaContext::Impl *impl, PictureMirror &mirror)
   cuda_backend::synchronizeQueue(impl->runtime, CudaQueue::Compute);
 }
 
-void releaseAllMirrorsNoThrow(CudaContext::Impl *impl) noexcept
+template<typename ContextImpl>
+void releaseAllMirrorsNoThrow(ContextImpl *impl) noexcept
 {
   if (impl->runtime == nullptr)
   {
@@ -699,9 +705,13 @@ CudaMirrorHandle CudaContext::pictureMirrorHandle(const void *owner, const CudaP
 #endif
 }
 
-std::size_t CudaContext::pictureMirrorCount() const noexcept
+std::size_t CudaContext::pictureMirrorCount() const
 {
 #if VTM_ENABLE_CUDA
+  if (m_impl->runtime != nullptr)
+  {
+    requireOwnerThread(m_impl->ownerThread);
+  }
   return m_impl->mirrors.size();
 #else
   return 0;

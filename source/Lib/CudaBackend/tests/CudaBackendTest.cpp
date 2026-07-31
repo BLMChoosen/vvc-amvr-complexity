@@ -35,11 +35,16 @@
 #include "CudaBackend/CudaContext.h"
 
 #include <cstdlib>
+#include <array>
+#include <cstdint>
+#include <cstring>
 #include <functional>
 #include <iostream>
 #include <limits>
 #include <string>
 #include <thread>
+#include <utility>
+#include <vector>
 
 namespace
 {
@@ -62,6 +67,83 @@ bool throws(const std::function<void()> &operation)
   }
   return false;
 }
+
+struct TestPicture
+{
+  struct Plane
+  {
+    std::vector<std::uint8_t> storage;
+    std::vector<std::uint8_t> expected;
+    std::size_t stride = 0;
+    std::size_t rowBytes = 0;
+    std::size_t fullHeight = 0;
+  };
+
+  std::array<Plane, vtm::CUDA_PICTURE_PLANE_COUNT> planes;
+  vtm::CudaHostPictureDesc descriptor{};
+
+  TestPicture(const std::uint32_t width, const std::uint32_t height, const std::uint8_t elementSize,
+              const std::uint8_t bitDepth)
+  {
+    descriptor.planeCount = vtm::CUDA_PICTURE_PLANE_COUNT;
+    for (std::size_t index = 0; index < planes.size(); ++index)
+    {
+      const std::uint32_t planeWidth = index == 0 ? width : (width + 1) / 2;
+      const std::uint32_t planeHeight = index == 0 ? height : (height + 1) / 2;
+      const std::uint16_t horizontalMargin = index == 0 ? 3 : 1;
+      const std::uint16_t verticalMargin = index == 0 ? 2 : 1;
+      Plane &plane = planes[index];
+      plane.rowBytes = (horizontalMargin + planeWidth + horizontalMargin) * elementSize;
+      plane.stride = plane.rowBytes + 11 + index;
+      plane.fullHeight = verticalMargin + planeHeight + verticalMargin;
+      plane.storage.resize(plane.stride * plane.fullHeight, 0xcd);
+      for (std::size_t row = 0; row < plane.fullHeight; ++row)
+      {
+        for (std::size_t column = 0; column < plane.rowBytes; ++column)
+        {
+          plane.storage[row * plane.stride + column] =
+            static_cast<std::uint8_t>((row * 37 + column * 13 + index * 53 + bitDepth) & 0xff);
+        }
+      }
+      plane.expected = plane.storage;
+
+      vtm::CudaHostPlaneDesc &target = descriptor.planes[index];
+      target.data = plane.storage.data() + verticalMargin * plane.stride + horizontalMargin * elementSize;
+      target.width = planeWidth;
+      target.height = planeHeight;
+      target.strideBytes = static_cast<std::ptrdiff_t>(plane.stride);
+      target.marginLeft = horizontalMargin;
+      target.marginRight = horizontalMargin;
+      target.marginTop = verticalMargin;
+      target.marginBottom = verticalMargin;
+      target.elementSize = elementSize;
+      target.bitDepth = bitDepth;
+    }
+  }
+
+  void clearTransferredBytes()
+  {
+    for (Plane &plane : planes)
+    {
+      for (std::size_t row = 0; row < plane.fullHeight; ++row)
+      {
+        std::memset(plane.storage.data() + row * plane.stride, 0, plane.rowBytes);
+      }
+    }
+  }
+
+  bool matchesExpected() const
+  {
+    for (std::size_t index = 0; index < planes.size(); ++index)
+    {
+      if (planes[index].storage != planes[index].expected)
+      {
+        return false;
+      }
+    }
+    return true;
+  }
+};
 
 }   // namespace
 
@@ -104,6 +186,18 @@ int main(const int argc, char *argv[])
     if (!throws([&context]() { context.create(0); }))
     {
       return fail("ENABLE_CUDA=OFF build accepted CUDA context creation");
+    }
+    vtm::CudaPinnedBuffer pinned;
+    if (!throws([&pinned]() { pinned.allocate(64); }))
+    {
+      return fail("ENABLE_CUDA=OFF build accepted pinned allocation");
+    }
+    TestPicture picture(7, 5, 1, 8);
+    if (!throws([&context, &picture]() {
+          context.registerPictureMirror(&picture, vtm::CudaPictureRole::Reconstruction, picture.descriptor);
+        }))
+    {
+      return fail("ENABLE_CUDA=OFF build accepted picture mirror registration");
     }
     return EXIT_SUCCESS;
   }
@@ -163,6 +257,101 @@ int main(const int argc, char *argv[])
     {
       return fail("Zero-byte CUDA allocation was accepted");
     }
+
+    vtm::CudaPinnedBuffer pinned(4096);
+    if (!pinned || pinned.size() != 4096)
+    {
+      return fail("Pinned allocation was not created");
+    }
+    std::memset(pinned.data(), 0x5a, pinned.size());
+    vtm::CudaPinnedBuffer moved(std::move(pinned));
+    if (pinned || !moved || moved.size() != 4096)
+    {
+      return fail("Pinned allocation move did not transfer ownership");
+    }
+    moved.reset();
+    if (moved || moved.size() != 0)
+    {
+      return fail("Pinned allocation reset did not release ownership");
+    }
+
+    TestPicture picture8(7, 5, 1, 8);
+    TestPicture picture10(16, 10, 2, 10);
+    int owner8 = 0;
+    int owner10 = 0;
+    const vtm::CudaMirrorHandle mirror8 = context.registerPictureMirror(
+      &owner8, vtm::CudaPictureRole::Reconstruction, picture8.descriptor);
+    const vtm::CudaMirrorHandle mirror10 = context.registerPictureMirror(
+      &owner10, vtm::CudaPictureRole::Original, picture10.descriptor);
+    if (mirror8 == mirror10 || context.pictureMirrorCount() != 2
+        || !context.hasPictureMirror(&owner8, vtm::CudaPictureRole::Reconstruction)
+        || context.pictureMirrorHandle(&owner10, vtm::CudaPictureRole::Original) != mirror10)
+    {
+      return fail("Multiple CUDA picture mirrors were not registered independently");
+    }
+    if (context.pictureMirrorState(mirror8) != vtm::CudaMirrorState::HostValid
+        || !throws([&context, mirror8]() { (void) context.devicePicture(mirror8); })
+        || !throws([&context, mirror8]() { context.markDeviceModified(mirror8); }))
+    {
+      return fail("Initial CUDA picture mirror state was not HostValid");
+    }
+    if (!throws([&context, &owner8, &picture8]() {
+          context.registerPictureMirror(&owner8, vtm::CudaPictureRole::Reconstruction, picture8.descriptor);
+        }))
+    {
+      return fail("Duplicate CUDA picture mirror registration was accepted");
+    }
+
+    for (const vtm::CudaMirrorHandle mirror : { mirror8, mirror10 })
+    {
+      context.ensureDevice(mirror);
+      if (context.pictureMirrorState(mirror) != vtm::CudaMirrorState::Synchronized)
+      {
+        return fail("CUDA picture upload did not produce Synchronized state");
+      }
+      const vtm::CudaDevicePictureDesc device = context.devicePicture(mirror);
+      if (device.planeCount != vtm::CUDA_PICTURE_PLANE_COUNT || device.planes[0].data == nullptr
+          || device.planes[0].pitchBytes == 0)
+      {
+        return fail("CUDA device picture descriptor is invalid");
+      }
+    }
+
+    picture8.clearTransferredBytes();
+    context.markDeviceModified(mirror8);
+    if (context.pictureMirrorState(mirror8) != vtm::CudaMirrorState::DeviceValid
+        || !throws([&context, mirror8]() { context.markHostModified(mirror8); }))
+    {
+      return fail("DeviceValid conflict handling is invalid");
+    }
+    context.ensureHost(mirror8);
+    if (context.pictureMirrorState(mirror8) != vtm::CudaMirrorState::Synchronized || !picture8.matchesExpected())
+    {
+      return fail("8-bit 4:2:0 picture round-trip with margins and non-contiguous strides was not byte exact");
+    }
+
+    picture10.clearTransferredBytes();
+    context.markDeviceModified(mirror10);
+    context.ensureHost(mirror10);
+    if (!picture10.matchesExpected())
+    {
+      return fail("10-bit 4:2:0 picture round-trip with margins and non-contiguous strides was not byte exact");
+    }
+    context.markHostModified(mirror10);
+    context.ensureDevice(mirror10);
+
+    context.releasePictureMirror(mirror8);
+    if (context.pictureMirrorCount() != 1 || context.hasPictureMirror(&owner8, vtm::CudaPictureRole::Reconstruction)
+        || !throws([&context, mirror8]() { context.ensureDevice(mirror8); }))
+    {
+      return fail("Released CUDA picture mirror remained usable");
+    }
+    context.releasePictureMirrors(&owner10);
+    if (context.pictureMirrorCount() != 0)
+    {
+      return fail("Owner-based CUDA picture mirror release left registry entries");
+    }
+
     void *allocation = context.allocateDevice(4096, vtm::CudaQueue::Upload);
     context.recordFence(vtm::CudaQueue::Upload, vtm::CudaFence::UploadComplete);
     context.waitFence(vtm::CudaQueue::Compute, vtm::CudaFence::UploadComplete);
@@ -178,9 +367,19 @@ int main(const int argc, char *argv[])
     context.shutdown();
 
     context.create(std::stoi(argv[2]));
+    TestPicture pendingPicture(32, 18, 2, 10);
+    int pendingOwner = 0;
+    const vtm::CudaMirrorHandle pendingMirror = context.registerPictureMirror(
+      &pendingOwner, vtm::CudaPictureRole::Reconstruction, pendingPicture.descriptor);
+    context.ensureDevice(pendingMirror);
+    context.markDeviceModified(pendingMirror);
     allocation = context.allocateDevice(4096, vtm::CudaQueue::Compute);
     context.releaseDevice(allocation, vtm::CudaQueue::Compute);
     context.shutdown();   // verifies teardown with pending asynchronous work
+    if (context.pictureMirrorCount() != 0)
+    {
+      return fail("CUDA context shutdown did not empty the picture mirror registry");
+    }
     context.create(std::stoi(argv[2]));
     context.destroy();
     context.destroy();

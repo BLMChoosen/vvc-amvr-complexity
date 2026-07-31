@@ -39,43 +39,43 @@ enum class CudaMirrorState : std::uint8_t
 // Margins are expressed in samples and are copied together with the active picture.
 struct CudaHostPlaneDesc
 {
-  void          *data          = nullptr;
-  std::uint32_t  width         = 0;
-  std::uint32_t  height        = 0;
-  std::ptrdiff_t strideBytes   = 0;
-  std::uint16_t  marginLeft    = 0;
-  std::uint16_t  marginRight   = 0;
-  std::uint16_t  marginTop     = 0;
-  std::uint16_t  marginBottom  = 0;
-  std::uint8_t   elementSize   = 0;
-  std::uint8_t   bitDepth      = 0;
+  void          *data;
+  std::uint32_t  width;
+  std::uint32_t  height;
+  std::ptrdiff_t strideBytes;
+  std::uint16_t  marginLeft;
+  std::uint16_t  marginRight;
+  std::uint16_t  marginTop;
+  std::uint16_t  marginBottom;
+  std::uint8_t   elementSize;
+  std::uint8_t   bitDepth;
 };
 
 struct CudaHostPictureDesc
 {
-  std::array<CudaHostPlaneDesc, CUDA_PICTURE_PLANE_COUNT> planes{};
-  std::uint8_t planeCount = 0;
+  std::array<CudaHostPlaneDesc, CUDA_PICTURE_PLANE_COUNT> planes;
+  std::uint8_t planeCount;
 };
 
 // POD-only descriptors exposed to future batched kernels. No host pointer, codec object, or STL container is present.
 struct CudaDevicePlaneDesc
 {
-  void          *data          = nullptr;
-  std::size_t    pitchBytes    = 0;
-  std::uint32_t  width         = 0;
-  std::uint32_t  height        = 0;
-  std::uint16_t  marginLeft    = 0;
-  std::uint16_t  marginRight   = 0;
-  std::uint16_t  marginTop     = 0;
-  std::uint16_t  marginBottom  = 0;
-  std::uint8_t   elementSize   = 0;
-  std::uint8_t   bitDepth      = 0;
+  void          *data;
+  std::size_t    pitchBytes;
+  std::uint32_t  width;
+  std::uint32_t  height;
+  std::uint16_t  marginLeft;
+  std::uint16_t  marginRight;
+  std::uint16_t  marginTop;
+  std::uint16_t  marginBottom;
+  std::uint8_t   elementSize;
+  std::uint8_t   bitDepth;
 };
 
 struct CudaDevicePictureDesc
 {
-  std::array<CudaDevicePlaneDesc, CUDA_PICTURE_PLANE_COUNT> planes{};
-  std::uint8_t planeCount = 0;
+  std::array<CudaDevicePlaneDesc, CUDA_PICTURE_PLANE_COUNT> planes;
+  std::uint8_t planeCount;
 };
 
 static_assert(std::is_standard_layout<CudaHostPlaneDesc>::value && std::is_trivial<CudaHostPlaneDesc>::value,

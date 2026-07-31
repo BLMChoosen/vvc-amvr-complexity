@@ -47,6 +47,40 @@
 #include "CommonLib/SEIPackedRegionsInfoProcess.h"
 #include "CommonLib/ProfileTierLevel.h"
 #include "CudaBackend/ComputeBackend.h"
+#include "CudaBackend/CudaPictureMirror.h"
+
+namespace
+{
+
+vtm::CudaHostPictureDesc makeCudaPictureDesc(Picture &picture, const PictureType type, const BitDepths &bitDepths,
+                                              const unsigned margin)
+{
+  CHECK(picture.chromaFormat != ChromaFormat::_420, "CUDA picture mirrors currently support only 4:2:0 pictures");
+  PelUnitBuf buffer = picture.getBuf(picture, type);
+  CHECK(buffer.bufs.size() != vtm::CUDA_PICTURE_PLANE_COUNT, "CUDA picture mirror requires Y, Cb, and Cr planes");
+
+  vtm::CudaHostPictureDesc descriptor{};
+  descriptor.planeCount = static_cast<std::uint8_t>(buffer.bufs.size());
+  for (std::size_t index = 0; index < buffer.bufs.size(); ++index)
+  {
+    const ComponentID component = static_cast<ComponentID>(index);
+    const PelBuf &plane = buffer.bufs[index];
+    vtm::CudaHostPlaneDesc &target = descriptor.planes[index];
+    target.data         = plane.buf;
+    target.width        = plane.width;
+    target.height       = plane.height;
+    target.strideBytes  = plane.stride * static_cast<std::ptrdiff_t>(sizeof(Pel));
+    target.marginLeft   = static_cast<std::uint16_t>(margin >> getComponentScaleX(component, picture.chromaFormat));
+    target.marginRight  = target.marginLeft;
+    target.marginTop    = static_cast<std::uint16_t>(margin >> getComponentScaleY(component, picture.chromaFormat));
+    target.marginBottom = target.marginTop;
+    target.elementSize  = sizeof(Pel);
+    target.bitDepth     = static_cast<std::uint8_t>(bitDepths[toChannelType(component)]);
+  }
+  return descriptor;
+}
+
+}   // namespace
 
 //! \ingroup EncoderLib
 //! \{
@@ -700,6 +734,7 @@ void EncLib::deletePicBuffer()
   {
     Picture* pcPic = *(iterPic++);
 
+    m_encLibCommon->releasePictureMirrors(pcPic);
     pcPic->destroy();
 
     // get rid of the qpadaption layer
@@ -1204,6 +1239,7 @@ void EncLib::xGetNewPicBuffer ( std::list<PelUnitBuf*>& rcListPicYuvRecOut, Pict
   // use an entry in the buffered list if the maximum number that need buffering has been reached:
   int maxDecPicBuffering = ( m_vps == nullptr || m_vps->m_numLayersInOls[m_vps->m_targetOlsIdx] == 1 ) ? sps.getMaxDecPicBuffering( MAX_TLAYER - 1 ) : m_vps->getMaxDecPicBuffering( MAX_TLAYER - 1 );
 
+  bool createPic = false;
   if (m_cListPic.size() >= (uint32_t) (m_gopSize + maxDecPicBuffering + 2))
   {
     PicList::iterator iterPic = m_cListPic.begin();
@@ -1227,6 +1263,7 @@ void EncLib::xGetNewPicBuffer ( std::list<PelUnitBuf*>& rcListPicYuvRecOut, Pict
     if( rpcPic && pps.getPPSId() != rpcPic->cs->pps->getPPSId() )
     {
       // the IDs differ - free up an entry in the list, and then create a new one, as with the case where the max buffering state has not been reached.
+      m_encLibCommon->releasePictureMirrors(rpcPic);
       rpcPic->destroy();
       delete rpcPic;
       m_cListPic.erase(iterPic);
@@ -1246,6 +1283,7 @@ void EncLib::xGetNewPicBuffer ( std::list<PelUnitBuf*>& rcListPicYuvRecOut, Pict
     rpcPic = new Picture;
     rpcPic->create(sps.getWrapAroundEnabledFlag(), sps.getChromaFormatIdc(), Size(pps.getPicWidthInLumaSamples(), pps.getPicHeightInLumaSamples()),
       sps.getMaxCUWidth(), sps.getMaxCUWidth() + PIC_MARGIN, false, m_layerId, fullSize, getShutterFilterFlag());
+    createPic = true;
 
     if ( getUseAdaptiveQP() )
     {
@@ -1258,6 +1296,24 @@ void EncLib::xGetNewPicBuffer ( std::list<PelUnitBuf*>& rcListPicYuvRecOut, Pict
     }
 
     m_cListPic.push_back( rpcPic );
+  }
+
+  if (m_encLibCommon->isCudaBackendActive())
+  {
+    if (createPic)
+    {
+      m_encLibCommon->registerPictureMirror(
+        rpcPic, vtm::CudaPictureRole::Original,
+        makeCudaPictureDesc(*rpcPic, PIC_ORIGINAL, sps.getBitDepths(), 0));
+      m_encLibCommon->registerPictureMirror(
+        rpcPic, vtm::CudaPictureRole::Reconstruction,
+        makeCudaPictureDesc(*rpcPic, PIC_RECONSTRUCTION, sps.getBitDepths(), rpcPic->margin));
+    }
+    else
+    {
+      m_encLibCommon->markPictureHostModified(rpcPic, vtm::CudaPictureRole::Original);
+      m_encLibCommon->markPictureHostModified(rpcPic, vtm::CudaPictureRole::Reconstruction);
+    }
   }
 
   rpcPic->setBorderExtension( false );

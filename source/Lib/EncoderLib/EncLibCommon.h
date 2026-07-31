@@ -48,6 +48,8 @@
 namespace vtm
 {
 struct ComputeConfig;
+enum class CudaPictureRole : std::uint8_t;
+struct CudaHostPictureDesc;
 }
 
 class EncLibCommon
@@ -79,6 +81,11 @@ public:
   void                     acquireComputeBackend();
   void                     synchronizeComputeBackend();
   void                     releaseComputeBackend();
+  bool                     isCudaBackendActive() const;
+  void                     registerPictureMirror(const void *owner, vtm::CudaPictureRole role,
+                                                 const vtm::CudaHostPictureDesc &picture);
+  void                     markPictureHostModified(const void *owner, vtm::CudaPictureRole role);
+  void                     releasePictureMirrors(const void *owner);
 #if JVET_AJ0151_DSC_SEI
   DscSubstreamManager*     getDscSubstreamManager() { return &m_dscSubstreamManager; }
 #endif

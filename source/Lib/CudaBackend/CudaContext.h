@@ -110,7 +110,7 @@ public:
   void releaseAllPictureMirrors();
   bool hasPictureMirror(const void *owner, CudaPictureRole role) const;
   CudaMirrorHandle pictureMirrorHandle(const void *owner, CudaPictureRole role) const;
-  std::size_t pictureMirrorCount() const noexcept;
+  std::size_t pictureMirrorCount() const;
   CudaMirrorState pictureMirrorState(CudaMirrorHandle handle) const;
   CudaDevicePictureDesc devicePicture(CudaMirrorHandle handle) const;
   void markHostModified(CudaMirrorHandle handle);

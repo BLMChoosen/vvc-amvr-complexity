@@ -108,3 +108,34 @@ void EncLibCommon::releaseComputeBackend()
     m_computeState->synchronized = false;
   }
 }
+
+bool EncLibCommon::isCudaBackendActive() const
+{
+  return m_computeState->cudaContext.isCreated();
+}
+
+void EncLibCommon::registerPictureMirror(const void *owner, const vtm::CudaPictureRole role,
+                                         const vtm::CudaHostPictureDesc &picture)
+{
+  if (m_computeState->cudaContext.isCreated())
+  {
+    m_computeState->cudaContext.registerPictureMirror(owner, role, picture);
+  }
+}
+
+void EncLibCommon::markPictureHostModified(const void *owner, const vtm::CudaPictureRole role)
+{
+  if (m_computeState->cudaContext.isCreated() && m_computeState->cudaContext.hasPictureMirror(owner, role))
+  {
+    const vtm::CudaMirrorHandle handle = m_computeState->cudaContext.pictureMirrorHandle(owner, role);
+    m_computeState->cudaContext.markHostModified(handle);
+  }
+}
+
+void EncLibCommon::releasePictureMirrors(const void *owner)
+{
+  if (m_computeState->cudaContext.isCreated())
+  {
+    m_computeState->cudaContext.releasePictureMirrors(owner);
+  }
+}

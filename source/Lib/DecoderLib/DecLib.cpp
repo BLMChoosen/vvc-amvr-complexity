@@ -45,6 +45,7 @@
 #include "CommonLib/ProfileTierLevel.h"
 #include "CudaBackend/ComputeBackend.h"
 #include "CudaBackend/CudaContext.h"
+#include "CudaBackend/CudaPictureMirror.h"
 
 #include <fstream>
 #include <set>
@@ -61,6 +62,38 @@
 #endif
 
 #include "SEIDigitallySignedContent.h"
+
+namespace
+{
+
+vtm::CudaHostPictureDesc makeCudaReconstructionDesc(Picture &picture, const BitDepths &bitDepths)
+{
+  CHECK(picture.chromaFormat != ChromaFormat::_420, "CUDA picture mirrors currently support only 4:2:0 pictures");
+  PelUnitBuf buffer = picture.getRecoBuf();
+  CHECK(buffer.bufs.size() != vtm::CUDA_PICTURE_PLANE_COUNT, "CUDA picture mirror requires Y, Cb, and Cr planes");
+
+  vtm::CudaHostPictureDesc descriptor{};
+  descriptor.planeCount = static_cast<std::uint8_t>(buffer.bufs.size());
+  for (std::size_t index = 0; index < buffer.bufs.size(); ++index)
+  {
+    const ComponentID component = static_cast<ComponentID>(index);
+    const PelBuf &plane = buffer.bufs[index];
+    vtm::CudaHostPlaneDesc &target = descriptor.planes[index];
+    target.data         = plane.buf;
+    target.width        = plane.width;
+    target.height       = plane.height;
+    target.strideBytes  = plane.stride * static_cast<std::ptrdiff_t>(sizeof(Pel));
+    target.marginLeft   = static_cast<std::uint16_t>(picture.margin >> getComponentScaleX(component, picture.chromaFormat));
+    target.marginRight  = target.marginLeft;
+    target.marginTop    = static_cast<std::uint16_t>(picture.margin >> getComponentScaleY(component, picture.chromaFormat));
+    target.marginBottom = target.marginTop;
+    target.elementSize  = sizeof(Pel);
+    target.bitDepth     = static_cast<std::uint8_t>(bitDepths[toChannelType(component)]);
+  }
+  return descriptor;
+}
+
+}   // namespace
 
 bool tryDecodePicture(Picture *pcEncPic, const int expectedPoc, const std::string &bitstreamFileName,
                       const int layerIdx, EnumArray<ParameterSetMap<APS>, ApsType> *apsMap, 
@@ -685,6 +718,10 @@ void DecLib::deletePicBuffer ( )
   for (int i = 0; i < size; i++)
   {
     Picture* pcPic = *(iterPic++);
+    if (m_computeState->cudaContext.isCreated())
+    {
+      m_computeState->cudaContext.releasePictureMirrors(pcPic);
+    }
     pcPic->destroy();
 
     delete pcPic;
@@ -745,6 +782,10 @@ Picture* DecLib::xGetNewPicBuffer(const SPS* sps, const PPS* pps, const uint32_t
   }
   else if (pic->Y().size() != picSize)
   {
+    if (m_computeState->cudaContext.isCreated())
+    {
+      m_computeState->cudaContext.releasePictureMirrors(pic);
+    }
     pic->destroy();
     createPic = true;
   }
@@ -757,6 +798,21 @@ Picture* DecLib::xGetNewPicBuffer(const SPS* sps, const PPS* pps, const uint32_t
     // Note: full size not needed when `bDecoder` is true
     pic->create(allocateWrappedPic, sps->getChromaFormatIdc(), picSize, sps->getMaxCUWidth(),
                 sps->getMaxCUWidth() + PIC_MARGIN, true, layerId, std::nullopt, getShutterFilterFlag());
+  }
+
+  if (m_computeState->cudaContext.isCreated())
+  {
+    if (createPic)
+    {
+      m_computeState->cudaContext.registerPictureMirror(
+        pic, vtm::CudaPictureRole::Reconstruction, makeCudaReconstructionDesc(*pic, sps->getBitDepths()));
+    }
+    else
+    {
+      const vtm::CudaMirrorHandle handle =
+        m_computeState->cudaContext.pictureMirrorHandle(pic, vtm::CudaPictureRole::Reconstruction);
+      m_computeState->cudaContext.markHostModified(handle);
+    }
   }
 
   pic->setBorderExtension(false);
