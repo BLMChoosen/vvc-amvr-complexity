@@ -33,6 +33,7 @@
 
 #include "CudaBackend/ComputeBackend.h"
 #include "CudaBackend/CudaContext.h"
+#include "CommonLib/RdCost.h"
 
 #include <cstdlib>
 #include <array>
@@ -329,6 +330,77 @@ bool runSadBatchCase(vtm::CudaContext &context, const std::uint8_t elementSize, 
 
   context.releasePictureMirrors(&sourceOwner);
   context.releasePictureMirrors(&referenceOwner);
+  return true;
+}
+
+bool runIntraSatdBatchCase(vtm::CudaContext &context, const std::uint8_t elementSize,
+                           const std::uint8_t bitDepth, const std::uint32_t blockSize)
+{
+  TestPicture source(blockSize + 8, blockSize + 8, elementSize, bitDepth, 13);
+  source.fillSamples(13);
+  int sourceOwner = 0;
+  const auto sourceMirror = context.registerPictureMirror(
+    &sourceOwner, vtm::CudaPictureRole::Original, source.descriptor);
+  const auto &sourcePlane = source.descriptor.planes[0];
+  const auto *sourceBlock = static_cast<const std::uint8_t *>(sourcePlane.data)
+                            + 3 * sourcePlane.strideBytes + 2 * elementSize;
+  constexpr std::uint32_t candidateCount = 34;
+  const std::size_t blockSamples = static_cast<std::size_t>(blockSize) * blockSize;
+  std::vector<std::uint8_t> candidates(blockSamples * candidateCount * elementSize);
+  const std::uint32_t maximum = (1u << bitDepth) - 1;
+  for (std::uint32_t candidate = 0; candidate < candidateCount; ++candidate)
+  {
+    for (std::size_t sample = 0; sample < blockSamples; ++sample)
+    {
+      std::uint32_t value = static_cast<std::uint32_t>(sample * 37 + candidate * 101 + (sample >> 4) * 19);
+      value &= maximum;
+      if ((sample + candidate) % 31 == 0) value = 0;
+      if ((sample * 3 + candidate) % 47 == 0) value = maximum;
+      writeSample(candidates.data() + (static_cast<std::size_t>(candidate) * blockSamples + sample) * elementSize,
+                  elementSize, static_cast<std::int32_t>(value));
+    }
+  }
+
+  vtm::CudaIntraSatdBatchDesc batch{};
+  batch.sourceMirror = sourceMirror;
+  batch.source = sourceBlock;
+  batch.candidates = candidates.data();
+  batch.candidateCount = candidateCount;
+  batch.width = blockSize;
+  batch.height = blockSize;
+  batch.sourcePlane = 0;
+  batch.elementSize = elementSize;
+  batch.bitDepth = bitDepth;
+  std::array<vtm::CudaSadHadResult, candidateCount> results{};
+  const auto dispatchesBefore = context.distortionBatchDispatchCount();
+  if (!context.computeIntraSatdBatch(batch, results.data())
+      || context.distortionBatchDispatchCount() != dispatchesBefore + 1)
+  {
+    return false;
+  }
+
+  RdCost rdCost;
+  const CPelBuf original(reinterpret_cast<const Pel *>(sourceBlock),
+                         sourcePlane.strideBytes / elementSize, blockSize, blockSize);
+  for (std::uint32_t candidate = 0; candidate < candidateCount; ++candidate)
+  {
+    const auto *candidateBytes = candidates.data()
+      + static_cast<std::size_t>(candidate) * blockSamples * elementSize;
+    const CPelBuf prediction(reinterpret_cast<const Pel *>(candidateBytes), blockSize, blockSize, blockSize);
+    const Distortion expectedSad = rdCost.getDistPart(original, prediction, bitDepth, COMPONENT_Y, DFunc::SAD);
+    const Distortion expectedHad = rdCost.getDistPart(original, prediction, bitDepth, COMPONENT_Y, DFunc::HAD);
+    if (results[candidate].sad != expectedSad || results[candidate].had != expectedHad)
+    {
+      return false;
+    }
+  }
+  vtm::CudaIntraSatdBatchDesc invalid = batch;
+  invalid.height = blockSize / 2;
+  if (context.computeIntraSatdBatch(invalid, results.data()))
+  {
+    return false;
+  }
+  context.releasePictureMirrors(&sourceOwner);
   return true;
 }
 
@@ -707,6 +779,12 @@ int main(const int argc, char *argv[])
         || !runSadBatchCase(context, 4, 10, 64, 32, 0))
     {
       return fail("CUDA SAD batch differed from the ordered scalar reference");
+    }
+    if (!runIntraSatdBatchCase(context, sizeof(Pel), 8, 8)
+        || !runIntraSatdBatchCase(context, sizeof(Pel), 10, 16)
+        || !runIntraSatdBatchCase(context, sizeof(Pel), 10, 64))
+    {
+      return fail("CUDA intra SAD/HAD batch differed from the VTM CPU distortion functions");
     }
 #if VTM_CUDA_TESTING
     if (!runSadFailureCase(std::stoi(argv[2]), 1, 0)
