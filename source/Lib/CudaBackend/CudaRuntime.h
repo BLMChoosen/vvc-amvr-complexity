@@ -53,7 +53,7 @@ void *allocateDevice(RuntimeContext *context, std::size_t bytes, CudaQueue queue
 void releaseDevice(RuntimeContext *context, void *allocation, CudaQueue queue);
 void releaseDeviceImmediate(RuntimeContext *context, void *allocation);
 void *allocatePinnedHost(std::size_t bytes);
-void releasePinnedHost(void *allocation) noexcept;
+bool releasePinnedHost(void *allocation) noexcept;
 void copy2DToDeviceAsync(RuntimeContext *context, void *destination, std::size_t destinationPitch,
                          const void *source, std::size_t sourcePitch, std::size_t widthBytes,
                          std::size_t height, CudaQueue queue);
@@ -75,6 +75,7 @@ void recoverQpaRuntime(RuntimeContext *context) noexcept;
 void injectReleaseFailures(RuntimeContext *context, unsigned asyncFailures, unsigned immediateFailures);
 void injectDistortionFailures(RuntimeContext *context, unsigned allocationFailureStep, unsigned executionFailures);
 void injectQpaFailures(RuntimeContext *context, unsigned allocationFailureStep, unsigned executionFailures);
+void injectPinnedReleaseFailures(unsigned failures);
 
 }   // namespace vtm::cuda_backend
 

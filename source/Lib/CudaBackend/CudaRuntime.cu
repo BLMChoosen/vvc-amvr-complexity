@@ -41,6 +41,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <atomic>
 
 namespace vtm::cuda_backend
 {
@@ -74,6 +75,10 @@ struct RuntimeContext
 
 namespace
 {
+
+#if VTM_CUDA_TESTING
+std::atomic<unsigned> pinnedReleaseFailures{ 0 };
+#endif
 
 void checkCuda(const cudaError_t result, const char *operation)
 {
@@ -625,12 +630,23 @@ void *allocatePinnedHost(const std::size_t bytes)
   return allocation;
 }
 
-void releasePinnedHost(void *allocation) noexcept
+bool releasePinnedHost(void *allocation) noexcept
 {
-  if (allocation != nullptr)
+  if (allocation == nullptr)
   {
-    (void) cudaFreeHost(allocation);
+    return true;
   }
+#if VTM_CUDA_TESTING
+  unsigned failures = pinnedReleaseFailures.load(std::memory_order_relaxed);
+  while (failures != 0)
+  {
+    if (pinnedReleaseFailures.compare_exchange_weak(failures, failures - 1, std::memory_order_relaxed))
+    {
+      return false;
+    }
+  }
+#endif
+  return cudaFreeHost(allocation) == cudaSuccess;
 }
 
 void copy2DToDeviceAsync(RuntimeContext *context, void *destination, const std::size_t destinationPitch,
@@ -882,6 +898,15 @@ void injectQpaFailures(RuntimeContext *context, const unsigned allocationFailure
   (void) context;
   (void) allocationFailureStep;
   (void) executionFailures;
+#endif
+}
+
+void injectPinnedReleaseFailures(const unsigned failures)
+{
+#if VTM_CUDA_TESTING
+  pinnedReleaseFailures.store(failures, std::memory_order_relaxed);
+#else
+  (void) failures;
 #endif
 }
 

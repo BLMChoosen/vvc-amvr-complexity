@@ -56,6 +56,7 @@ struct CudaSadStats;
 struct CudaQpaTask;
 struct CudaQpaResult;
 struct CudaQpaStats;
+struct CudaMirrorMemoryStats;
 }
 
 class EncLibCommon
@@ -106,6 +107,7 @@ public:
   bool                     computeQpaTasks(const void *sourceOwner, const vtm::CudaQpaTask *tasks,
                                            std::size_t taskCount, std::vector<vtm::CudaQpaResult> &results);
   vtm::CudaQpaStats        cudaQpaStats() const;
+  vtm::CudaMirrorMemoryStats cudaMirrorMemoryStats() const;
 #if JVET_AJ0151_DSC_SEI
   DscSubstreamManager*     getDscSubstreamManager() { return &m_dscSubstreamManager; }
 #endif

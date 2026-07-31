@@ -58,9 +58,9 @@ namespace
 vtm::CudaHostPictureDesc makeCudaPictureDesc(Picture &picture, const PictureType type, const BitDepths &bitDepths,
                                               const unsigned margin)
 {
-  CHECK(picture.chromaFormat != ChromaFormat::_420, "CUDA picture mirrors currently support only 4:2:0 pictures");
   PelUnitBuf buffer = picture.getBuf(picture, type);
-  CHECK(buffer.bufs.size() != vtm::CUDA_PICTURE_PLANE_COUNT, "CUDA picture mirror requires Y, Cb, and Cr planes");
+  CHECK(buffer.bufs.empty() || buffer.bufs.size() > vtm::CUDA_PICTURE_PLANE_COUNT,
+        "CUDA picture mirror has an invalid component count");
 
   vtm::CudaHostPictureDesc descriptor{};
   descriptor.planeCount = static_cast<std::uint8_t>(buffer.bufs.size());
@@ -249,6 +249,11 @@ bool EncLib::prepareQpaTasks(const void *sourceOwner)
 vtm::CudaQpaStats EncLib::cudaQpaStats() const
 {
   return m_encLibCommon->cudaQpaStats();
+}
+
+vtm::CudaMirrorMemoryStats EncLib::cudaMirrorMemoryStats() const
+{
+  return m_encLibCommon->cudaMirrorMemoryStats();
 }
 
 void EncLib::init(AUWriterIf *auWriterIf)
@@ -811,9 +816,12 @@ bool EncLib::encodePrep(bool flush, PelStorage *pcPicYuvOrg, const InputColourSp
     const SPS *sps = m_spsMap.getPS( pps->getSPSId() );
 
     picCurr->m_bufs[PIC_ORIGINAL].copyFrom( m_cGOPEncoder.getPicBg()->getRecoBuf() );
-    m_encLibCommon->bindPictureMirror(
-      picCurr, vtm::CudaPictureRole::Original,
-      makeCudaPictureDesc(*picCurr, PIC_ORIGINAL, sps->getBitDepths(), 0));
+    if (m_encLibCommon->isCudaBackendActive())
+    {
+      m_encLibCommon->bindPictureMirror(
+        picCurr, vtm::CudaPictureRole::Original,
+        makeCudaPictureDesc(*picCurr, PIC_ORIGINAL, sps->getBitDepths(), 0));
+    }
     picCurr->finalInit( m_vps, *sps, *pps, &m_picHeader, m_apss, m_lmcsAPS, m_scalinglistAPS );
     picCurr->poc = m_pocLast - 1;
     m_pocLast -= 2;
@@ -1047,9 +1055,12 @@ bool EncLib::encodePrep(bool flush, PelStorage *pcPicYuvOrg, const InputColourSp
       }
     }
 
-    m_encLibCommon->bindPictureMirror(
-      pcPicCurr, vtm::CudaPictureRole::Original,
-      makeCudaPictureDesc(*pcPicCurr, PIC_ORIGINAL, pSPS->getBitDepths(), 0));
+    if (m_encLibCommon->isCudaBackendActive())
+    {
+      m_encLibCommon->bindPictureMirror(
+        pcPicCurr, vtm::CudaPictureRole::Original,
+        makeCudaPictureDesc(*pcPicCurr, PIC_ORIGINAL, pSPS->getBitDepths(), 0));
+    }
 
     // fill PIC_TRUE_ORIGINAL_INPUT
     pcPicCurr->m_bufs[PIC_TRUE_ORIGINAL_INPUT].swap( *pcPicYuvOrg );
@@ -1189,9 +1200,12 @@ bool EncLib::encodePrep(bool flush, PelStorage *pcPicYuvOrg, const InputColourSp
       const PPS *pPPS = ( ppsID < 0 ) ? m_ppsMap.getFirstPS() : m_ppsMap.getPS( ppsID );
       const SPS *pSPS = m_spsMap.getPS( pPPS->getSPSId() );
 
-      m_encLibCommon->bindPictureMirror(
-        pcField, vtm::CudaPictureRole::Original,
-        makeCudaPictureDesc(*pcField, PIC_ORIGINAL, pSPS->getBitDepths(), 0));
+      if (m_encLibCommon->isCudaBackendActive())
+      {
+        m_encLibCommon->bindPictureMirror(
+          pcField, vtm::CudaPictureRole::Original,
+          makeCudaPictureDesc(*pcField, PIC_ORIGINAL, pSPS->getBitDepths(), 0));
+      }
 
       pcField->finalInit( m_vps, *pSPS, *pPPS, &m_picHeader, m_apss, m_lmcsAPS, m_scalinglistAPS );
       pcField->poc           = m_pocLast;

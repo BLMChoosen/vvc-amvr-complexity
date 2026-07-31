@@ -48,6 +48,7 @@
 #include "EncoderLib/EncLibCommon.h"
 #include "CommonLib/SEIPackedRegionsInfoProcess.h"
 #include "CudaBackend/CudaQpa.h"
+#include "CudaBackend/CudaPictureMirror.h"
 
 //! \ingroup EncoderApp
 //! \{
@@ -1979,6 +1980,7 @@ void EncApp::destroyLib()
   {
     const vtm::CudaSadStats sadStats = m_cEncLib.cudaSadStats();
     const vtm::CudaQpaStats qpaStats = m_cEncLib.cudaQpaStats();
+    const vtm::CudaMirrorMemoryStats mirrorStats = m_cEncLib.cudaMirrorMemoryStats();
     if (m_computeConfig.backend == vtm::ComputeBackend::CUDA)
     {
       msg(INFO, "\nCUDA SAD batches: %llu, failures: %llu, disabled: %d\n",
@@ -1990,6 +1992,33 @@ void EncApp::destroyLib()
           static_cast<unsigned long long>(qpaStats.failures),
           static_cast<unsigned long long>(qpaStats.fallbacks), qpaStats.enabled ? 1 : 0,
           qpaStats.poisoned ? 1 : 0, qpaStats.disabledByFlag ? 1 : 0);
+      msg(INFO, "CUDA mirror bytes device current/peak: %llu/%llu, pinned current/peak: %llu/%llu\n",
+          static_cast<unsigned long long>(mirrorStats.total.currentDeviceBytes),
+          static_cast<unsigned long long>(mirrorStats.total.peakDeviceBytes),
+          static_cast<unsigned long long>(mirrorStats.total.currentPinnedBytes),
+          static_cast<unsigned long long>(mirrorStats.total.peakPinnedBytes));
+      msg(INFO, "CUDA mirror transfers uploaded/downloaded: %llu/%llu bytes\n",
+          static_cast<unsigned long long>(mirrorStats.total.uploadedBytes),
+          static_cast<unsigned long long>(mirrorStats.total.downloadedBytes));
+      msg(INFO, "CUDA mirror budget: %llu bytes, rejections: %llu\n",
+          static_cast<unsigned long long>(mirrorStats.budgetBytes),
+          static_cast<unsigned long long>(mirrorStats.budgetRejections));
+      for (std::size_t role = 0; role < mirrorStats.byRoleAndPlane.size(); ++role)
+      {
+        for (std::size_t plane = 0; plane < mirrorStats.byRoleAndPlane[role].size(); ++plane)
+        {
+          const vtm::CudaMirrorMemoryUsage &usage = mirrorStats.byRoleAndPlane[role][plane];
+          if (usage.peakDeviceBytes != 0 || usage.peakPinnedBytes != 0)
+          {
+            msg(INFO, "CUDA mirror role=%s plane=%s device current/peak=%llu/%llu pinned current/peak=%llu/%llu\n",
+                role == 0 ? "original" : "reconstruction", plane == 0 ? "Y" : (plane == 1 ? "Cb" : "Cr"),
+                static_cast<unsigned long long>(usage.currentDeviceBytes),
+                static_cast<unsigned long long>(usage.peakDeviceBytes),
+                static_cast<unsigned long long>(usage.currentPinnedBytes),
+                static_cast<unsigned long long>(usage.peakPinnedBytes));
+          }
+        }
+      }
     }
     try
     {

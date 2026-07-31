@@ -91,12 +91,16 @@ struct CudaMirrorMemoryUsage
   std::uint64_t peakDeviceBytes;
   std::uint64_t currentPinnedBytes;
   std::uint64_t peakPinnedBytes;
+  std::uint64_t uploadedBytes;
+  std::uint64_t downloadedBytes;
 };
 
 struct CudaMirrorMemoryStats
 {
   CudaMirrorMemoryUsage total;
   std::array<std::array<CudaMirrorMemoryUsage, CUDA_PICTURE_PLANE_COUNT>, 2> byRoleAndPlane;
+  std::uint64_t budgetBytes;
+  std::uint64_t budgetRejections;
 };
 
 static_assert(std::is_standard_layout<CudaHostPlaneDesc>::value && std::is_trivial<CudaHostPlaneDesc>::value,

@@ -297,3 +297,8 @@ vtm::CudaQpaStats EncLibCommon::cudaQpaStats() const
              && !m_computeState->cudaContext.isQpaAccelerationAvailable(),
            !m_computeState->config.enableExperimentalQpa };
 }
+
+vtm::CudaMirrorMemoryStats EncLibCommon::cudaMirrorMemoryStats() const
+{
+  return m_computeState->cudaContext.pictureMirrorMemoryStats();
+}

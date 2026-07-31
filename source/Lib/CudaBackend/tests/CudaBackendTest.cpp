@@ -131,13 +131,15 @@ struct TestPicture
   vtm::CudaHostPictureDesc descriptor{};
 
   TestPicture(const std::uint32_t width, const std::uint32_t height, const std::uint8_t elementSize,
-              const std::uint8_t bitDepth, const std::uint8_t salt = 0)
+              const std::uint8_t bitDepth, const std::uint8_t salt = 0,
+              const std::uint8_t planeCount = vtm::CUDA_PICTURE_PLANE_COUNT,
+              const std::uint8_t chromaScaleX = 1, const std::uint8_t chromaScaleY = 1)
   {
-    descriptor.planeCount = vtm::CUDA_PICTURE_PLANE_COUNT;
-    for (std::size_t index = 0; index < planes.size(); ++index)
+    descriptor.planeCount = planeCount;
+    for (std::size_t index = 0; index < descriptor.planeCount; ++index)
     {
-      const std::uint32_t planeWidth = index == 0 ? width : (width + 1) / 2;
-      const std::uint32_t planeHeight = index == 0 ? height : (height + 1) / 2;
+      const std::uint32_t planeWidth = index == 0 ? width : (width + (1u << chromaScaleX) - 1) >> chromaScaleX;
+      const std::uint32_t planeHeight = index == 0 ? height : (height + (1u << chromaScaleY) - 1) >> chromaScaleY;
       const std::uint16_t horizontalMargin = index == 0 ? 3 : 1;
       const std::uint16_t verticalMargin = index == 0 ? 2 : 1;
       Plane &plane = planes[index];
@@ -171,8 +173,9 @@ struct TestPicture
 
   void clearTransferredBytes()
   {
-    for (Plane &plane : planes)
+    for (std::size_t index = 0; index < descriptor.planeCount; ++index)
     {
+      Plane &plane = planes[index];
       for (std::size_t row = 0; row < plane.fullHeight; ++row)
       {
         std::memset(plane.storage.data() + row * plane.stride, 0, plane.rowBytes);
@@ -182,7 +185,7 @@ struct TestPicture
 
   bool matchesExpected() const
   {
-    for (std::size_t index = 0; index < planes.size(); ++index)
+    for (std::size_t index = 0; index < descriptor.planeCount; ++index)
     {
       if (planes[index].storage != planes[index].expected)
       {
@@ -192,10 +195,21 @@ struct TestPicture
     return true;
   }
 
+  std::size_t pinnedBytes(const std::size_t plane) const
+  {
+    return planes[plane].rowBytes * planes[plane].fullHeight;
+  }
+
+  std::size_t deviceBytes(const std::size_t plane) const
+  {
+    const std::size_t pitch = (planes[plane].rowBytes + 127) & ~std::size_t(127);
+    return pitch * planes[plane].fullHeight;
+  }
+
 
   void fillSamples(const std::uint8_t salt)
   {
-    for (std::size_t planeIndex = 0; planeIndex < planes.size(); ++planeIndex)
+    for (std::size_t planeIndex = 0; planeIndex < descriptor.planeCount; ++planeIndex)
     {
       Plane &plane = planes[planeIndex];
       const vtm::CudaHostPlaneDesc &description = descriptor.planes[planeIndex];
@@ -224,6 +238,47 @@ struct TestPicture
   }
 };
 
+bool validatePictureDescriptorFormats()
+{
+  TestPicture monochrome(17, 11, 2, 10, 1, 1, 0, 0);
+  TestPicture yuv420(17, 11, 2, 10, 2, 3, 1, 1);
+  TestPicture yuv422(17, 11, 2, 10, 3, 3, 1, 0);
+  TestPicture yuv444(17, 11, 2, 10, 4, 3, 0, 0);
+  if (!vtm::CudaContext::isPictureMirrorDescriptorSupported(monochrome.descriptor)
+      || !vtm::CudaContext::isPictureMirrorDescriptorSupported(yuv420.descriptor)
+      || !vtm::CudaContext::isPictureMirrorDescriptorSupported(yuv422.descriptor)
+      || !vtm::CudaContext::isPictureMirrorDescriptorSupported(yuv444.descriptor))
+  {
+    return false;
+  }
+
+  vtm::CudaHostPictureDesc unsupported = yuv420.descriptor;
+  unsupported.planes[1].width = unsupported.planes[0].width;
+  unsupported.planes[2].width = unsupported.planes[0].width;
+  if (vtm::CudaContext::isPictureMirrorDescriptorSupported(unsupported))
+  {
+    return false;
+  }
+
+  vtm::CudaHostPictureDesc overflowing = monochrome.descriptor;
+  overflowing.planes[0].height = std::numeric_limits<std::uint32_t>::max();
+  overflowing.planes[0].strideBytes = std::numeric_limits<std::ptrdiff_t>::max();
+  overflowing.planes[0].marginTop = std::numeric_limits<std::uint16_t>::max();
+  if (vtm::CudaContext::isPictureMirrorDescriptorSupported(overflowing))
+  {
+    return false;
+  }
+
+  vtm::CudaHostPictureDesc underflowing = monochrome.descriptor;
+  underflowing.planes[0].data = reinterpret_cast<void *>(std::uintptr_t{ 1 });
+  underflowing.planes[0].marginLeft = 2;
+  if (vtm::CudaContext::isPictureMirrorDescriptorSupported(underflowing))
+  {
+    return false;
+  }
+  return true;
+}
+
 bool runSadBatchCase(vtm::CudaContext &context, const std::uint8_t elementSize, const std::uint8_t bitDepth,
                      const std::uint32_t blockWidth, const std::uint32_t blockHeight,
                      const std::uint8_t subShift)
@@ -238,6 +293,7 @@ bool runSadBatchCase(vtm::CudaContext &context, const std::uint8_t elementSize, 
     &sourceOwner, vtm::CudaPictureRole::Original, source.descriptor);
   const vtm::CudaMirrorHandle referenceMirror = context.registerPictureMirror(
     &referenceOwner, vtm::CudaPictureRole::Reconstruction, reference.descriptor);
+  const vtm::CudaMirrorMemoryStats memoryBefore = context.pictureMirrorMemoryStats();
 
   const auto &sourcePlane = source.descriptor.planes[0];
   const auto &referencePlane = reference.descriptor.planes[0];
@@ -268,6 +324,16 @@ bool runSadBatchCase(vtm::CudaContext &context, const std::uint8_t elementSize, 
   {
     return false;
   }
+  const vtm::CudaMirrorMemoryStats memoryAfter = context.pictureMirrorMemoryStats();
+  if (context.pictureMirrorAllocatedPlanes(sourceMirror) != vtm::CUDA_PLANE_Y
+      || context.pictureMirrorAllocatedPlanes(referenceMirror) != vtm::CUDA_PLANE_Y
+      || memoryAfter.byRoleAndPlane[0][1].uploadedBytes != memoryBefore.byRoleAndPlane[0][1].uploadedBytes
+      || memoryAfter.byRoleAndPlane[0][2].uploadedBytes != memoryBefore.byRoleAndPlane[0][2].uploadedBytes
+      || memoryAfter.byRoleAndPlane[1][1].uploadedBytes != memoryBefore.byRoleAndPlane[1][1].uploadedBytes
+      || memoryAfter.byRoleAndPlane[1][2].uploadedBytes != memoryBefore.byRoleAndPlane[1][2].uploadedBytes)
+  {
+    return false;
+  }
   if (context.distortionBatchDispatchCount() != dispatchesBefore + 1)
   {
     return false;
@@ -283,6 +349,8 @@ bool runSadBatchCase(vtm::CudaContext &context, const std::uint8_t elementSize, 
                                                 blockWidth, blockHeight, elementSize, bitDepth, subShift);
     if (results[candidate] != expected)
     {
+      std::cerr << "SAD mismatch candidate " << candidate << ": CUDA " << results[candidate]
+                << ", CPU " << expected << '\n';
       return false;
     }
   }
@@ -392,12 +460,20 @@ bool runQpaBatchCase(vtm::CudaContext &context, const std::uint8_t elementSize, 
   std::vector<vtm::CudaQpaResult> results(tasks.size());
   const std::uint64_t batchesBefore = context.qpaBatchDispatchCount();
   const std::uint64_t tasksBefore = context.qpaTaskCount();
+  const vtm::CudaMirrorMemoryStats memoryBefore = context.pictureMirrorMemoryStats();
   if (!context.computeQpaBatch(mirror, tasks.data(), static_cast<std::uint32_t>(tasks.size()), results.data())
       || context.qpaBatchDispatchCount() != batchesBefore + 1
       || context.qpaTaskCount() != tasksBefore + tasks.size())
   {
     std::cerr << "QPA dispatch failed for Pel" << unsigned(elementSize * 8) << '/' << unsigned(bitDepth)
               << "-bit\n";
+    return false;
+  }
+  const vtm::CudaMirrorMemoryStats memoryAfter = context.pictureMirrorMemoryStats();
+  if (context.pictureMirrorAllocatedPlanes(mirror) != vtm::CUDA_PLANE_Y
+      || memoryAfter.byRoleAndPlane[0][1].uploadedBytes != memoryBefore.byRoleAndPlane[0][1].uploadedBytes
+      || memoryAfter.byRoleAndPlane[0][2].uploadedBytes != memoryBefore.byRoleAndPlane[0][2].uploadedBytes)
+  {
     return false;
   }
   for (std::size_t index = 0; index < tasks.size(); ++index)
@@ -531,6 +607,19 @@ bool benchmarkQpaBatch(const int device)
 {
   vtm::CudaContext context;
   context.create(device);
+  TestPicture scratchWarmup(64, 64, 2, 10, 19);
+  scratchWarmup.fillSamples(19);
+  int warmupOwner = 0;
+  const auto warmupMirror = context.registerPictureMirror(
+    &warmupOwner, vtm::CudaPictureRole::Original, scratchWarmup.descriptor);
+  const std::vector<vtm::CudaQpaTask> warmupTasks = makeQpaTasks(64, 64, 64);
+  vtm::CudaQpaResult warmupResult{};
+  if (!context.computeQpaBatch(warmupMirror, warmupTasks.data(), 1, &warmupResult))
+  {
+    return false;
+  }
+  context.releasePictureMirror(warmupMirror);
+
   TestPicture picture(512, 512, 2, 10, 73);
   picture.fillSamples(73);
   int owner = 0;
@@ -572,13 +661,35 @@ bool benchmarkQpaBatch(const int device)
   const double coldGpuMilliseconds = std::chrono::duration<double, std::milli>(coldEnd - coldStart).count();
   const double cpuMilliseconds = std::chrono::duration<double, std::milli>(cpuEnd - cpuStart).count()
                                  / cpuIterations;
-  std::cout << "QPA microbenchmark 64 CTUs x 64x64 Pel16/10-bit: cold CUDA " << coldGpuMilliseconds
-            << " ms (scratch + ensureDevice/upload + compute), warm CPU " << cpuMilliseconds
+  std::cout << "QPA microbenchmark 64 CTUs x 64x64 Pel16/10-bit: new-mirror CUDA " << coldGpuMilliseconds
+            << " ms (scratch warm; lazy Y allocation + upload + compute), warm CPU " << cpuMilliseconds
             << " ms/batch, warm CUDA " << gpuMilliseconds << " ms/batch, warm-compute ratio "
             << (cpuMilliseconds / gpuMilliseconds) << "x, checksum " << checksum << '\n';
   context.releasePictureMirrors(&owner);
+
+  bool memoryExact = true;
+  for (const auto dimensions : { std::make_pair(1920u, 1080u), std::make_pair(3840u, 2160u) })
+  {
+    TestPicture measured(dimensions.first, dimensions.second, 2, 10, 7);
+    int measuredOwner = 0;
+    const auto measuredMirror = context.registerPictureMirror(
+      &measuredOwner, vtm::CudaPictureRole::Original, measured.descriptor);
+    const vtm::CudaMirrorMemoryStats before = context.pictureMirrorMemoryStats();
+    context.ensureDevicePlane(measuredMirror, 0);
+    const vtm::CudaMirrorMemoryStats after = context.pictureMirrorMemoryStats();
+    const std::uint64_t measuredDevice = after.total.currentDeviceBytes - before.total.currentDeviceBytes;
+    const std::uint64_t measuredPinned = after.total.currentPinnedBytes - before.total.currentPinnedBytes;
+    const std::uint64_t expectedDevice = measured.deviceBytes(0);
+    const std::uint64_t expectedPinned = measured.pinnedBytes(0);
+    memoryExact = memoryExact && measuredDevice == expectedDevice && measuredPinned == expectedPinned
+                  && context.pictureMirrorAllocatedPlanes(measuredMirror) == vtm::CUDA_PLANE_Y;
+    std::cout << "QPA luma-only mirror " << dimensions.first << 'x' << dimensions.second
+              << ": measured/estimated device " << measuredDevice << '/' << expectedDevice
+              << " bytes, pinned " << measuredPinned << '/' << expectedPinned << " bytes\n";
+    context.releasePictureMirror(measuredMirror);
+  }
   context.shutdown();
-  return gpuMilliseconds > 0.0;
+  return gpuMilliseconds > 0.0 && memoryExact;
 }
 
 #if VTM_CUDA_TESTING
@@ -708,6 +819,152 @@ bool runRecoveryIsolationCase(const int device, const bool failQpaFirst)
   context.shutdown();
   return true;
 }
+
+bool runMirrorPlaneFailureCase(vtm::CudaContext &context, const unsigned allocationFailureStep,
+                               const unsigned uploadFailures, const unsigned downloadFailures)
+{
+  TestPicture picture(63, 47, 4, 10, 31);
+  int owner = 0;
+  const auto mirror = context.registerPictureMirror(&owner, vtm::CudaPictureRole::Reconstruction,
+                                                     picture.descriptor);
+  const vtm::CudaMirrorMemoryStats before = context.pictureMirrorMemoryStats();
+  if (allocationFailureStep != 0 || uploadFailures != 0)
+  {
+    context.injectMirrorPlaneFailuresForTesting(1, allocationFailureStep, uploadFailures, 0);
+    if (!throws([&context, mirror]() { context.ensureDevicePlane(mirror, 1); }))
+    {
+      return false;
+    }
+    const vtm::CudaMirrorMemoryStats failed = context.pictureMirrorMemoryStats();
+    if (allocationFailureStep != 0)
+    {
+      if (context.pictureMirrorAllocatedPlanes(mirror) != 0
+          || failed.total.currentDeviceBytes != before.total.currentDeviceBytes
+          || failed.total.currentPinnedBytes != before.total.currentPinnedBytes)
+      {
+        return false;
+      }
+    }
+    else if (context.pictureMirrorAllocatedPlanes(mirror) != vtm::CUDA_PLANE_CB
+             || context.pictureMirrorPlaneState(mirror, 1) != vtm::CudaMirrorState::HostValid
+             || failed.byRoleAndPlane[1][1].uploadedBytes != before.byRoleAndPlane[1][1].uploadedBytes)
+    {
+      return false;
+    }
+  }
+
+  context.ensureDevicePlane(mirror, 1);
+  if (downloadFailures != 0)
+  {
+    context.markDevicePlaneModified(mirror, 1);
+    for (std::size_t row = 0; row < picture.planes[1].fullHeight; ++row)
+    {
+      std::memset(picture.planes[1].storage.data() + row * picture.planes[1].stride, 0,
+                  picture.planes[1].rowBytes);
+    }
+    context.injectMirrorPlaneFailuresForTesting(1, 0, 0, downloadFailures);
+    if (!throws([&context, mirror]() { context.ensureHostPlane(mirror, 1); })
+        || context.pictureMirrorPlaneState(mirror, 1) != vtm::CudaMirrorState::DeviceValid)
+    {
+      return false;
+    }
+    context.ensureHostPlane(mirror, 1);
+    if (picture.planes[1].storage != picture.planes[1].expected)
+    {
+      return false;
+    }
+  }
+  context.releasePictureMirror(mirror);
+  const vtm::CudaMirrorMemoryStats after = context.pictureMirrorMemoryStats();
+  return after.total.currentDeviceBytes == before.total.currentDeviceBytes
+         && after.total.currentPinnedBytes == before.total.currentPinnedBytes;
+}
+
+bool runMultiPlaneTransactionFailureCase(vtm::CudaContext &context, const std::uint8_t failurePlane)
+{
+  TestPicture picture(71, 53, 2, 10, static_cast<std::uint8_t>(41 + failurePlane));
+  int owner = 0;
+  const auto mirror = context.registerPictureMirror(&owner, vtm::CudaPictureRole::Reconstruction,
+                                                     picture.descriptor);
+  const auto beforeAllocation = context.pictureMirrorMemoryStats();
+  context.injectMirrorPlaneFailuresForTesting(failurePlane, 2, 0, 0);
+  if (!throws([&context, mirror]() { context.ensureDevice(mirror); }))
+  {
+    return false;
+  }
+  const auto afterAllocationFailure = context.pictureMirrorMemoryStats();
+  for (std::uint8_t index = 0; index < picture.descriptor.planeCount; ++index)
+  {
+    if (context.pictureMirrorPlaneState(mirror, index) != vtm::CudaMirrorState::HostValid)
+    {
+      return false;
+    }
+  }
+  if (afterAllocationFailure.total.uploadedBytes != beforeAllocation.total.uploadedBytes)
+  {
+    return false;
+  }
+  context.ensureDevice(mirror);
+
+  context.markHostModified(mirror);
+  context.injectMirrorPlaneFailuresForTesting(failurePlane, 0, 1, 0);
+  if (!throws([&context, mirror]() { context.ensureDevice(mirror); }))
+  {
+    return false;
+  }
+  vtm::CudaPlaneMask completedUpload = 0;
+  for (std::uint8_t index = 0; index < failurePlane; ++index)
+  {
+    completedUpload |= static_cast<vtm::CudaPlaneMask>(vtm::CudaPlaneMask{ 1 } << index);
+    if (context.pictureMirrorPlaneState(mirror, index) != vtm::CudaMirrorState::Synchronized)
+    {
+      return false;
+    }
+  }
+  if (completedUpload != 0)
+  {
+    const auto consumer = context.devicePicturePlanes(mirror, completedUpload);
+    if (consumer.planes[0].data == nullptr)
+    {
+      return false;
+    }
+  }
+  for (std::uint8_t index = failurePlane; index < picture.descriptor.planeCount; ++index)
+  {
+    if (context.pictureMirrorPlaneState(mirror, index) != vtm::CudaMirrorState::HostValid)
+    {
+      return false;
+    }
+  }
+  context.ensureDevice(mirror);
+
+  picture.clearTransferredBytes();
+  context.markDeviceModified(mirror);
+  context.injectMirrorPlaneFailuresForTesting(failurePlane, 0, 0, 1);
+  if (!throws([&context, mirror]() { context.ensureHost(mirror); }))
+  {
+    return false;
+  }
+  for (std::uint8_t index = 0; index < failurePlane; ++index)
+  {
+    if (context.pictureMirrorPlaneState(mirror, index) != vtm::CudaMirrorState::Synchronized
+        || picture.planes[index].storage != picture.planes[index].expected)
+    {
+      return false;
+    }
+  }
+  for (std::uint8_t index = failurePlane; index < picture.descriptor.planeCount; ++index)
+  {
+    if (context.pictureMirrorPlaneState(mirror, index) != vtm::CudaMirrorState::DeviceValid)
+    {
+      return false;
+    }
+  }
+  context.ensureHost(mirror);
+  const bool matches = picture.matchesExpected();
+  context.releasePictureMirror(mirror);
+  return matches;
+}
 #endif
 
 }   // namespace
@@ -733,6 +990,10 @@ int main(const int argc, char *argv[])
   if (vtm::parseComputeBackend("invalid", backend))
   {
     return fail("Invalid backend was accepted");
+  }
+  if (!validatePictureDescriptorFormats())
+  {
+    return fail("CUDA-free picture descriptor validation rejected 400/420/422/444 or accepted overflow");
   }
 
   if (argc == 1)
@@ -847,6 +1108,56 @@ int main(const int argc, char *argv[])
     {
       return fail("Pinned allocation reset did not release ownership");
     }
+#if VTM_CUDA_TESTING
+    pinned.allocate(256);
+    context.injectPinnedReleaseFailuresForTesting(1);
+    if (pinned.reset() || !pinned || pinned.size() != 256 || !pinned.reset() || pinned)
+    {
+      return fail("CUDA pinned release failure did not retain ownership for retry");
+    }
+#endif
+
+    const auto roundTripFormat = [&context](TestPicture &formatPicture) {
+      const auto handle = context.registerPictureMirror(&formatPicture, vtm::CudaPictureRole::Original,
+                                                        formatPicture.descriptor);
+      context.ensureDevice(handle);
+      if (context.pictureMirrorAllocatedPlanes(handle)
+          != static_cast<vtm::CudaPlaneMask>((vtm::CudaPlaneMask{ 1 } << formatPicture.descriptor.planeCount) - 1)
+          || context.devicePicture(handle).planeCount != formatPicture.descriptor.planeCount)
+      {
+        return false;
+      }
+      formatPicture.clearTransferredBytes();
+      context.markDeviceModified(handle);
+      context.ensureHost(handle);
+      const bool matches = formatPicture.matchesExpected();
+      context.releasePictureMirror(handle);
+      return matches;
+    };
+    TestPicture runtime400(19, 13, 2, 10, 5, 1, 0, 0);
+    TestPicture runtime422(19, 13, 2, 10, 6, 3, 1, 0);
+    TestPicture runtime444(19, 13, 4, 10, 7, 3, 0, 0);
+    if (!roundTripFormat(runtime400) || !roundTripFormat(runtime422) || !roundTripFormat(runtime444))
+    {
+      return fail("CUDA picture mirrors failed 400/422/444 full-picture round-trip");
+    }
+
+    TestPicture budgetPicture(64, 64, 2, 10, 8);
+    const auto budgetMirror = context.registerPictureMirror(&budgetPicture, vtm::CudaPictureRole::Original,
+                                                            budgetPicture.descriptor);
+    const std::uint64_t requiredLumaBytes = budgetPicture.deviceBytes(0) + budgetPicture.pinnedBytes(0);
+    context.setPictureMirrorMemoryBudget(requiredLumaBytes - 1);
+    const std::uint64_t budgetRejections = context.pictureMirrorMemoryStats().budgetRejections;
+    if (!throws([&context, budgetMirror]() { context.ensureDevicePlane(budgetMirror, 0); })
+        || context.pictureMirrorAllocatedPlanes(budgetMirror) != 0
+        || context.pictureMirrorMemoryStats().total.currentDeviceBytes != 0
+        || context.pictureMirrorMemoryStats().total.currentPinnedBytes != 0
+        || context.pictureMirrorMemoryStats().budgetRejections != budgetRejections + 1)
+    {
+      return fail("CUDA mirror memory budget did not reject before allocation");
+    }
+    context.releasePictureMirror(budgetMirror);
+    context.setPictureMirrorMemoryBudget(vtm::CUDA_DEFAULT_MIRROR_MEMORY_BUDGET_BYTES);
 
     TestPicture picture8(7, 5, 2, 8);
     TestPicture picture10(16, 10, 2, 10);
@@ -882,6 +1193,44 @@ int main(const int argc, char *argv[])
     {
       return fail("Duplicate CUDA picture mirror registration was accepted");
     }
+
+    const vtm::CudaMirrorMemoryStats registeredMemory = context.pictureMirrorMemoryStats();
+    if (registeredMemory.total.currentDeviceBytes != 0 || registeredMemory.total.currentPinnedBytes != 0
+        || context.pictureMirrorAllocatedPlanes(mirror8) != 0)
+    {
+      return fail("CUDA picture registration eagerly allocated mirror planes");
+    }
+    context.ensureDevicePlane(mirror8, 0);
+    const vtm::CudaMirrorMemoryStats lumaMemory = context.pictureMirrorMemoryStats();
+    const vtm::CudaDevicePictureDesc lumaDevice = context.devicePicturePlanes(mirror8, vtm::CUDA_PLANE_Y);
+    if (context.pictureMirrorAllocatedPlanes(mirror8) != vtm::CUDA_PLANE_Y
+        || context.pictureMirrorState(mirror8) != vtm::CudaMirrorState::Mixed
+        || context.pictureMirrorPlaneState(mirror8, 0) != vtm::CudaMirrorState::Synchronized
+        || context.pictureMirrorPlaneState(mirror8, 1) != vtm::CudaMirrorState::HostValid
+        || lumaDevice.planes[0].data == nullptr || lumaDevice.planes[1].data != nullptr
+        || lumaDevice.planes[2].data != nullptr || !throws([&context, mirror8]() { (void) context.devicePicture(mirror8); })
+        || lumaMemory.total.currentDeviceBytes != picture8.deviceBytes(0)
+        || lumaMemory.total.currentPinnedBytes != picture8.pinnedBytes(0)
+        || lumaMemory.byRoleAndPlane[1][1].uploadedBytes != 0
+        || lumaMemory.byRoleAndPlane[1][2].uploadedBytes != 0)
+    {
+      return fail("Luma-only CUDA mirror allocation/state/telemetry is invalid");
+    }
+    context.ensureDevicePlane(mirror8, 1);
+    for (std::size_t row = 0; row < picture8.planes[1].fullHeight; ++row)
+    {
+      std::memset(picture8.planes[1].storage.data() + row * picture8.planes[1].stride, 0,
+                  picture8.planes[1].rowBytes);
+    }
+    context.markDevicePlaneModified(mirror8, 1);
+    context.ensureHostPlane(mirror8, 1);
+    if (picture8.planes[1].storage != picture8.planes[1].expected
+        || context.pictureMirrorAllocatedPlanes(mirror8) != (vtm::CUDA_PLANE_Y | vtm::CUDA_PLANE_CB)
+        || context.pictureMirrorPlaneState(mirror8, 2) != vtm::CudaMirrorState::HostValid)
+    {
+      return fail("Lazy chroma allocation or per-plane round-trip did not preserve data");
+    }
+    context.ensureDevicePlane(mirror8, 2);
 
     for (const vtm::CudaMirrorHandle mirror : { mirror8, mirror10, mirror8Wide, mirror10Wide })
     {
@@ -973,6 +1322,35 @@ int main(const int argc, char *argv[])
       return fail("Owner-based CUDA picture mirror release left registry entries");
     }
 
+    TestPicture lazyRebind16(33, 31, 2, 10, 11);
+    TestPicture lazyRebind32(35, 29, 4, 10, 23);
+    int lazyOwner = 0;
+    const vtm::CudaMirrorHandle lazyMirror = context.registerPictureMirror(
+      &lazyOwner, vtm::CudaPictureRole::Original, lazyRebind16.descriptor);
+    context.ensureDevicePlane(lazyMirror, 0);
+    context.rebindHostPicture(lazyMirror, lazyRebind32.descriptor);
+    if (context.pictureMirrorAllocatedPlanes(lazyMirror) != vtm::CUDA_PLANE_Y
+        || context.pictureMirrorPlaneState(lazyMirror, 0) != vtm::CudaMirrorState::HostValid)
+    {
+      return fail("CUDA lazy mirror resize/element-size rebind did not preserve the requested plane set");
+    }
+    context.ensureDevicePlane(lazyMirror, 0);
+    if (context.devicePicturePlanes(lazyMirror, vtm::CUDA_PLANE_Y).planes[0].elementSize != 4)
+    {
+      return fail("CUDA lazy mirror rebind retained the old element size");
+    }
+    context.ensureDevicePlane(lazyMirror, 1);
+    if (context.pictureMirrorAllocatedPlanes(lazyMirror) != (vtm::CUDA_PLANE_Y | vtm::CUDA_PLANE_CB))
+    {
+      return fail("CUDA chroma allocation after a luma-only rebind is invalid");
+    }
+    context.releasePictureMirror(lazyMirror);
+    if (context.pictureMirrorMemoryStats().total.currentDeviceBytes != 0
+        || context.pictureMirrorMemoryStats().total.currentPinnedBytes != 0)
+    {
+      return fail("CUDA mirror release did not return current memory telemetry to zero");
+    }
+
     if (!runSadBatchCase(context, 2, 8, 4, 4, 0)
         || !runSadBatchCase(context, 2, 10, 16, 12, 1)
         || !runSadBatchCase(context, 4, 8, 32, 24, 2)
@@ -1006,6 +1384,19 @@ int main(const int argc, char *argv[])
     {
       return fail("CUDA QPA and SAD failure recovery are not isolated");
     }
+    if (!runMirrorPlaneFailureCase(context, 1, 0, 0)
+        || !runMirrorPlaneFailureCase(context, 2, 0, 0)
+        || !runMirrorPlaneFailureCase(context, 3, 0, 0)
+        || !runMirrorPlaneFailureCase(context, 0, 1, 0)
+        || !runMirrorPlaneFailureCase(context, 0, 0, 1))
+    {
+      return fail("CUDA per-plane mirror failure rollback or retry is invalid");
+    }
+    if (!runMultiPlaneTransactionFailureCase(context, 1)
+        || !runMultiPlaneTransactionFailureCase(context, 2))
+    {
+      return fail("CUDA multi-plane mirror transfer failure was partially published without synchronization");
+    }
 #endif
     if (runBenchmark && (!benchmarkSadBatch(context) || !benchmarkQpaBatch(std::stoi(argv[2]))))
     {
@@ -1015,10 +1406,12 @@ int main(const int argc, char *argv[])
 #if VTM_CUDA_TESTING
     TestPicture fallbackPicture(10, 8, 2, 10, 17);
     int fallbackOwner = 0;
-    context.registerPictureMirror(
+    const vtm::CudaMirrorHandle fallbackOriginal = context.registerPictureMirror(
       &fallbackOwner, vtm::CudaPictureRole::Original, fallbackPicture.descriptor);
-    context.registerPictureMirror(
+    const vtm::CudaMirrorHandle fallbackReconstruction = context.registerPictureMirror(
       &fallbackOwner, vtm::CudaPictureRole::Reconstruction, fallbackPicture.descriptor);
+    context.ensureDevice(fallbackOriginal);
+    context.ensureDevice(fallbackReconstruction);
     context.injectReleaseFailuresForTesting(6, 0);
     if (!throws([&context, &fallbackOwner]() { context.releasePictureMirrors(&fallbackOwner); })
         || context.pictureMirrorCount() != 0)
@@ -1028,6 +1421,7 @@ int main(const int argc, char *argv[])
 
     const vtm::CudaMirrorHandle retryHandle = context.registerPictureMirror(
       &fallbackOwner, vtm::CudaPictureRole::Reconstruction, fallbackPicture.descriptor);
+    context.ensureDevicePlane(retryHandle, 0);
     context.injectReleaseFailuresForTesting(1, 1);
     if (!throws([&context, retryHandle]() { context.releasePictureMirror(retryHandle); })
         || context.pictureMirrorCount() != 1
@@ -1040,6 +1434,50 @@ int main(const int argc, char *argv[])
     {
       return fail("Retained CUDA allocation could not be released on retry");
     }
+
+    const vtm::CudaMirrorMemoryStats beforePinnedFailure = context.pictureMirrorMemoryStats();
+    const vtm::CudaMirrorHandle pinnedFailureHandle = context.registerPictureMirror(
+      &fallbackOwner, vtm::CudaPictureRole::Reconstruction, fallbackPicture.descriptor);
+    context.ensureDevicePlane(pinnedFailureHandle, 0);
+    const std::uint64_t retainedPinnedBytes = context.pictureMirrorMemoryStats().total.currentPinnedBytes
+                                              - beforePinnedFailure.total.currentPinnedBytes;
+    context.injectPinnedReleaseFailuresForTesting(1);
+    if (!throws([&context, pinnedFailureHandle]() { context.releasePictureMirror(pinnedFailureHandle); })
+        || context.pictureMirrorCount() != 1
+        || !context.hasPictureMirror(&fallbackOwner, vtm::CudaPictureRole::Reconstruction)
+        || context.pictureMirrorMemoryStats().total.currentPinnedBytes
+             != beforePinnedFailure.total.currentPinnedBytes + retainedPinnedBytes)
+    {
+      return fail("CUDA pinned mirror release failure lost ownership or accounting");
+    }
+    context.releasePictureMirror(pinnedFailureHandle);
+    if (context.pictureMirrorCount() != 0
+        || context.pictureMirrorMemoryStats().total.currentPinnedBytes
+             != beforePinnedFailure.total.currentPinnedBytes)
+    {
+      return fail("CUDA retained pinned mirror allocation could not be released on retry");
+    }
+
+    TestPicture rebindFailurePicture(21, 17, 2, 10, 13);
+    TestPicture rebindFailureResized(25, 19, 4, 10, 29);
+    const vtm::CudaMirrorHandle rebindFailureHandle = context.registerPictureMirror(
+      &fallbackOwner, vtm::CudaPictureRole::Original, rebindFailurePicture.descriptor);
+    context.ensureDevicePlane(rebindFailureHandle, 0);
+    context.injectReleaseFailuresForTesting(1, 1);
+    if (!throws([&context, rebindFailureHandle, &rebindFailureResized]() {
+          context.rebindHostPicture(rebindFailureHandle, rebindFailureResized.descriptor);
+        })
+        || context.pictureMirrorAllocatedPlanes(rebindFailureHandle) != vtm::CUDA_PLANE_Y)
+    {
+      return fail("CUDA mirror rebind lost per-plane ownership after release failures");
+    }
+    context.rebindHostPicture(rebindFailureHandle, rebindFailureResized.descriptor);
+    context.ensureDevicePlane(rebindFailureHandle, 0);
+    if (context.devicePicturePlanes(rebindFailureHandle, vtm::CUDA_PLANE_Y).planes[0].width != 25)
+    {
+      return fail("CUDA mirror rebind could not recover after retained-plane release retry");
+    }
+    context.releasePictureMirror(rebindFailureHandle);
 #endif
 
     void *allocation = context.allocateDevice(4096, vtm::CudaQueue::Upload);

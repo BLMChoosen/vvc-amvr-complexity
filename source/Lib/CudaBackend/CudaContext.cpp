@@ -68,7 +68,10 @@ CudaPinnedBuffer::CudaPinnedBuffer(const std::size_t bytes) : CudaPinnedBuffer()
 
 CudaPinnedBuffer::~CudaPinnedBuffer() noexcept
 {
-  reset();
+  if (!reset())
+  {
+    (void) reset();
+  }
 }
 
 CudaPinnedBuffer::CudaPinnedBuffer(CudaPinnedBuffer &&other) noexcept = default;
@@ -77,8 +80,10 @@ CudaPinnedBuffer &CudaPinnedBuffer::operator=(CudaPinnedBuffer &&other) noexcept
 {
   if (this != &other)
   {
-    reset();
-    m_impl = std::move(other.m_impl);
+    if (reset())
+    {
+      m_impl = std::move(other.m_impl);
+    }
   }
   return *this;
 }
@@ -96,7 +101,11 @@ void CudaPinnedBuffer::allocate(const std::size_t bytes)
     replacement.reset(new Impl);
   }
   void *allocation = cuda_backend::allocatePinnedHost(bytes);
-  reset();
+  if (!reset())
+  {
+    (void) cuda_backend::releasePinnedHost(allocation);
+    throw std::runtime_error("CUDA pinned buffer replacement could not release its previous allocation");
+  }
   if (replacement)
   {
     m_impl = std::move(replacement);
@@ -109,17 +118,21 @@ void CudaPinnedBuffer::allocate(const std::size_t bytes)
 #endif
 }
 
-void CudaPinnedBuffer::reset() noexcept
+bool CudaPinnedBuffer::reset() noexcept
 {
   if (!m_impl)
   {
-    return;
+    return true;
   }
 #if VTM_ENABLE_CUDA
-  cuda_backend::releasePinnedHost(m_impl->allocation);
+  if (!cuda_backend::releasePinnedHost(m_impl->allocation))
+  {
+    return false;
+  }
 #endif
   m_impl->allocation = nullptr;
   m_impl->bytes      = 0;
+  return true;
 }
 
 void *CudaPinnedBuffer::data() noexcept
@@ -167,6 +180,7 @@ struct PictureMirrorPlane
   std::size_t          deviceBytes = 0;
   std::size_t          pinnedBytes = 0;
   bool                 uploadPending = false;
+  bool                 downloadPending = false;
   bool                 requested = false;
 };
 
@@ -215,6 +229,85 @@ void requireOwnerThread(const std::thread::id &ownerThread)
   }
 }
 
+bool isPlaneDescriptorSupported(const CudaHostPlaneDesc &plane) noexcept
+{
+  if (plane.data == nullptr || plane.width == 0 || plane.height == 0 || plane.strideBytes <= 0
+      || (plane.elementSize != 1 && plane.elementSize != 2 && plane.elementSize != 4)
+      || (plane.bitDepth != 8 && plane.bitDepth != 10) || plane.bitDepth > plane.elementSize * 8)
+  {
+    return false;
+  }
+
+  const std::uint64_t fullWidth = static_cast<std::uint64_t>(plane.marginLeft) + plane.width + plane.marginRight;
+  const std::uint64_t fullHeight = static_cast<std::uint64_t>(plane.marginTop) + plane.height + plane.marginBottom;
+  if (fullWidth > std::numeric_limits<std::uint64_t>::max() / plane.elementSize)
+  {
+    return false;
+  }
+  const std::uint64_t rowBytes = fullWidth * plane.elementSize;
+  const std::uint64_t stride = static_cast<std::uint64_t>(plane.strideBytes);
+  if (rowBytes > stride || fullHeight == 0)
+  {
+    return false;
+  }
+  const std::uint64_t lastRow = fullHeight - 1;
+  if (lastRow > static_cast<std::uint64_t>(std::numeric_limits<std::ptrdiff_t>::max()) / stride)
+  {
+    return false;
+  }
+  const std::uint64_t lastRowOffset = lastRow * stride;
+  if (rowBytes > static_cast<std::uint64_t>(std::numeric_limits<std::ptrdiff_t>::max()) - lastRowOffset)
+  {
+    return false;
+  }
+  if (plane.marginTop != 0
+      && stride > std::numeric_limits<std::uint64_t>::max() / plane.marginTop)
+  {
+    return false;
+  }
+  const std::uint64_t topOffset = static_cast<std::uint64_t>(plane.marginTop) * stride;
+  const std::uint64_t leftOffset = static_cast<std::uint64_t>(plane.marginLeft) * plane.elementSize;
+  if (leftOffset > std::numeric_limits<std::uint64_t>::max() - topOffset)
+  {
+    return false;
+  }
+  const std::uint64_t prefix = topOffset + leftOffset;
+  return prefix <= reinterpret_cast<std::uintptr_t>(plane.data);
+}
+
+bool isPictureDescriptorSupported(const CudaHostPictureDesc &picture) noexcept
+{
+  if (picture.planeCount != 1 && picture.planeCount != CUDA_PICTURE_PLANE_COUNT)
+  {
+    return false;
+  }
+  for (std::size_t index = 0; index < picture.planeCount; ++index)
+  {
+    if (!isPlaneDescriptorSupported(picture.planes[index]))
+    {
+      return false;
+    }
+  }
+  if (picture.planeCount == 1)
+  {
+    return true;
+  }
+
+  const CudaHostPlaneDesc &luma = picture.planes[0];
+  const CudaHostPlaneDesc &cb = picture.planes[1];
+  const CudaHostPlaneDesc &cr = picture.planes[2];
+  if (cb.width != cr.width || cb.height != cr.height)
+  {
+    return false;
+  }
+  const std::uint32_t halfWidth = (luma.width >> 1) + (luma.width & 1);
+  const std::uint32_t halfHeight = (luma.height >> 1) + (luma.height & 1);
+  const bool is420 = cb.width == halfWidth && cb.height == halfHeight;
+  const bool is422 = cb.width == halfWidth && cb.height == luma.height;
+  const bool is444 = cb.width == luma.width && cb.height == luma.height;
+  return is420 || is422 || is444;
+}
+
 #if VTM_ENABLE_CUDA
 
 std::atomic<std::uint32_t> nextContextGeneration{ 1 };
@@ -249,53 +342,9 @@ std::size_t checkedMultiply(const std::size_t first, const std::size_t second, c
 
 void validatePicture(const CudaHostPictureDesc &picture)
 {
-  if (picture.planeCount != CUDA_PICTURE_PLANE_COUNT)
+  if (!isPictureDescriptorSupported(picture))
   {
-    throw std::runtime_error("CUDA picture mirrors require Y, Cb, and Cr planes");
-  }
-
-  for (std::size_t index = 0; index < picture.planeCount; ++index)
-  {
-    const CudaHostPlaneDesc &plane = picture.planes[index];
-    if (plane.data == nullptr || plane.width == 0 || plane.height == 0)
-    {
-      throw std::runtime_error("CUDA picture plane has no active host storage");
-    }
-    if (plane.elementSize != 1 && plane.elementSize != 2 && plane.elementSize != 4)
-    {
-      throw std::runtime_error("CUDA picture plane element size must be one, two, or four bytes");
-    }
-    if (plane.bitDepth != 8 && plane.bitDepth != 10)
-    {
-      throw std::runtime_error("CUDA picture mirrors currently support only 8-bit and 10-bit samples");
-    }
-    if (plane.bitDepth > plane.elementSize * 8)
-    {
-      throw std::runtime_error("CUDA picture plane element size cannot represent its bit depth");
-    }
-    if (plane.strideBytes <= 0)
-    {
-      throw std::runtime_error("CUDA picture plane stride must be positive");
-    }
-
-    const std::size_t fullWidth = checkedAdd(
-      checkedAdd(plane.marginLeft, plane.width, "width"), plane.marginRight, "width");
-    const std::size_t rowBytes = checkedMultiply(fullWidth, plane.elementSize, "row size");
-    if (rowBytes > static_cast<std::size_t>(plane.strideBytes))
-    {
-      throw std::runtime_error("CUDA picture plane including margins exceeds its host stride");
-    }
-    (void) checkedAdd(checkedAdd(plane.marginTop, plane.height, "height"), plane.marginBottom, "height");
-  }
-
-  const CudaHostPlaneDesc &luma = picture.planes[0];
-  for (std::size_t index = 1; index < picture.planeCount; ++index)
-  {
-    const CudaHostPlaneDesc &chroma = picture.planes[index];
-    if (chroma.width != (luma.width + 1) / 2 || chroma.height != (luma.height + 1) / 2)
-    {
-      throw std::runtime_error("CUDA picture mirrors currently require 4:2:0 plane dimensions");
-    }
+    throw std::runtime_error("CUDA picture mirror descriptor or chroma geometry is unsupported");
   }
 }
 
@@ -320,8 +369,10 @@ const void *mapHostBlock(const PictureMirror &mirror, const std::uint8_t planeIn
 
   const CudaHostPlaneDesc &host = mirror.host.planes[planeIndex];
   const auto activeAddress = reinterpret_cast<std::uintptr_t>(host.data);
-  const std::size_t activePrefix = static_cast<std::size_t>(host.marginTop) * host.strideBytes
-                                   + static_cast<std::size_t>(host.marginLeft) * host.elementSize;
+  const std::size_t stride = static_cast<std::size_t>(host.strideBytes);
+  const std::size_t activePrefix = checkedAdd(
+    checkedMultiply(host.marginTop, stride, "active row prefix"),
+    checkedMultiply(host.marginLeft, host.elementSize, "active column prefix"), "active prefix");
   if (activePrefix > activeAddress)
   {
     throw std::runtime_error("CUDA distortion mirror host address underflows");
@@ -334,15 +385,17 @@ const void *mapHostBlock(const PictureMirror &mirror, const std::uint8_t planeIn
   }
 
   const std::size_t offset = static_cast<std::size_t>(pointerAddress - baseAddress);
-  const std::size_t row = offset / static_cast<std::size_t>(host.strideBytes);
-  const std::size_t columnBytes = offset % static_cast<std::size_t>(host.strideBytes);
+  const std::size_t row = offset / stride;
+  const std::size_t columnBytes = offset % stride;
   if (columnBytes % host.elementSize != 0)
   {
     throw std::runtime_error("CUDA distortion block is not sample aligned");
   }
   const std::size_t column = columnBytes / host.elementSize;
-  const std::size_t fullWidth = static_cast<std::size_t>(host.marginLeft) + host.width + host.marginRight;
-  const std::size_t fullHeight = static_cast<std::size_t>(host.marginTop) + host.height + host.marginBottom;
+  const std::size_t fullWidth = checkedAdd(checkedAdd(host.marginLeft, host.width, "width"),
+                                           host.marginRight, "width");
+  const std::size_t fullHeight = checkedAdd(checkedAdd(host.marginTop, host.height, "height"),
+                                            host.marginBottom, "height");
   if (row >= fullHeight || height > fullHeight - row || column >= fullWidth || width > fullWidth - column)
   {
     throw std::runtime_error("CUDA distortion block exceeds its registered mirror");
@@ -351,31 +404,54 @@ const void *mapHostBlock(const PictureMirror &mirror, const std::uint8_t planeIn
   const PictureMirrorPlane &mirrorPlane = mirror.planes[planeIndex];
   if (mirrorPlane.deviceBase == nullptr)
   {
-    throw std::runtime_error("CUDA picture plane has not been allocated");
+    return nullptr;
   }
   const CudaDevicePlaneDesc &device = mirrorPlane.device;
-  const auto *deviceBase = static_cast<const unsigned char *>(mirrorPlane.deviceBase);
-  return deviceBase + row * device.pitchBytes + column * host.elementSize;
+  const std::size_t deviceOffset = checkedAdd(checkedMultiply(row, device.pitchBytes, "device row offset"),
+                                               checkedMultiply(column, host.elementSize,
+                                                               "device column offset"),
+                                               "device block offset");
+  if (deviceOffset >= mirrorPlane.deviceBytes
+      || deviceOffset > std::numeric_limits<std::uintptr_t>::max()
+                          - reinterpret_cast<std::uintptr_t>(mirrorPlane.deviceBase))
+  {
+    throw std::runtime_error("CUDA distortion device block address overflows");
+  }
+  return reinterpret_cast<const void *>(reinterpret_cast<std::uintptr_t>(mirrorPlane.deviceBase) + deviceOffset);
 }
 
 unsigned char *hostBase(const CudaHostPlaneDesc &plane)
 {
-  auto *active = static_cast<unsigned char *>(plane.data);
-  return active - static_cast<std::ptrdiff_t>(plane.marginTop) * plane.strideBytes
-         - static_cast<std::ptrdiff_t>(plane.marginLeft) * plane.elementSize;
+  const std::size_t prefix = checkedAdd(
+    checkedMultiply(plane.marginTop, static_cast<std::size_t>(plane.strideBytes), "host row prefix"),
+    checkedMultiply(plane.marginLeft, plane.elementSize, "host column prefix"), "host prefix");
+  const std::uintptr_t active = reinterpret_cast<std::uintptr_t>(plane.data);
+  if (prefix > active)
+  {
+    throw std::runtime_error("CUDA picture host base address underflows");
+  }
+  return reinterpret_cast<unsigned char *>(active - prefix);
 }
 
 void stageHostPlane(PictureMirror &mirror, const std::size_t index)
 {
   const CudaHostPlaneDesc &plane = mirror.host.planes[index];
   PictureMirrorPlane &mirrorPlane = mirror.planes[index];
-  const unsigned char *source = hostBase(plane);
-  auto *destination = static_cast<unsigned char *>(mirrorPlane.staging.data());
+  const std::uintptr_t sourceBase = reinterpret_cast<std::uintptr_t>(hostBase(plane));
+  const std::uintptr_t destinationBase = reinterpret_cast<std::uintptr_t>(mirrorPlane.staging.data());
   for (std::size_t row = 0; row < mirrorPlane.fullHeight; ++row)
   {
-    std::memcpy(destination + row * mirrorPlane.fullRowBytes,
-                source + static_cast<std::ptrdiff_t>(row) * plane.strideBytes,
-                mirrorPlane.fullRowBytes);
+    const std::size_t sourceOffset = checkedMultiply(row, static_cast<std::size_t>(plane.strideBytes),
+                                                     "host staging source offset");
+    const std::size_t destinationOffset = checkedMultiply(row, mirrorPlane.fullRowBytes,
+                                                          "host staging destination offset");
+    if (sourceOffset > std::numeric_limits<std::uintptr_t>::max() - sourceBase
+        || destinationOffset > std::numeric_limits<std::uintptr_t>::max() - destinationBase)
+    {
+      throw std::runtime_error("CUDA picture staging address overflows");
+    }
+    std::memcpy(reinterpret_cast<void *>(destinationBase + destinationOffset),
+                reinterpret_cast<const void *>(sourceBase + sourceOffset), mirrorPlane.fullRowBytes);
   }
 }
 
@@ -383,12 +459,21 @@ void unstageHostPlane(PictureMirror &mirror, const std::size_t index)
 {
   const CudaHostPlaneDesc &plane = mirror.host.planes[index];
   PictureMirrorPlane &mirrorPlane = mirror.planes[index];
-  unsigned char *destination = hostBase(plane);
-  const auto *source = static_cast<const unsigned char *>(mirrorPlane.staging.data());
+  const std::uintptr_t destinationBase = reinterpret_cast<std::uintptr_t>(hostBase(plane));
+  const std::uintptr_t sourceBase = reinterpret_cast<std::uintptr_t>(mirrorPlane.staging.data());
   for (std::size_t row = 0; row < mirrorPlane.fullHeight; ++row)
   {
-    std::memcpy(destination + static_cast<std::ptrdiff_t>(row) * plane.strideBytes,
-                source + row * mirrorPlane.fullRowBytes, mirrorPlane.fullRowBytes);
+    const std::size_t destinationOffset = checkedMultiply(row, static_cast<std::size_t>(plane.strideBytes),
+                                                          "host unstage destination offset");
+    const std::size_t sourceOffset = checkedMultiply(row, mirrorPlane.fullRowBytes,
+                                                     "host unstage source offset");
+    if (destinationOffset > std::numeric_limits<std::uintptr_t>::max() - destinationBase
+        || sourceOffset > std::numeric_limits<std::uintptr_t>::max() - sourceBase)
+    {
+      throw std::runtime_error("CUDA picture unstaging address overflows");
+    }
+    std::memcpy(reinterpret_cast<void *>(destinationBase + destinationOffset),
+                reinterpret_cast<const void *>(sourceBase + sourceOffset), mirrorPlane.fullRowBytes);
   }
 }
 
@@ -458,6 +543,24 @@ void accountPinnedRelease(ContextImpl *impl, const CudaPictureRole role, const s
 }
 
 template<typename ContextImpl>
+void accountTransfer(ContextImpl *impl, const CudaPictureRole role, const std::size_t plane,
+                     const std::size_t bytes, const bool upload)
+{
+  CudaMirrorMemoryUsage &total = impl->mirrorMemory.total;
+  CudaMirrorMemoryUsage &detail = impl->mirrorMemory.byRoleAndPlane[roleIndex(role)][plane];
+  if (upload)
+  {
+    total.uploadedBytes += bytes;
+    detail.uploadedBytes += bytes;
+  }
+  else
+  {
+    total.downloadedBytes += bytes;
+    detail.downloadedBytes += bytes;
+  }
+}
+
+template<typename ContextImpl>
 void allocateMirrorPlane(ContextImpl *impl, PictureMirror &mirror, const std::size_t index)
 {
   PictureMirrorPlane &mirrorPlane = mirror.planes[index];
@@ -473,6 +576,16 @@ void allocateMirrorPlane(ContextImpl *impl, PictureMirror &mirror, const std::si
   const std::size_t pitch = checkedAdd(rowBytes, 127, "device pitch") & ~std::size_t(127);
   const std::size_t deviceBytes = checkedMultiply(pitch, fullHeight, "device allocation");
   const std::size_t pinnedBytes = checkedMultiply(rowBytes, fullHeight, "staging allocation");
+  const std::uint64_t requiredBytes = static_cast<std::uint64_t>(deviceBytes)
+                                      + static_cast<std::uint64_t>(pinnedBytes);
+  const std::uint64_t currentBytes = impl->mirrorMemory.total.currentDeviceBytes
+                                     + impl->mirrorMemory.total.currentPinnedBytes;
+  if (currentBytes > impl->mirrorMemory.budgetBytes
+      || requiredBytes > impl->mirrorMemory.budgetBytes - currentBytes)
+  {
+    ++impl->mirrorMemory.budgetRejections;
+    throw std::runtime_error("CUDA picture mirror memory budget exceeded");
+  }
 
   CudaPinnedBuffer staging;
 #if VTM_CUDA_TESTING
@@ -516,9 +629,17 @@ void allocateMirrorPlane(ContextImpl *impl, PictureMirror &mirror, const std::si
   mirrorPlane.pinnedBytes = pinnedBytes;
   mirrorPlane.requested = true;
   CudaDevicePlaneDesc &device = mirrorPlane.device;
-  device.data = static_cast<unsigned char *>(deviceBase)
-                + static_cast<std::size_t>(host.marginTop) * pitch
-                + static_cast<std::size_t>(host.marginLeft) * host.elementSize;
+  const std::size_t activeOffset = checkedAdd(checkedMultiply(host.marginTop, pitch, "device active row offset"),
+                                               checkedMultiply(host.marginLeft, host.elementSize,
+                                                               "device active column offset"),
+                                               "device active offset");
+  const std::uintptr_t deviceAddress = reinterpret_cast<std::uintptr_t>(deviceBase);
+  if (activeOffset >= deviceBytes
+      || activeOffset > std::numeric_limits<std::uintptr_t>::max() - deviceAddress)
+  {
+    throw std::runtime_error("CUDA picture device active address overflows");
+  }
+  device.data = reinterpret_cast<void *>(deviceAddress + activeOffset);
   device.pitchBytes   = pitch;
   device.width        = host.width;
   device.height       = host.height;
@@ -580,9 +701,15 @@ void releaseMirrorResources(ContextImpl *impl, PictureMirror &mirror)
     }
     if (plane.staging)
     {
-      plane.staging.reset();
-      accountPinnedRelease(impl, mirror.role, index, plane.pinnedBytes);
-      plane.pinnedBytes = 0;
+      if (plane.staging.reset())
+      {
+        accountPinnedRelease(impl, mirror.role, index, plane.pinnedBytes);
+        plane.pinnedBytes = 0;
+      }
+      else if (!firstError)
+      {
+        firstError = std::make_exception_ptr(std::runtime_error("CUDA pinned mirror release failed"));
+      }
     }
     plane.uploadPending = false;
   }
@@ -603,11 +730,11 @@ void releaseMirrorResources(ContextImpl *impl, PictureMirror &mirror)
   }
 }
 
-bool hasDeviceAllocations(const PictureMirror &mirror)
+bool hasMirrorAllocations(const PictureMirror &mirror)
 {
   for (const PictureMirrorPlane &plane : mirror.planes)
   {
-    if (plane.deviceBase != nullptr)
+    if (plane.deviceBase != nullptr || plane.staging)
     {
       return true;
     }
@@ -664,9 +791,11 @@ void releaseAllMirrorsNoThrow(ContextImpl *impl) noexcept
       }
       if (plane.staging)
       {
-        plane.staging.reset();
-        accountPinnedRelease(impl, mirror.role, index, plane.pinnedBytes);
-        plane.pinnedBytes = 0;
+        if (plane.staging.reset())
+        {
+          accountPinnedRelease(impl, mirror.role, index, plane.pinnedBytes);
+          plane.pinnedBytes = 0;
+        }
       }
     }
   }
@@ -722,6 +851,7 @@ void CudaContext::create(const int device)
   m_impl->qpaAccelerationEnabled = true;
   m_impl->qpaFailures = 0;
   m_impl->mirrorMemory = CudaMirrorMemoryStats{};
+  m_impl->mirrorMemory.budgetBytes = CUDA_DEFAULT_MIRROR_MEMORY_BUDGET_BYTES;
   m_impl->ownerThread = std::this_thread::get_id();
   m_impl->generation = nextContextGeneration.fetch_add(1, std::memory_order_relaxed);
   if (m_impl->generation == 0)
@@ -779,6 +909,16 @@ void CudaContext::shutdown(const bool synchronize)
     // to discard mirrors whose async and synchronous free attempts both failed.
     m_impl->mirrors.clear();
     m_impl->owners.clear();
+    m_impl->mirrorMemory.total.currentDeviceBytes = 0;
+    m_impl->mirrorMemory.total.currentPinnedBytes = 0;
+    for (auto &role : m_impl->mirrorMemory.byRoleAndPlane)
+    {
+      for (CudaMirrorMemoryUsage &plane : role)
+      {
+        plane.currentDeviceBytes = 0;
+        plane.currentPinnedBytes = 0;
+      }
+    }
     if (firstError)
     {
       std::rethrow_exception(firstError);
@@ -915,7 +1055,7 @@ CudaMirrorHandle CudaContext::registerPictureMirror(const void *owner, const Cud
       {
       }
     }
-    if (!slot->second || !hasDeviceAllocations(*slot->second))
+    if (!slot->second || !hasMirrorAllocations(*slot->second))
     {
       m_impl->mirrors.erase(slot);
     }
@@ -951,48 +1091,40 @@ void CudaContext::rebindHostPicture(const CudaMirrorHandle handle, const CudaHos
   if (sameLayout)
   {
     mirror.host = picture;
-    for (PictureMirrorPlane &plane : mirror.planes)
+    for (std::size_t index = 0; index < mirror.host.planeCount; ++index)
     {
+      PictureMirrorPlane &plane = mirror.planes[index];
       plane.state = CudaMirrorState::HostValid;
       plane.uploadPending = false;
+      if (plane.requested && plane.deviceBase == nullptr)
+      {
+        allocateMirrorPlane(m_impl.get(), mirror, index);
+      }
     }
     return;
   }
 
-  PictureMirror replacement;
-  replacement.owner = mirror.owner;
-  replacement.role  = mirror.role;
-  replacement.host  = picture;
-  try
-  {
-    for (std::size_t index = 0; index < picture.planeCount; ++index)
-    {
-      if (mirror.planes[index].requested)
-      {
-        allocateMirrorPlane(m_impl.get(), replacement, index);
-      }
-    }
-  }
-  catch (...)
-  {
-    const std::exception_ptr allocationError = std::current_exception();
-    try { releaseMirrorResources(m_impl.get(), replacement); } catch (...) {}
-    std::rethrow_exception(allocationError);
-  }
-
-  std::exception_ptr releaseError;
+  // Release before changing the host descriptor so a failed async+immediate free remains owned by the registered
+  // mirror and can be retried. Once every old plane is released, partial allocation of the new layout is likewise
+  // retained by the mirror and remains retryable without leaking either layout.
   try
   {
     releaseMirrorResources(m_impl.get(), mirror);
   }
   catch (...)
   {
-    releaseError = std::current_exception();
+    throw;
   }
-  mirror = std::move(replacement);
-  if (releaseError)
+  mirror.host = picture;
+  for (std::size_t index = 0; index < picture.planeCount; ++index)
   {
-    std::rethrow_exception(releaseError);
+    PictureMirrorPlane &plane = mirror.planes[index];
+    plane.state = CudaMirrorState::HostValid;
+    plane.uploadPending = false;
+    if (plane.requested)
+    {
+      allocateMirrorPlane(m_impl.get(), mirror, index);
+    }
   }
 #else
   (void) handle;
@@ -1034,7 +1166,7 @@ void CudaContext::releasePictureMirror(const CudaMirrorHandle handle)
     releaseError = std::current_exception();
   }
 
-  if (!hasDeviceAllocations(mirror))
+  if (!hasMirrorAllocations(mirror))
   {
     const void *owner = mirror.owner;
     const std::size_t ownerRole = roleIndex(mirror.role);
@@ -1233,7 +1365,9 @@ CudaPlaneMask CudaContext::pictureMirrorAllocatedPlanes(const CudaMirrorHandle h
 CudaDevicePictureDesc CudaContext::devicePicture(const CudaMirrorHandle handle) const
 {
 #if VTM_ENABLE_CUDA
-  return devicePicturePlanes(handle, CUDA_PLANE_ALL);
+  requireRuntime(m_impl.get());
+  const PictureMirror &mirror = findMirror(m_impl.get(), handle);
+  return devicePicturePlanes(handle, activePlaneMask(mirror));
 #else
   (void) handle;
   throw std::runtime_error("CUDA picture mirror requested, but this binary was built with ENABLE_CUDA=OFF");
@@ -1383,38 +1517,86 @@ void CudaContext::ensureDevicePlanes(const CudaMirrorHandle handle, const CudaPl
   requireRuntime(m_impl.get());
   PictureMirror &mirror = findMirror(m_impl.get(), handle);
   validatePlaneMask(mirror, planes);
-  bool submitted = false;
+  // Allocate every requested plane before submitting any transfer. An allocation failure can leave lazy resources
+  // owned by the mirror, but never exposes partially uploaded device data.
   for (std::uint8_t index = 0; index < mirror.host.planeCount; ++index)
   {
     if ((planes & planeBit(index)) == 0) continue;
-    PictureMirrorPlane &mirrorPlane = mirror.planes[index];
     allocateMirrorPlane(m_impl.get(), mirror, index);
-    if (mirrorPlane.state != CudaMirrorState::HostValid) continue;
-    if (mirrorPlane.uploadPending)
+  }
+  bool needsUploadSynchronization = false;
+  for (std::uint8_t index = 0; index < mirror.host.planeCount; ++index)
+  {
+    needsUploadSynchronization = needsUploadSynchronization
+                                 || ((planes & planeBit(index)) != 0 && mirror.planes[index].uploadPending);
+  }
+  if (needsUploadSynchronization)
+  {
+    cuda_backend::synchronizeQueue(m_impl->runtime, CudaQueue::Upload);
+    for (PictureMirrorPlane &mirrorPlane : mirror.planes)
     {
-      cuda_backend::synchronizeQueue(m_impl->runtime, CudaQueue::Upload);
       mirrorPlane.uploadPending = false;
     }
-#if VTM_CUDA_TESTING
-    if (m_impl->mirrorFailurePlane == index && m_impl->mirrorUploadFailures > 0)
-    {
-      --m_impl->mirrorUploadFailures;
-      throw std::runtime_error("Injected CUDA mirror upload failure");
-    }
-#endif
-    stageHostPlane(mirror, index);
-    cuda_backend::copy2DToDeviceAsync(m_impl->runtime, mirrorPlane.deviceBase,
-                                      mirrorPlane.device.pitchBytes, mirrorPlane.staging.data(),
-                                      mirrorPlane.fullRowBytes, mirrorPlane.fullRowBytes,
-                                      mirrorPlane.fullHeight, CudaQueue::Upload);
-    mirrorPlane.uploadPending = true;
-    mirrorPlane.state = CudaMirrorState::Synchronized;
-    submitted = true;
   }
-  if (submitted)
+
+  CudaPlaneMask submitted = 0;
+  try
   {
-    cuda_backend::recordFence(m_impl->runtime, CudaQueue::Upload, CudaFence::UploadComplete);
-    cuda_backend::waitFence(m_impl->runtime, CudaQueue::Compute, CudaFence::UploadComplete);
+    for (std::uint8_t index = 0; index < mirror.host.planeCount; ++index)
+    {
+      if ((planes & planeBit(index)) == 0) continue;
+      PictureMirrorPlane &mirrorPlane = mirror.planes[index];
+      if (mirrorPlane.state != CudaMirrorState::HostValid) continue;
+#if VTM_CUDA_TESTING
+      if (m_impl->mirrorFailurePlane == index && m_impl->mirrorUploadFailures > 0)
+      {
+        --m_impl->mirrorUploadFailures;
+        throw std::runtime_error("Injected CUDA mirror upload failure");
+      }
+#endif
+      stageHostPlane(mirror, index);
+      cuda_backend::copy2DToDeviceAsync(m_impl->runtime, mirrorPlane.deviceBase,
+                                        mirrorPlane.device.pitchBytes, mirrorPlane.staging.data(),
+                                        mirrorPlane.fullRowBytes, mirrorPlane.fullRowBytes,
+                                        mirrorPlane.fullHeight, CudaQueue::Upload);
+      accountTransfer(m_impl.get(), mirror.role, index, mirrorPlane.pinnedBytes, true);
+      submitted |= planeBit(index);
+    }
+    if (submitted != 0)
+    {
+      cuda_backend::recordFence(m_impl->runtime, CudaQueue::Upload, CudaFence::UploadComplete);
+      cuda_backend::waitFence(m_impl->runtime, CudaQueue::Compute, CudaFence::UploadComplete);
+      for (std::uint8_t index = 0; index < mirror.host.planeCount; ++index)
+      {
+        if ((submitted & planeBit(index)) == 0) continue;
+        mirror.planes[index].state = CudaMirrorState::Synchronized;
+        mirror.planes[index].uploadPending = true;
+      }
+    }
+  }
+  catch (...)
+  {
+    const std::exception_ptr firstError = std::current_exception();
+    if (submitted != 0)
+    {
+      bool synchronized = false;
+      try
+      {
+        cuda_backend::synchronizeQueue(m_impl->runtime, CudaQueue::Upload);
+        synchronized = true;
+      }
+      catch (...)
+      {
+      }
+      for (std::uint8_t index = 0; index < mirror.host.planeCount; ++index)
+      {
+        if ((submitted & planeBit(index)) == 0) continue;
+        mirror.planes[index].state = synchronized ? CudaMirrorState::Synchronized
+                                                   : CudaMirrorState::HostValid;
+        mirror.planes[index].uploadPending = !synchronized;
+      }
+    }
+    std::rethrow_exception(firstError);
   }
 #else
   (void) handle;
@@ -1447,33 +1629,76 @@ void CudaContext::ensureHostPlanes(const CudaMirrorHandle handle, const CudaPlan
   requireRuntime(m_impl.get());
   PictureMirror &mirror = findMirror(m_impl.get(), handle);
   validatePlaneMask(mirror, planes);
-  CudaPlaneMask submitted = 0;
-  for (std::uint8_t index = 0; index < mirror.host.planeCount; ++index)
+  bool hasPendingDownload = false;
+  for (const PictureMirrorPlane &mirrorPlane : mirror.planes)
   {
-    if ((planes & planeBit(index)) == 0 || mirror.planes[index].state != CudaMirrorState::DeviceValid) continue;
-    PictureMirrorPlane &mirrorPlane = mirror.planes[index];
-#if VTM_CUDA_TESTING
-    if (m_impl->mirrorFailurePlane == index && m_impl->mirrorDownloadFailures > 0)
-    {
-      --m_impl->mirrorDownloadFailures;
-      throw std::runtime_error("Injected CUDA mirror download failure");
-    }
-#endif
-    cuda_backend::copy2DToHostAsync(m_impl->runtime, mirrorPlane.staging.data(), mirrorPlane.fullRowBytes,
-                                    mirrorPlane.deviceBase, mirrorPlane.device.pitchBytes,
-                                    mirrorPlane.fullRowBytes, mirrorPlane.fullHeight, CudaQueue::Download);
-    submitted |= planeBit(index);
+    hasPendingDownload = hasPendingDownload || mirrorPlane.downloadPending;
   }
-  if (submitted != 0)
+  if (hasPendingDownload)
   {
     cuda_backend::synchronizeQueue(m_impl->runtime, CudaQueue::Download);
+    for (PictureMirrorPlane &mirrorPlane : mirror.planes) mirrorPlane.downloadPending = false;
+  }
+  CudaPlaneMask submitted = 0;
+  try
+  {
     for (std::uint8_t index = 0; index < mirror.host.planeCount; ++index)
     {
-      if ((submitted & planeBit(index)) == 0) continue;
-      unstageHostPlane(mirror, index);
-      mirror.planes[index].uploadPending = false;
-      mirror.planes[index].state = CudaMirrorState::Synchronized;
+      if ((planes & planeBit(index)) == 0 || mirror.planes[index].state != CudaMirrorState::DeviceValid) continue;
+      PictureMirrorPlane &mirrorPlane = mirror.planes[index];
+#if VTM_CUDA_TESTING
+      if (m_impl->mirrorFailurePlane == index && m_impl->mirrorDownloadFailures > 0)
+      {
+        --m_impl->mirrorDownloadFailures;
+        throw std::runtime_error("Injected CUDA mirror download failure");
+      }
+#endif
+      cuda_backend::copy2DToHostAsync(m_impl->runtime, mirrorPlane.staging.data(), mirrorPlane.fullRowBytes,
+                                      mirrorPlane.deviceBase, mirrorPlane.device.pitchBytes,
+                                      mirrorPlane.fullRowBytes, mirrorPlane.fullHeight, CudaQueue::Download);
+      accountTransfer(m_impl.get(), mirror.role, index, mirrorPlane.pinnedBytes, false);
+      mirrorPlane.downloadPending = true;
+      submitted |= planeBit(index);
     }
+    if (submitted != 0)
+    {
+      cuda_backend::synchronizeQueue(m_impl->runtime, CudaQueue::Download);
+      for (std::uint8_t index = 0; index < mirror.host.planeCount; ++index)
+      {
+        if ((submitted & planeBit(index)) == 0) continue;
+        unstageHostPlane(mirror, index);
+        mirror.planes[index].uploadPending = false;
+        mirror.planes[index].downloadPending = false;
+        mirror.planes[index].state = CudaMirrorState::Synchronized;
+      }
+    }
+  }
+  catch (...)
+  {
+    const std::exception_ptr firstError = std::current_exception();
+    if (submitted != 0)
+    {
+      bool synchronized = false;
+      try
+      {
+        cuda_backend::synchronizeQueue(m_impl->runtime, CudaQueue::Download);
+        synchronized = true;
+      }
+      catch (...)
+      {
+      }
+      for (std::uint8_t index = 0; index < mirror.host.planeCount; ++index)
+      {
+        if ((submitted & planeBit(index)) == 0) continue;
+        if (synchronized)
+        {
+          unstageHostPlane(mirror, index);
+          mirror.planes[index].state = CudaMirrorState::Synchronized;
+        }
+        mirror.planes[index].downloadPending = !synchronized;
+      }
+    }
+    std::rethrow_exception(firstError);
   }
 #else
   (void) handle;
@@ -1496,6 +1721,28 @@ CudaMirrorMemoryStats CudaContext::pictureMirrorMemoryStats() const
 #else
   return CudaMirrorMemoryStats{};
 #endif
+}
+
+void CudaContext::setPictureMirrorMemoryBudget(const std::uint64_t bytes)
+{
+#if VTM_ENABLE_CUDA
+  requireRuntime(m_impl.get());
+  const std::uint64_t current = m_impl->mirrorMemory.total.currentDeviceBytes
+                                + m_impl->mirrorMemory.total.currentPinnedBytes;
+  if (bytes == 0 || bytes < current)
+  {
+    throw std::runtime_error("CUDA picture mirror memory budget is zero or below current usage");
+  }
+  m_impl->mirrorMemory.budgetBytes = bytes;
+#else
+  (void) bytes;
+  throw std::runtime_error("CUDA picture mirror requested, but this binary was built with ENABLE_CUDA=OFF");
+#endif
+}
+
+bool CudaContext::isPictureMirrorDescriptorSupported(const CudaHostPictureDesc &picture) noexcept
+{
+  return isPictureDescriptorSupported(picture);
 }
 
 bool CudaContext::isDistortionAccelerationAvailable() const noexcept
@@ -1550,6 +1797,12 @@ bool CudaContext::computeDistortionBatch(const CudaDistortionBatchDesc &batch, s
     {
       return false;
     }
+    // Validate both host ranges before entering the backend-failure region. Invalid caller descriptors must not
+    // poison acceleration, while the second mapping below resolves the lazily allocated device addresses.
+    (void) mapHostBlock(sourceMirror, batch.sourcePlane, batch.source, batch.width, batch.height);
+    (void) mapHostBlock(referenceMirror, batch.referencePlane, batch.candidateGrid.reference,
+                        static_cast<std::uint32_t>(referenceWidth64),
+                        static_cast<std::uint32_t>(referenceHeight64));
     try
     {
       ensureDevicePlane(batch.sourceMirror, batch.sourcePlane);
@@ -1793,6 +2046,16 @@ void CudaContext::injectMirrorPlaneFailuresForTesting(const std::uint8_t plane,
   (void) allocationFailureStep;
   (void) uploadFailures;
   (void) downloadFailures;
+#endif
+}
+
+void CudaContext::injectPinnedReleaseFailuresForTesting(const unsigned failures)
+{
+#if VTM_ENABLE_CUDA
+  requireRuntime(m_impl.get());
+  cuda_backend::injectPinnedReleaseFailures(failures);
+#else
+  (void) failures;
 #endif
 }
 #endif

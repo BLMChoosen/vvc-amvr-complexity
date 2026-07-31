@@ -72,6 +72,7 @@ struct CudaSadStats;
 struct CudaQpaTask;
 struct CudaQpaResult;
 struct CudaQpaStats;
+struct CudaMirrorMemoryStats;
 }
 
 class EncLibCommon;
@@ -198,6 +199,7 @@ public:
                             std::vector<vtm::CudaQpaResult> &results);
   bool      prepareQpaTasks(const void *sourceOwner);
   vtm::CudaQpaStats cudaQpaStats() const;
+  vtm::CudaMirrorMemoryStats cudaMirrorMemoryStats() const;
   void      deletePicBuffer ();
 
   // -------------------------------------------------------------------------------------------------------------------

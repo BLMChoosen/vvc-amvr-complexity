@@ -59,6 +59,8 @@ enum class CudaFence
   DownloadComplete
 };
 
+constexpr std::uint64_t CUDA_DEFAULT_MIRROR_MEMORY_BUDGET_BYTES = std::uint64_t{ 512 } * 1024 * 1024;
+
 class CudaPinnedBuffer
 {
 public:
@@ -72,7 +74,7 @@ public:
   CudaPinnedBuffer &operator=(CudaPinnedBuffer &&other) noexcept;
 
   void allocate(std::size_t bytes);
-  void reset() noexcept;
+  bool reset() noexcept;
   void *data() noexcept;
   const void *data() const noexcept;
   std::size_t size() const noexcept;
@@ -135,6 +137,8 @@ public:
   void ensureHostPlanes(CudaMirrorHandle handle, CudaPlaneMask planes);
   void ensureHostPlane(CudaMirrorHandle handle, std::uint8_t plane);
   CudaMirrorMemoryStats pictureMirrorMemoryStats() const;
+  void setPictureMirrorMemoryBudget(std::uint64_t bytes);
+  static bool isPictureMirrorDescriptorSupported(const CudaHostPictureDesc &picture) noexcept;
   bool isDistortionAccelerationAvailable() const noexcept;
   bool computeDistortionBatch(const CudaDistortionBatchDesc &batch, std::uint64_t *results) noexcept;
   std::uint64_t distortionBatchDispatchCount() const;
@@ -151,6 +155,7 @@ public:
   void injectQpaFailuresForTesting(unsigned allocationFailureStep, unsigned executionFailures);
   void injectMirrorPlaneFailuresForTesting(std::uint8_t plane, unsigned allocationFailureStep,
                                            unsigned uploadFailures, unsigned downloadFailures);
+  void injectPinnedReleaseFailuresForTesting(unsigned failures);
 #endif
 
   bool isCreated() const noexcept;
