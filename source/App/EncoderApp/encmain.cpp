@@ -173,7 +173,16 @@ int main(int argc, char* argv[])
       return 1;
     }
 
-    pcEncApp[layerIdx]->createLib( layerIdx );
+    try
+    {
+      pcEncApp[layerIdx]->createLib(layerIdx);
+    }
+    catch (Exception &e)
+    {
+      std::cerr << e.what() << std::endl;
+      delete[] layerArgv;
+      return EXIT_FAILURE;
+    }
 
     if( !resized )
     {

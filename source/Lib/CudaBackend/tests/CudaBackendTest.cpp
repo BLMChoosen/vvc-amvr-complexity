@@ -31,19 +31,82 @@
  * THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef VTM_CUDA_RUNTIME_H
-#define VTM_CUDA_RUNTIME_H
+#include "CudaBackend/ComputeBackend.h"
+#include "CudaBackend/CudaContext.h"
 
-namespace vtm::cuda_backend
+#include <cstdlib>
+#include <iostream>
+#include <string>
+
+namespace
 {
 
-struct RuntimeContext;
+int fail(const std::string &message)
+{
+  std::cerr << message << '\n';
+  return EXIT_FAILURE;
+}
 
-RuntimeContext *createRuntimeContext(int device);
-void synchronizeRuntimeContext(RuntimeContext *context);
-void destroyRuntimeContext(RuntimeContext *context) noexcept;
-bool supportsMain10(const RuntimeContext *context) noexcept;
+}   // namespace
 
-}   // namespace vtm::cuda_backend
+int main(const int argc, char *argv[])
+{
+  vtm::ComputeConfig config;
+  if (config.backend != vtm::ComputeBackend::CPU || config.device != 0)
+  {
+    return fail("ComputeConfig defaults are invalid");
+  }
 
-#endif   // VTM_CUDA_RUNTIME_H
+  vtm::ComputeBackend backend;
+  if (!vtm::parseComputeBackend("cpu", backend) || backend != vtm::ComputeBackend::CPU)
+  {
+    return fail("Failed to parse cpu backend");
+  }
+  if (!vtm::parseComputeBackend("cuda", backend) || backend != vtm::ComputeBackend::CUDA)
+  {
+    return fail("Failed to parse cuda backend");
+  }
+  if (vtm::parseComputeBackend("invalid", backend))
+  {
+    return fail("Invalid backend was accepted");
+  }
+
+  if (argc == 1)
+  {
+    return EXIT_SUCCESS;
+  }
+  if (argc != 3 || std::string(argv[1]) != "--cuda")
+  {
+    return fail("Usage: CudaBackendTest [--cuda device]");
+  }
+  if (!vtm::CudaContext::isCompiled())
+  {
+    return fail("CUDA runtime test requested from an ENABLE_CUDA=OFF build");
+  }
+
+  try
+  {
+    vtm::CudaContext context;
+    context.create(std::stoi(argv[2]));
+    if (!context.isCreated())
+    {
+      return fail("CUDA context was not created");
+    }
+    if (!context.supportsMain10())
+    {
+      return fail("CUDA device does not support Main 10 processing");
+    }
+    context.synchronize();
+    context.destroy();
+    if (context.isCreated())
+    {
+      return fail("CUDA context was not destroyed");
+    }
+  }
+  catch (const std::exception &error)
+  {
+    return fail(error.what());
+  }
+
+  return EXIT_SUCCESS;
+}

@@ -22,3 +22,15 @@ if( ENABLE_CUDA )
 endif()
 
 set_target_properties( ${LIB_NAME} PROPERTIES FOLDER lib )
+
+if( BUILD_TESTING )
+  add_executable( CudaBackendTest tests/CudaBackendTest.cpp )
+  target_link_libraries( CudaBackendTest PRIVATE ${LIB_NAME} )
+  set_target_properties( CudaBackendTest PROPERTIES FOLDER test )
+
+  add_test( NAME CudaBackend.ParseConfig COMMAND CudaBackendTest )
+  if( ENABLE_CUDA )
+    add_test( NAME CudaBackend.Runtime COMMAND CudaBackendTest --cuda 0 )
+    set_tests_properties( CudaBackend.Runtime PROPERTIES LABELS gpu )
+  endif()
+endif()

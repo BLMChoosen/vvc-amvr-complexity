@@ -43,6 +43,8 @@
 #include "CommonLib/Buffer.h"
 #include "CommonLib/UnitTools.h"
 #include "CommonLib/ProfileTierLevel.h"
+#include "CudaBackend/ComputeBackend.h"
+#include "CudaBackend/CudaContext.h"
 
 #include <fstream>
 #include <set>
@@ -469,9 +471,6 @@ bool tryDecodePicture(Picture *pcEncPic, const int expectedPoc, const std::strin
 
 //! \ingroup DecoderLib
 //! \{
-
-#include "CudaBackend/ComputeBackend.h"
-#include "CudaBackend/CudaContext.h"
 
 struct DecLib::ComputeState
 {

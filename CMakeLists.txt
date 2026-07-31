@@ -24,6 +24,8 @@ if( ENABLE_CUDA )
   find_package( CUDAToolkit REQUIRED )
 endif()
 
+include( CTest )
+
 # use ccache
 find_program( CCACHE_FOUND ccache )
 if( CCACHE_FOUND )
