@@ -35,25 +35,49 @@
 #define VTM_CUDA_CONTEXT_H
 
 #include <memory>
+#include <cstddef>
 
 namespace vtm
 {
+
+enum class CudaQueue
+{
+  Upload,
+  Compute,
+  Download
+};
+
+enum class CudaFence
+{
+  UploadComplete,
+  ComputeComplete,
+  DownloadComplete
+};
 
 class CudaContext
 {
 public:
   CudaContext();
-  ~CudaContext();
+  ~CudaContext() noexcept;
 
   CudaContext(const CudaContext &) = delete;
   CudaContext &operator=(const CudaContext &) = delete;
 
   void create(int device);
   void synchronize();
-  void destroy() noexcept;
+  void shutdown(bool synchronize = true);
+  void destroy();
+
+  // A context and all of its queue and teardown APIs are confined to the thread that called create().
+  // The noexcept destructor terminates if an owner violates this rule; owners must call shutdown()/destroy()
+  // on the creating thread so CUDA teardown is never attempted concurrently from an arbitrary thread.
+  // These host-only primitives are the submission contract for future batched codec work.
+  void  recordFence(CudaQueue queue, CudaFence fence);
+  void  waitFence(CudaQueue queue, CudaFence fence);
+  void *allocateDevice(std::size_t bytes, CudaQueue queue = CudaQueue::Compute);
+  void  releaseDevice(void *allocation, CudaQueue queue = CudaQueue::Compute);
 
   bool isCreated() const noexcept;
-  bool supportsMain10() const noexcept;
   static bool isCompiled() noexcept;
 
 private:

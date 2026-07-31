@@ -35,8 +35,11 @@
 #include "CudaBackend/CudaContext.h"
 
 #include <cstdlib>
+#include <functional>
 #include <iostream>
+#include <limits>
 #include <string>
+#include <thread>
 
 namespace
 {
@@ -45,6 +48,19 @@ int fail(const std::string &message)
 {
   std::cerr << message << '\n';
   return EXIT_FAILURE;
+}
+
+bool throws(const std::function<void()> &operation)
+{
+  try
+  {
+    operation();
+  }
+  catch (const std::exception &)
+  {
+    return true;
+  }
+  return false;
 }
 
 }   // namespace
@@ -73,6 +89,22 @@ int main(const int argc, char *argv[])
 
   if (argc == 1)
   {
+    vtm::CudaContext context;
+    context.destroy();
+    context.destroy();
+    return EXIT_SUCCESS;
+  }
+  if (argc == 2 && std::string(argv[1]) == "--disabled")
+  {
+    if (vtm::CudaContext::isCompiled())
+    {
+      return fail("Disabled-backend test requires ENABLE_CUDA=OFF");
+    }
+    vtm::CudaContext context;
+    if (!throws([&context]() { context.create(0); }))
+    {
+      return fail("ENABLE_CUDA=OFF build accepted CUDA context creation");
+    }
     return EXIT_SUCCESS;
   }
   if (argc != 3 || std::string(argv[1]) != "--cuda")
@@ -86,22 +118,79 @@ int main(const int argc, char *argv[])
 
   try
   {
+    if (!throws([]() {
+          vtm::CudaContext invalid;
+          invalid.create(-1);
+        }))
+    {
+      return fail("Negative CUDA device was accepted");
+    }
+    if (!throws([]() {
+          vtm::CudaContext invalid;
+          invalid.create(std::numeric_limits<int>::max());
+        }))
+    {
+      return fail("Out-of-range CUDA device was accepted");
+    }
+
     vtm::CudaContext context;
     context.create(std::stoi(argv[2]));
     if (!context.isCreated())
     {
       return fail("CUDA context was not created");
     }
-    if (!context.supportsMain10())
+    if (!throws([&context, argv]() { context.create(std::stoi(argv[2])); }))
     {
-      return fail("CUDA device does not support Main 10 processing");
+      return fail("Double CUDA context creation was accepted");
     }
+
+    bool crossThreadSyncRejected = false;
+    bool crossThreadDestroyRejected = false;
+    bool crossThreadShutdownRejected = false;
+    std::thread wrongThread([&context, &crossThreadSyncRejected, &crossThreadDestroyRejected,
+                             &crossThreadShutdownRejected]() {
+      crossThreadSyncRejected = throws([&context]() { context.synchronize(); });
+      crossThreadDestroyRejected = throws([&context]() { context.destroy(); });
+      crossThreadShutdownRejected = throws([&context]() { context.shutdown(); });
+    });
+    wrongThread.join();
+    if (!crossThreadSyncRejected || !crossThreadDestroyRejected || !crossThreadShutdownRejected)
+    {
+      return fail("Cross-thread CUDA context access or teardown was accepted");
+    }
+
+    if (!throws([&context]() { context.allocateDevice(0); }))
+    {
+      return fail("Zero-byte CUDA allocation was accepted");
+    }
+    void *allocation = context.allocateDevice(4096, vtm::CudaQueue::Upload);
+    context.recordFence(vtm::CudaQueue::Upload, vtm::CudaFence::UploadComplete);
+    context.waitFence(vtm::CudaQueue::Compute, vtm::CudaFence::UploadComplete);
+    context.releaseDevice(allocation, vtm::CudaQueue::Compute);
+    context.recordFence(vtm::CudaQueue::Compute, vtm::CudaFence::ComputeComplete);
+    context.waitFence(vtm::CudaQueue::Download, vtm::CudaFence::ComputeComplete);
     context.synchronize();
-    context.destroy();
+    context.shutdown();
     if (context.isCreated())
     {
-      return fail("CUDA context was not destroyed");
+      return fail("CUDA context was not shut down");
     }
+    context.shutdown();
+
+    context.create(std::stoi(argv[2]));
+    allocation = context.allocateDevice(4096, vtm::CudaQueue::Compute);
+    context.releaseDevice(allocation, vtm::CudaQueue::Compute);
+    context.shutdown();   // verifies teardown with pending asynchronous work
+    context.create(std::stoi(argv[2]));
+    context.destroy();
+    context.destroy();
+
+    vtm::CudaContext first;
+    vtm::CudaContext second;
+    first.create(std::stoi(argv[2]));
+    second.create(std::stoi(argv[2]));
+    first.shutdown();
+    second.shutdown();
   }
   catch (const std::exception &error)
   {

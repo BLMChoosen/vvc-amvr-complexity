@@ -37,8 +37,20 @@
 
 #include "CommonDef.h"
 #include "EncLibCommon.h"
+#include "CudaBackend/ComputeBackend.h"
+#include "CudaBackend/CudaContext.h"
 
-EncLibCommon::EncLibCommon() : m_spsMap(MAX_NUM_SPS), m_ppsMap(MAX_NUM_PPS)
+struct EncLibCommon::ComputeState
+{
+  vtm::ComputeConfig config;
+  vtm::CudaContext   cudaContext;
+  unsigned           users = 0;
+  bool               configured = false;
+  bool               synchronized = false;
+};
+
+EncLibCommon::EncLibCommon()
+  : m_spsMap(MAX_NUM_SPS), m_ppsMap(MAX_NUM_PPS), m_computeState(new ComputeState)
 {
   std::memset( m_layerDecPicBuffering, 0, sizeof( m_layerDecPicBuffering ) );
   for (const auto t: { ApsType::ALF, ApsType::LMCS, ApsType::SCALING_LIST })
@@ -49,4 +61,50 @@ EncLibCommon::EncLibCommon() : m_spsMap(MAX_NUM_SPS), m_ppsMap(MAX_NUM_PPS)
 
 EncLibCommon::~EncLibCommon()
 {
+}
+
+void EncLibCommon::configureComputeBackend(const vtm::ComputeConfig &config)
+{
+  if (m_computeState->configured)
+  {
+    CHECK(m_computeState->config.backend != config.backend || m_computeState->config.device != config.device,
+          "All encoder layers must use the same GPUBackend and GPUDevice");
+    return;
+  }
+
+  m_computeState->config = config;
+  m_computeState->configured = true;
+}
+
+void EncLibCommon::acquireComputeBackend()
+{
+  CHECK(!m_computeState->configured, "Compute backend must be configured before encoder creation");
+  if (m_computeState->users == 0 && m_computeState->config.backend == vtm::ComputeBackend::CUDA)
+  {
+    m_computeState->cudaContext.create(m_computeState->config.device);
+    m_computeState->synchronized = false;
+  }
+  ++m_computeState->users;
+}
+
+void EncLibCommon::synchronizeComputeBackend()
+{
+  CHECK(m_computeState->users == 0, "Cannot synchronize an encoder compute backend without an owner");
+  if (m_computeState->cudaContext.isCreated() && !m_computeState->synchronized)
+  {
+    m_computeState->cudaContext.synchronize();
+    m_computeState->synchronized = true;
+  }
+}
+
+void EncLibCommon::releaseComputeBackend()
+{
+  CHECK(m_computeState->users == 0, "Encoder compute backend owner count underflow");
+
+  --m_computeState->users;
+  if (m_computeState->users == 0 && m_computeState->cudaContext.isCreated())
+  {
+    m_computeState->cudaContext.shutdown(!m_computeState->synchronized);
+    m_computeState->synchronized = false;
+  }
 }

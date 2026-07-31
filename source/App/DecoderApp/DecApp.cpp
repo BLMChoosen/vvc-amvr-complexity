@@ -40,6 +40,7 @@
 #include <vector>
 #include <stdio.h>
 #include <fcntl.h>
+#include <exception>
 
 #include "DecApp.h"
 #include "DecoderLib/AnnexBread.h"
@@ -62,6 +63,26 @@ DecApp::DecApp()
   for (int i = 0; i < MAX_NUM_LAYER_IDS; i++)
   {
     m_newCLVS[i] = true;
+  }
+}
+
+DecApp::~DecApp() noexcept
+{
+  if (m_decLibCreated)
+  {
+    try
+    {
+      xCleanupDecLib();
+    }
+    catch (...)
+    {
+      // Verified shutdown errors are reported by decode(); this is only the unwind fallback.
+    }
+  }
+  if (m_romInitialized)
+  {
+    destroyROM();
+    m_romInitialized = false;
   }
 }
 
@@ -140,8 +161,8 @@ uint32_t DecApp::decode()
     std::ofstream ofile(m_annotatedRegionsSEIFileName.c_str());
     if (!ofile.good() || !ofile.is_open())
     {
-      fprintf(stderr, "\nUnable to open file '%s' for writing annotated-Regions-SEI\n", m_annotatedRegionsSEIFileName.c_str());
-      exit(EXIT_FAILURE);
+      EXIT("Unable to open file " << m_annotatedRegionsSEIFileName.c_str()
+                                  << " for writing annotated-Regions-SEI");
     }
   }
 
@@ -150,8 +171,8 @@ uint32_t DecApp::decode()
     std::ofstream ofile(m_objectMaskInfoSEIFileName.c_str());
     if (!ofile.good() || !ofile.is_open())
     {
-      fprintf(stderr, "\nUnable to open file '%s' for writing Object-Mask-Information-SEI\n", m_objectMaskInfoSEIFileName.c_str());
-      exit(EXIT_FAILURE);
+      EXIT("Unable to open file " << m_objectMaskInfoSEIFileName.c_str()
+                                  << " for writing Object-Mask-Information-SEI");
     }
   }
 
@@ -160,8 +181,8 @@ uint32_t DecApp::decode()
     std::ofstream ofile(m_packedRegionsInfoSEIFileName.c_str());
     if (!ofile.good() || !ofile.is_open())
     {
-      fprintf(stderr, "\nUnable to open file '%s' for writing packed regions info SEI\n", m_packedRegionsInfoSEIFileName.c_str());
-      exit(EXIT_FAILURE);
+      EXIT("Unable to open file " << m_packedRegionsInfoSEIFileName.c_str()
+                                  << " for writing packed regions info SEI");
     }
   }
 
@@ -774,8 +795,8 @@ uint32_t DecApp::decode()
           std::ofstream ofile(m_shutterIntervalPostFileName.c_str());
           if (!ofile.good() || !ofile.is_open())
           {
-            fprintf(stderr, "\nUnable to open file '%s' for writing shutter-interval-SEI video\n", m_shutterIntervalPostFileName.c_str());
-            exit(EXIT_FAILURE);
+            EXIT("Unable to open file " << m_shutterIntervalPostFileName.c_str()
+                                        << " for writing shutter-interval-SEI video");
           }
           m_cTVideoIOYuvSIIPostFile.open(m_shutterIntervalPostFileName, true, layerOutputBitDepth, layerOutputBitDepth,
                                          bitDepths);   // write mode
@@ -889,16 +910,15 @@ uint32_t DecApp::decode()
   // get the number of checksum errors
   uint32_t nRet = m_cDecLib.getNumberOfChecksumErrorsDetected();
 
-  // delete buffers
-  m_cDecLib.deletePicBuffer();
-  // destroy internal classes
-  xDestroyDecLib();
+  // Synchronize compute work before deleting pictures, then release the backend last.
+  xCleanupDecLib();
 
 #if RExt__DECODER_DEBUG_STATISTICS
   CodingStatistics::DestroyInstance();
 #endif
 
   destroyROM();
+  m_romInitialized = false;
 
   return nRet;
 }
@@ -936,10 +956,12 @@ void DecApp::writeLineToOutputLog(Picture * pcPic)
 void DecApp::xCreateDecLib()
 {
   initROM();
+  m_romInitialized = true;
 
   // create decoder class
   m_cDecLib.setComputeConfig(m_computeConfig);
   m_cDecLib.create();
+  m_decLibCreated = true;
 
   // initialize decoder class
   m_cDecLib.init(
@@ -1002,7 +1024,59 @@ void DecApp::xDestroyDecLib()
 #endif
 
   // destroy decoder class
-  m_cDecLib.destroy();
+  try
+  {
+    m_cDecLib.destroy();
+    m_decLibCreated = false;
+  }
+  catch (...)
+  {
+    // DecLib::destroy consumes the CUDA context even when checked shutdown reports an error.
+    m_decLibCreated = false;
+    throw;
+  }
+}
+
+void DecApp::xCleanupDecLib()
+{
+  std::exception_ptr firstError;
+  try
+  {
+    m_cDecLib.synchronizeComputeBackend();
+  }
+  catch (...)
+  {
+    firstError = std::current_exception();
+  }
+
+  try
+  {
+    m_cDecLib.deletePicBuffer();
+  }
+  catch (...)
+  {
+    if (!firstError)
+    {
+      firstError = std::current_exception();
+    }
+  }
+
+  try
+  {
+    xDestroyDecLib();
+  }
+  catch (...)
+  {
+    if (!firstError)
+    {
+      firstError = std::current_exception();
+    }
+  }
+
+  if (firstError)
+  {
+    std::rethrow_exception(firstError);
+  }
 }
 
 

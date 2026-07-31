@@ -41,6 +41,7 @@
 #include <stdio.h>
 #include <fcntl.h>
 #include <iomanip>
+#include <exception>
 
 #include "EncApp.h"
 #include "EncoderLib/AnnexBwrite.h"
@@ -64,6 +65,17 @@ EncApp::EncApp(std::fstream &bitStream, EncLibCommon *encLibCommon) : m_cEncLib(
 #endif
   m_numEncoded = 0;
   m_flush = false;
+  m_encLibCreated = false;
+  m_libInitialized = false;
+  m_trueOrgPic = nullptr;
+  m_orgPic = nullptr;
+  m_trueOrgPicBeforeScale = nullptr;
+  m_orgPicBeforeScale = nullptr;
+  m_rprPic[0] = nullptr;
+  m_rprPic[1] = nullptr;
+#if EXTENSION_360_VIDEO
+  m_ext360 = nullptr;
+#endif
 }
 
 EncApp::~EncApp()
@@ -1817,6 +1829,7 @@ void EncApp::xCreateLib( std::list<PelUnitBuf*>& recBufList, const int layerId )
   }
   // create the encoder
   m_cEncLib.create( layerId );
+  m_encLibCreated = true;
 
   // create the output buffer
   for (int i = 0; i < (m_gopSize + 1 + (m_isField ? 1 : 0)); i++)
@@ -1850,6 +1863,8 @@ void EncApp::xInitLib()
 
 void EncApp::createLib( const int layerIdx )
 {
+  try
+  {
   const int sourceHeight = m_isField ? m_iSourceHeightOrg : m_sourceHeight;
   UnitArea  unitArea(m_chromaFormatIdc, Area(0, 0, m_sourceWidth, sourceHeight));
 
@@ -1900,6 +1915,7 @@ void EncApp::createLib( const int layerIdx )
   const int layerId = m_cEncLib.getVPS() == nullptr ? 0 : m_cEncLib.getVPS()->getLayerId( layerIdx );
   xCreateLib( m_recBufList, layerId );
   xInitLib();
+  m_libInitialized = true;
 
   printChromaFormat();
 
@@ -1932,16 +1948,49 @@ void EncApp::createLib( const int layerIdx )
       m_gopBasedTemporalFilterUnitSize,
       m_cEncLib.getAdaptQPmap(), m_cEncLib.getBIM(), m_ctuSize);
   }
+  }
+  catch (...)
+  {
+    try
+    {
+      destroyLib();
+    }
+    catch (...)
+    {
+      // Preserve the exception that made createLib fail; cleanup was still attempted completely.
+    }
+    throw;
+  }
 }
 
 void EncApp::destroyLib()
 {
-  printf( "\nLayerId %2d", m_cEncLib.getLayerId() );
+  std::exception_ptr firstError;
 
-  m_cEncLib.printSummary( m_isField );
+  if (m_libInitialized)
+  {
+    printf( "\nLayerId %2d", m_cEncLib.getLayerId() );
+
+    m_cEncLib.printSummary( m_isField );
+  }
+
+  if (m_encLibCreated)
+  {
+    try
+    {
+      m_cEncLib.synchronizeComputeBackend();
+    }
+    catch (...)
+    {
+      firstError = std::current_exception();
+    }
+  }
 
   // delete used buffers in encoder class
-  m_cEncLib.deletePicBuffer();
+  if (m_encLibCreated)
+  {
+    m_cEncLib.deletePicBuffer();
+  }
 
   for( auto &p : m_recBufList )
   {
@@ -1949,32 +1998,35 @@ void EncApp::destroyLib()
   }
   m_recBufList.clear();
 
-  xDestroyLib();
-
   if( m_bitstream.is_open() )
   {
     m_bitstream.close();
   }
 
-  m_orgPic->destroy();
-  m_trueOrgPic->destroy();
+  if (m_orgPic) m_orgPic->destroy();
+  if (m_trueOrgPic) m_trueOrgPic->destroy();
   delete m_trueOrgPic;
   delete m_orgPic;
+  m_trueOrgPic = nullptr;
+  m_orgPic = nullptr;
 
   if (m_sourceScalingRatioHor != 1.0 || m_sourceScalingRatioVer != 1.0)
   {
-    m_orgPicBeforeScale->destroy();
-    m_trueOrgPicBeforeScale->destroy();
+    if (m_orgPicBeforeScale) m_orgPicBeforeScale->destroy();
+    if (m_trueOrgPicBeforeScale) m_trueOrgPicBeforeScale->destroy();
     delete m_trueOrgPicBeforeScale;
     delete m_orgPicBeforeScale;
+    m_trueOrgPicBeforeScale = nullptr;
+    m_orgPicBeforeScale = nullptr;
   }
 
   if (m_resChangeInClvsEnabled && m_gopBasedRPREnabledFlag)
   {
     for (int i = 0; i < 2; i++)
     {
-      m_rprPic[i]->destroy();
+      if (m_rprPic[i]) m_rprPic[i]->destroy();
       delete m_rprPic[i];
+      m_rprPic[i] = nullptr;
     }
   }
   if ( m_bimEnabled )
@@ -1988,9 +2040,42 @@ void EncApp::destroyLib()
   }
 #if EXTENSION_360_VIDEO
   delete m_ext360;
+  m_ext360 = nullptr;
 #endif
 
-  printRateSummary();
+  if (m_libInitialized)
+  {
+    printRateSummary();
+  }
+
+  // Keep verified compute shutdown last so an asynchronous CUDA error is reported
+  // only after all application-owned buffers and files have been released.
+  if (m_encLibCreated)
+  {
+    m_encLibCreated = false;
+    try
+    {
+      xDestroyLib();
+    }
+    catch (...)
+    {
+      if (!firstError)
+      {
+        firstError = std::current_exception();
+      }
+    }
+  }
+  else
+  {
+    m_cVideoIOYuvInputFile.close();
+    m_cVideoIOYuvReconFile.close();
+  }
+  m_libInitialized = false;
+
+  if (firstError)
+  {
+    std::rethrow_exception(firstError);
+  }
 }
 
 bool EncApp::encodePrep( bool& eos )

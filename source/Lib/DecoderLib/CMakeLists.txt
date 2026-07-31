@@ -37,7 +37,7 @@ if( DEFINED ENABLE_HIGH_BITDEPTH )
 endif()
 
 target_include_directories( ${LIB_NAME} PUBLIC . )
-target_link_libraries( ${LIB_NAME} CommonLib CudaBackend )
+target_link_libraries( ${LIB_NAME} PUBLIC CommonLib PRIVATE CudaBackend )
 
 # example: place header files in different folders
 source_group( "Natvis Files" FILES ${NATVIS_FILES} )

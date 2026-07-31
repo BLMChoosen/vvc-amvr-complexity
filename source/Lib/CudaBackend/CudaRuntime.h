@@ -34,6 +34,10 @@
 #ifndef VTM_CUDA_RUNTIME_H
 #define VTM_CUDA_RUNTIME_H
 
+#include "CudaContext.h"
+
+#include <cstddef>
+
 namespace vtm::cuda_backend
 {
 
@@ -41,8 +45,12 @@ struct RuntimeContext;
 
 RuntimeContext *createRuntimeContext(int device);
 void synchronizeRuntimeContext(RuntimeContext *context);
+void shutdownRuntimeContext(RuntimeContext *context, bool synchronize);
 void destroyRuntimeContext(RuntimeContext *context) noexcept;
-bool supportsMain10(const RuntimeContext *context) noexcept;
+void recordFence(RuntimeContext *context, CudaQueue queue, CudaFence fence);
+void waitFence(RuntimeContext *context, CudaQueue queue, CudaFence fence);
+void *allocateDevice(RuntimeContext *context, std::size_t bytes, CudaQueue queue);
+void releaseDevice(RuntimeContext *context, void *allocation, CudaQueue queue);
 
 }   // namespace vtm::cuda_backend
 

@@ -47,7 +47,6 @@
 #include "CommonLib/SEIPackedRegionsInfoProcess.h"
 #include "CommonLib/ProfileTierLevel.h"
 #include "CudaBackend/ComputeBackend.h"
-#include "CudaBackend/CudaContext.h"
 
 //! \ingroup EncoderLib
 //! \{
@@ -55,12 +54,6 @@
 // ====================================================================================================================
 // Constructor / destructor / create / destroy
 // ====================================================================================================================
-
-struct EncLib::ComputeState
-{
-  vtm::ComputeConfig config;
-  vtm::CudaContext  cudaContext;
-};
 
 EncLib::EncLib(EncLibCommon *encLibCommon)
   : m_cListPic(encLibCommon->getPictureBuffer())
@@ -79,7 +72,8 @@ EncLib::EncLib(EncLibCommon *encLibCommon)
   , m_doPlt(true)
   , m_vps(encLibCommon->getVPS())
   , m_layerDecPicBuffering(encLibCommon->getDecPicBuffering())
-  , m_computeState(new ComputeState)
+  , m_encLibCommon(encLibCommon)
+  , m_computeBackendAcquired(false)
 {
   m_pocLast          = -1;
   m_receivedPicCount = 0;
@@ -110,55 +104,54 @@ EncLib::~EncLib()
 
 void EncLib::create( const int layerId )
 {
-  if (m_computeState->config.backend == vtm::ComputeBackend::CUDA)
+  m_layerId = layerId;
+  m_pocLast = m_compositeRefEnabled ? -2 : -1;
+  try
+  {
+    // create processing unit classes
+    m_cGOPEncoder.        create( );
+    m_cCuEncoder.         create( this );
+#if JVET_J0090_MEMORY_BANDWITH_MEASURE
+    m_cInterSearch.cacheAssign( &m_cacheModel );
+#endif
+
+    m_deblockingFilter.create(floorLog2(m_maxCUWidth) - MIN_CU_LOG2);
+
+    if (!m_deblockingFilterDisable && m_encDbOpt)
+    {
+      m_deblockingFilter.initEncPicYuvBuffer(m_chromaFormatIdc, Size(getSourceWidth(), getSourceHeight()),
+                                             getMaxCUWidth());
+    }
+
+    if (m_lmcsEnabled)
+    {
+      m_cReshaper.createEnc(getSourceWidth(), getSourceHeight(), m_maxCUWidth, m_maxCUHeight,
+                            m_bitDepth[ChannelType::LUMA]);
+    }
+    if (m_rcEnableRateControl)
+    {
+      Fraction frameRate = m_frameRate;
+      frameRate.den *= m_temporalSubsampleRatio;
+      m_cRateCtrl.init(m_framesToBeEncoded, m_rcTargetBitrate, frameRate, m_gopSize, m_intraPeriod, m_sourceWidth,
+                       m_sourceHeight, m_maxCUWidth, m_maxCUHeight, getBitDepth(ChannelType::LUMA),
+                       m_rcKeepHierarchicalBit, m_rcUseCtuSeparateModel, m_GOPList);
+    }
+
+    m_filteredOrgPic.create(m_chromaFormatIdc, Area(0, 0, m_sourceWidth, m_sourceHeight));
+    m_encLibCommon->acquireComputeBackend();
+    m_computeBackendAcquired = true;
+  }
+  catch (...)
   {
     try
     {
-      m_computeState->cudaContext.create(m_computeState->config.device);
-      if (!m_computeState->cudaContext.supportsMain10())
-      {
-        m_computeState->cudaContext.destroy();
-        THROW("Selected CUDA device does not support the Main 10 compute path");
-      }
+      destroy();
     }
-    catch (const std::exception &error)
+    catch (...)
     {
-      THROW(error.what());
     }
+    throw;
   }
-
-  m_layerId = layerId;
-  m_pocLast = m_compositeRefEnabled ? -2 : -1;
-  // create processing unit classes
-  m_cGOPEncoder.        create( );
-  m_cCuEncoder.         create( this );
-#if JVET_J0090_MEMORY_BANDWITH_MEASURE
-  m_cInterSearch.cacheAssign( &m_cacheModel );
-#endif
-
-  m_deblockingFilter.create(floorLog2(m_maxCUWidth) - MIN_CU_LOG2);
-
-  if (!m_deblockingFilterDisable && m_encDbOpt)
-  {
-    m_deblockingFilter.initEncPicYuvBuffer(m_chromaFormatIdc, Size(getSourceWidth(), getSourceHeight()),
-                                           getMaxCUWidth());
-  }
-
-  if (m_lmcsEnabled)
-  {
-    m_cReshaper.createEnc(getSourceWidth(), getSourceHeight(), m_maxCUWidth, m_maxCUHeight,
-                          m_bitDepth[ChannelType::LUMA]);
-  }
-  if (m_rcEnableRateControl)
-  {
-    Fraction frameRate = m_frameRate;
-    frameRate.den *= m_temporalSubsampleRatio;
-    m_cRateCtrl.init(m_framesToBeEncoded, m_rcTargetBitrate, frameRate, m_gopSize, m_intraPeriod, m_sourceWidth,
-                     m_sourceHeight, m_maxCUWidth, m_maxCUHeight, getBitDepth(ChannelType::LUMA),
-                     m_rcKeepHierarchicalBit, m_rcUseCtuSeparateModel, m_GOPList);
-  }
-
-  m_filteredOrgPic.create(m_chromaFormatIdc, Area(0, 0, m_sourceWidth, m_sourceHeight));
 }
 
 void EncLib::destroy ()
@@ -178,13 +171,26 @@ void EncLib::destroy ()
   m_cReshaper.          destroy();
   m_cInterSearch.       destroy();
   m_cIntraSearch.       destroy();
-  m_computeState->cudaContext.destroy();
+  m_filteredOrgPic.     destroy();
+  if (m_computeBackendAcquired)
+  {
+    m_computeBackendAcquired = false;
+    m_encLibCommon->releaseComputeBackend();
+  }
 }
 
 void EncLib::setComputeConfig(const vtm::ComputeConfig &config)
 {
-  CHECK(m_computeState->cudaContext.isCreated(), "Compute backend cannot be changed after encoder creation");
-  m_computeState->config = config;
+  CHECK(m_computeBackendAcquired, "Compute backend cannot be changed after encoder creation");
+  m_encLibCommon->configureComputeBackend(config);
+}
+
+void EncLib::synchronizeComputeBackend()
+{
+  if (m_computeBackendAcquired)
+  {
+    m_encLibCommon->synchronizeComputeBackend();
+  }
 }
 
 void EncLib::init(AUWriterIf *auWriterIf)

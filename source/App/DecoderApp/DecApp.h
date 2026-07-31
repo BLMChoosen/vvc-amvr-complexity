@@ -98,6 +98,8 @@ private:
   SEIObjectMaskInfos::ObjectMaskInfoHeader m_omiHeader;   ///< OMI header
   std::vector<std::vector<std::pair<uint32_t, SEIObjectMaskInfos::ObjectMaskInfo>>> m_omiMasks;
   std::vector<uint32_t> m_auxSampleTolerance;
+  bool                  m_decLibCreated = false;
+  bool                  m_romInitialized = false;
 
 private:
   bool  xIsNaluWithinTargetDecLayerIdSet( const InputNALUnit* nalu ) const; ///< check whether given Nalu is within targetDecLayerIdSet
@@ -105,7 +107,7 @@ private:
 
 public:
   DecApp();
-  virtual ~DecApp         ()  {}
+  virtual ~DecApp() noexcept;
 
   uint32_t  decode            (); ///< main decoding function
   bool  getShutterFilterFlag()        const { return m_ShutterFilterEnable; }
@@ -116,6 +118,7 @@ public:
 private:
   void  xCreateDecLib     (); ///< create internal classes
   void  xDestroyDecLib    (); ///< destroy internal classes
+  void  xCleanupDecLib    (); ///< synchronize work, delete buffers, then destroy the decoder
   void  xWriteOutput      ( PicList* pcListPic , uint32_t tId); ///< write YUV to file
   void  xFlushOutput( PicList* pcListPic, const int layerId = NOT_VALID ); ///< flush all remaining decoded pictures to file
 

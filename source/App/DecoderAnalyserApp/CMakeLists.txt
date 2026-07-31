@@ -48,7 +48,7 @@ if( CMAKE_COMPILER_IS_GNUCC AND BUILD_STATIC )
   target_compile_definitions( ${EXE_NAME} PUBLIC ENABLE_WPP_STATIC_LINK=1 )
 endif()
 
-target_link_libraries( ${EXE_NAME} CommonAnalyserLib DecoderAnalyserLib Utilities ${ADDITIONAL_LIBS} )
+target_link_libraries( ${EXE_NAME} PRIVATE CommonAnalyserLib DecoderAnalyserLib Utilities CudaBackend ${ADDITIONAL_LIBS} )
 
 # lldb custom data formatters
 if( XCODE )
@@ -72,3 +72,9 @@ source_group( "Natvis Files" FILES ${NATVIS_FILES} )
 
 # set the folder where to place the projects
 set_target_properties( ${EXE_NAME}          PROPERTIES FOLDER app LINKER_LANGUAGE CXX )
+
+if( VTM_BUILD_CUDA_BACKEND_TESTS )
+  add_test( NAME DecoderAnalyserApp.Help COMMAND ${EXE_NAME} --help )
+  add_test( NAME DecoderAnalyserApp.InvalidBackend COMMAND ${EXE_NAME} --GPUBackend=bogus )
+  set_tests_properties( DecoderAnalyserApp.Help DecoderAnalyserApp.InvalidBackend PROPERTIES WILL_FAIL TRUE )
+endif()

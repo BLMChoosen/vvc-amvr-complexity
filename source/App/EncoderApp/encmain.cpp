@@ -39,6 +39,7 @@
 #include <iostream>
 #include <chrono>
 #include <ctime>
+#include <exception>
 
 #include "EncoderLib/EncLibCommon.h"
 #include "EncApp.h"
@@ -76,6 +77,117 @@ static void printMacroSettings()
   }
 }
 
+namespace
+{
+
+class RomCleanup
+{
+public:
+  ~RomCleanup() noexcept
+  {
+    if (m_initialized)
+    {
+      destroyROM();
+    }
+  }
+
+  void markInitialized() noexcept { m_initialized = true; }
+
+private:
+  bool m_initialized = false;
+};
+
+class EncoderMainCleanup
+{
+public:
+  EncoderMainCleanup(std::vector<EncApp *> &apps, std::vector<bool> &appCreated, std::vector<bool> &libCreated)
+    : m_apps(apps), m_appCreated(appCreated), m_libCreated(libCreated)
+  {
+  }
+
+  ~EncoderMainCleanup() noexcept { cleanupNoThrow(); }
+
+  void cleanup()
+  {
+    if (m_finished)
+    {
+      return;
+    }
+    m_finished = true;
+
+    std::exception_ptr firstError;
+    for (std::size_t i = 0; i < m_apps.size(); ++i)
+    {
+      EncApp *app = m_apps[i];
+      if (app == nullptr)
+      {
+        continue;
+      }
+
+      if (i < m_libCreated.size() && m_libCreated[i])
+      {
+        m_libCreated[i] = false;
+        try
+        {
+          app->destroyLib();
+        }
+        catch (...)
+        {
+          if (!firstError)
+          {
+            firstError = std::current_exception();
+          }
+        }
+      }
+
+      if (i < m_appCreated.size() && m_appCreated[i])
+      {
+        m_appCreated[i] = false;
+        try
+        {
+          app->destroy();
+        }
+        catch (...)
+        {
+          if (!firstError)
+          {
+            firstError = std::current_exception();
+          }
+        }
+      }
+
+      delete app;
+      m_apps[i] = nullptr;
+    }
+    m_apps.clear();
+
+    if (firstError)
+    {
+      std::rethrow_exception(firstError);
+    }
+  }
+
+private:
+  void cleanupNoThrow() noexcept
+  {
+    try
+    {
+      cleanup();
+    }
+    catch (...)
+    {
+      // Normal shutdown uses cleanup() and reports failures. This is only the unwind fallback.
+    }
+  }
+
+  std::vector<EncApp *> &m_apps;
+  std::vector<bool>     &m_appCreated;
+  std::vector<bool>     &m_libCreated;
+  bool                   m_finished = false;
+};
+
+}   // namespace
+
 // ====================================================================================================================
 // Main function
 // ====================================================================================================================
@@ -101,22 +213,30 @@ int main(int argc, char* argv[])
 #endif
   fprintf( stdout, "\n" );
 
+  // Declare the ROM guard first so ROM data outlives EncLibCommon and every EncApp,
+  // including on configuration errors and exceptions.
+  RomCleanup romCleanup;
   std::fstream bitstream;
   EncLibCommon encLibCommon;
 
-  std::vector<EncApp*> pcEncApp(1);
+  std::vector<EncApp*> pcEncApp(1, nullptr);
+  std::vector<bool> appCreated(1, false);
+  std::vector<bool> libCreated(1, false);
   bool resized = false;
   int layerIdx = 0;
 
   initROM();
+  romCleanup.markInitialized();
+  EncoderMainCleanup cleanup(pcEncApp, appCreated, libCreated);
 
-  char** layerArgv = new char*[argc];
+  std::vector<char *> layerArgv(argc, nullptr);
 
   do
   {
     pcEncApp[layerIdx] = new EncApp( bitstream, &encLibCommon );
     // create application encoder class per layer
     pcEncApp[layerIdx]->create();
+    appCreated[layerIdx] = true;
 
     // parse configuration per layer
     try
@@ -161,9 +281,8 @@ int main(int argc, char* argv[])
         }
       }
 
-      if( !pcEncApp[layerIdx]->parseCfg( j, layerArgv ) )
+      if( !pcEncApp[layerIdx]->parseCfg( j, layerArgv.data() ) )
       {
-        pcEncApp[layerIdx]->destroy();
         return 1;
       }
     }
@@ -180,20 +299,25 @@ int main(int argc, char* argv[])
     catch (Exception &e)
     {
       std::cerr << e.what() << std::endl;
-      delete[] layerArgv;
       return EXIT_FAILURE;
     }
+    catch (const std::exception &e)
+    {
+      std::cerr << e.what() << std::endl;
+      return EXIT_FAILURE;
+    }
+    libCreated[layerIdx] = true;
 
     if( !resized )
     {
       pcEncApp.resize( pcEncApp[layerIdx]->getMaxLayers() );
+      appCreated.resize(pcEncApp.size(), false);
+      libCreated.resize(pcEncApp.size(), false);
       resized = true;
     }
 
     layerIdx++;
   } while( layerIdx < pcEncApp.size() );
-
-  delete[] layerArgv;
 
   if (layerIdx > 1)
   {
@@ -367,20 +491,15 @@ int main(int argc, char* argv[])
     writeGMFAOutput(featureCounterFinal, dummy, encApp->getGMFAFile(),true);
   }
 #endif
-  for( auto & encApp : pcEncApp )
+  try
   {
-    encApp->destroyLib();
-
-    // destroy application encoder class per layer
-    encApp->destroy();
-
-    delete encApp;
+    cleanup.cleanup();
   }
-
-  // destroy ROM
-  destroyROM();
-
-  pcEncApp.clear();
+  catch (const std::exception &error)
+  {
+    std::cerr << error.what() << std::endl;
+    return EXIT_FAILURE;
+  }
 
   printf( "\n finished @ %s", std::ctime(&endTime2) );
 

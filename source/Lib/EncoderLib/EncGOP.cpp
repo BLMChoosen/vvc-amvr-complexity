@@ -139,7 +139,7 @@ EncGOP::EncGOP()
 
 EncGOP::~EncGOP()
 {
-  if( !m_pcCfg->getDecodeBitstream(0).empty() || !m_pcCfg->getDecodeBitstream(1).empty() )
+  if( m_pcCfg != nullptr && (!m_pcCfg->getDecodeBitstream(0).empty() || !m_pcCfg->getDecodeBitstream(1).empty()) )
   {
     // reset potential decoder resources
     tryDecodePicture(nullptr, 0, std::string(""), -1);
@@ -194,7 +194,7 @@ void  EncGOP::destroy()
     delete m_picOrig;
     m_picOrig = nullptr;
   }
-  if (m_pcCfg->getFilmGrainAnalysisEnabled())
+  if (m_pcCfg != nullptr && m_pcCfg->getFilmGrainAnalysisEnabled())
   {
     m_fgAnalyzer.destroy();
   }

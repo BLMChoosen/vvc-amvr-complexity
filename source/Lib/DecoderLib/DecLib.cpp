@@ -613,11 +613,6 @@ void DecLib::create()
     try
     {
       m_computeState->cudaContext.create(m_computeState->config.device);
-      if (!m_computeState->cudaContext.supportsMain10())
-      {
-        m_computeState->cudaContext.destroy();
-        THROW("Selected CUDA device does not support the Main 10 compute path");
-      }
     }
     catch (const std::exception &error)
     {
@@ -647,13 +642,24 @@ void DecLib::destroy()
   }
 
   m_cSliceDecoder.destroy();
-  m_computeState->cudaContext.destroy();
+  if (m_computeState->cudaContext.isCreated())
+  {
+    m_computeState->cudaContext.shutdown();
+  }
 }
 
 void DecLib::setComputeConfig(const vtm::ComputeConfig &config)
 {
   CHECK(m_computeState->cudaContext.isCreated(), "Compute backend cannot be changed after decoder creation");
   m_computeState->config = config;
+}
+
+void DecLib::synchronizeComputeBackend()
+{
+  if (m_computeState->cudaContext.isCreated())
+  {
+    m_computeState->cudaContext.synchronize();
+  }
 }
 
 void DecLib::init(

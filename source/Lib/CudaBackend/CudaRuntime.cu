@@ -36,6 +36,7 @@
 #include <cuda_runtime.h>
 
 #include <memory>
+#include <array>
 #include <stdexcept>
 #include <string>
 
@@ -44,12 +45,10 @@ namespace vtm::cuda_backend
 
 struct RuntimeContext
 {
-  int           device = -1;
-  cudaStream_t  stream = nullptr;
-  cudaEvent_t   readyEvent = nullptr;
-  cudaEvent_t   completeEvent = nullptr;
-  cudaMemPool_t memoryPool = nullptr;
-  bool          main10Supported = false;
+  int                         device = -1;
+  std::array<cudaStream_t, 3> streams{};
+  std::array<cudaEvent_t, 3>  fences{};
+  cudaMemPool_t               memoryPool = nullptr;
 };
 
 namespace
@@ -60,6 +59,85 @@ void checkCuda(const cudaError_t result, const char *operation)
   if (result != cudaSuccess)
   {
     throw std::runtime_error(std::string("CUDA ") + operation + " failed: " + cudaGetErrorString(result));
+  }
+}
+
+std::size_t queueIndex(const CudaQueue queue)
+{
+  switch (queue)
+  {
+  case CudaQueue::Upload: return 0;
+  case CudaQueue::Compute: return 1;
+  case CudaQueue::Download: return 2;
+  }
+  throw std::runtime_error("Invalid CUDA queue");
+}
+
+std::size_t fenceIndex(const CudaFence fence)
+{
+  switch (fence)
+  {
+  case CudaFence::UploadComplete: return 0;
+  case CudaFence::ComputeComplete: return 1;
+  case CudaFence::DownloadComplete: return 2;
+  }
+  throw std::runtime_error("Invalid CUDA fence");
+}
+
+void rememberCudaError(cudaError_t &firstError, const char *&firstOperation, const cudaError_t result,
+                       const char *operation) noexcept
+{
+  if (result != cudaSuccess && firstError == cudaSuccess)
+  {
+    firstError = result;
+    firstOperation = operation;
+  }
+}
+
+void releaseRuntimeContext(RuntimeContext *context, const bool checked, const bool synchronize)
+{
+  if (context == nullptr)
+  {
+    return;
+  }
+
+  cudaError_t firstError = cudaSuccess;
+  const char *firstOperation = nullptr;
+  rememberCudaError(firstError, firstOperation, cudaSetDevice(context->device), "device selection during shutdown");
+  for (cudaStream_t stream : context->streams)
+  {
+    if (synchronize && stream != nullptr)
+    {
+      rememberCudaError(firstError, firstOperation, cudaStreamSynchronize(stream),
+                        "stream synchronization during shutdown");
+    }
+  }
+  for (cudaEvent_t &fence : context->fences)
+  {
+    if (fence != nullptr)
+    {
+      rememberCudaError(firstError, firstOperation, cudaEventDestroy(fence), "fence destruction");
+      fence = nullptr;
+    }
+  }
+  for (cudaStream_t &stream : context->streams)
+  {
+    if (stream != nullptr)
+    {
+      rememberCudaError(firstError, firstOperation, cudaStreamDestroy(stream), "stream destruction");
+      stream = nullptr;
+    }
+  }
+  if (context->memoryPool != nullptr)
+  {
+    rememberCudaError(firstError, firstOperation, cudaMemPoolDestroy(context->memoryPool), "memory pool destruction");
+    context->memoryPool = nullptr;
+  }
+  delete context;
+
+  if (checked && firstError != cudaSuccess)
+  {
+    throw std::runtime_error(std::string("CUDA ") + firstOperation + " failed: " + cudaGetErrorString(firstError));
   }
 }
 
@@ -82,13 +160,22 @@ RuntimeContext *createRuntimeContext(const int device)
   {
     checkCuda(cudaSetDevice(device), "device selection");
 
-    cudaDeviceProp properties{};
-    checkCuda(cudaGetDeviceProperties(&properties, device), "device property query");
-    context->main10Supported = properties.major >= 5;
+    int memoryPoolsSupported = 0;
+    checkCuda(cudaDeviceGetAttribute(&memoryPoolsSupported, cudaDevAttrMemoryPoolsSupported, device),
+              "memory pool capability query");
+    if (!memoryPoolsSupported)
+    {
+      throw std::runtime_error("Selected CUDA device does not support stream-ordered memory pools");
+    }
 
-    checkCuda(cudaStreamCreateWithFlags(&context->stream, cudaStreamNonBlocking), "stream creation");
-    checkCuda(cudaEventCreateWithFlags(&context->readyEvent, cudaEventDisableTiming), "ready event creation");
-    checkCuda(cudaEventCreateWithFlags(&context->completeEvent, cudaEventDisableTiming), "completion event creation");
+    for (cudaStream_t &stream : context->streams)
+    {
+      checkCuda(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "stream creation");
+    }
+    for (cudaEvent_t &fence : context->fences)
+    {
+      checkCuda(cudaEventCreateWithFlags(&fence, cudaEventDisableTiming), "fence creation");
+    }
 
     cudaMemPoolProps poolProperties{};
     poolProperties.allocType     = cudaMemAllocationTypePinned;
@@ -113,43 +200,63 @@ void synchronizeRuntimeContext(RuntimeContext *context)
     return;
   }
   checkCuda(cudaSetDevice(context->device), "device selection");
-  checkCuda(cudaStreamSynchronize(context->stream), "stream synchronization");
+  for (cudaStream_t stream : context->streams)
+  {
+    checkCuda(cudaStreamSynchronize(stream), "stream synchronization");
+  }
+}
+
+void shutdownRuntimeContext(RuntimeContext *context, const bool synchronize)
+{
+  releaseRuntimeContext(context, true, synchronize);
 }
 
 void destroyRuntimeContext(RuntimeContext *context) noexcept
 {
-  if (context == nullptr)
+  try
+  {
+    releaseRuntimeContext(context, false, true);
+  }
+  catch (...)
+  {
+    // Last-resort destructor cleanup must never throw.
+  }
+}
+
+void recordFence(RuntimeContext *context, const CudaQueue queue, const CudaFence fence)
+{
+  checkCuda(cudaSetDevice(context->device), "device selection");
+  checkCuda(cudaEventRecord(context->fences[fenceIndex(fence)], context->streams[queueIndex(queue)]), "fence record");
+}
+
+void waitFence(RuntimeContext *context, const CudaQueue queue, const CudaFence fence)
+{
+  checkCuda(cudaSetDevice(context->device), "device selection");
+  checkCuda(cudaStreamWaitEvent(context->streams[queueIndex(queue)], context->fences[fenceIndex(fence)], 0),
+            "fence wait");
+}
+
+void *allocateDevice(RuntimeContext *context, const std::size_t bytes, const CudaQueue queue)
+{
+  if (bytes == 0)
+  {
+    throw std::runtime_error("CUDA allocation size must be greater than zero");
+  }
+  checkCuda(cudaSetDevice(context->device), "device selection");
+  void *allocation = nullptr;
+  checkCuda(cudaMallocFromPoolAsync(&allocation, bytes, context->memoryPool, context->streams[queueIndex(queue)]),
+            "memory pool allocation");
+  return allocation;
+}
+
+void releaseDevice(RuntimeContext *context, void *allocation, const CudaQueue queue)
+{
+  if (allocation == nullptr)
   {
     return;
   }
-
-  cudaSetDevice(context->device);
-  if (context->stream != nullptr)
-  {
-    cudaStreamSynchronize(context->stream);
-  }
-  if (context->completeEvent != nullptr)
-  {
-    cudaEventDestroy(context->completeEvent);
-  }
-  if (context->readyEvent != nullptr)
-  {
-    cudaEventDestroy(context->readyEvent);
-  }
-  if (context->stream != nullptr)
-  {
-    cudaStreamDestroy(context->stream);
-  }
-  if (context->memoryPool != nullptr)
-  {
-    cudaMemPoolDestroy(context->memoryPool);
-  }
-  delete context;
-}
-
-bool supportsMain10(const RuntimeContext *context) noexcept
-{
-  return context != nullptr && context->main10Supported;
+  checkCuda(cudaSetDevice(context->device), "device selection");
+  checkCuda(cudaFreeAsync(allocation, context->streams[queueIndex(queue)]), "memory pool release");
 }
 
 }   // namespace vtm::cuda_backend

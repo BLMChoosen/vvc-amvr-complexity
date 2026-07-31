@@ -648,9 +648,12 @@ protected:
 private:
   SaveLoadStructSbt ****m_saveLoadSbt;
   Slice const       *m_sliceSbt;
-  int m_maxCuSize;
+  int                m_maxCuSize;
+  int                m_numPosAllocated;
+  int                m_numSizesAllocated;
 
 public:
+  SaveLoadEncInfoSbt();
   virtual  ~SaveLoadEncInfoSbt() { }
   void     resetSaveloadSbt( int maxSbtSize );
 
@@ -695,7 +698,8 @@ private:
   Slice const     *m_slice_chblk;
   // x in CTU, y in CTU, width, height
   CodedCUInfo   ***m_codedCUInfo[MAX_CU_SIZE >> MIN_CU_LOG2][MAX_CU_SIZE >> MIN_CU_LOG2];
-  int m_maxCuSize;
+  int              m_maxCuSize;
+  unsigned         m_numPosAllocated;
 
 protected:
 
@@ -707,6 +711,7 @@ protected:
 
 public:
 
+  CacheBlkInfoCtrl();
   virtual ~CacheBlkInfoCtrl() {}
 
   bool isSkip ( const UnitArea& area );
@@ -751,6 +756,7 @@ private:
   XuPool              m_dummyPool;
   CodingStructure     m_dummyCS;
   int                 m_maxCuSize;
+  unsigned            m_numPosAllocated;
 
 protected:
 
@@ -760,7 +766,7 @@ protected:
   bool setFromCs( const CodingStructure& cs, const Partitioner& partitioner );
   bool isValid  ( const CodingStructure &cs, const Partitioner &partitioner, int qp );
 public:
-  BestEncInfoCache() : m_slice_bencinf(nullptr), m_dummyCS(m_dummyPool) {}
+  BestEncInfoCache();
   virtual ~BestEncInfoCache() {}
   void     init     ( const Slice &slice );
   bool     setCsFrom( CodingStructure& cs, EncTestMode& testMode, const Partitioner& partitioner ) const;

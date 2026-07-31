@@ -52,6 +52,7 @@
 #include <stdio.h>
 #include <cmath>
 #include <algorithm>
+#include <exception>
 
 //! \ingroup EncoderLib
 //! \{
@@ -67,7 +68,28 @@ const MergeIdxPair EncCu::m_geoModeTest[GEO_MAX_NUM_CANDS] = {
   MergeIdxPair{ 5, 0 }, MergeIdxPair{ 5, 1 }, MergeIdxPair{ 5, 2 }, MergeIdxPair{ 5, 3 }, MergeIdxPair{ 5, 4 }
 };
 
-EncCu::EncCu() {}
+EncCu::EncCu()
+  : m_CurrCtx(nullptr)
+  , m_ctxPool(nullptr)
+  , m_pTempCS(nullptr)
+  , m_pBestCS(nullptr)
+  , m_pTempCS2(nullptr)
+  , m_pBestCS2(nullptr)
+  , m_numWidthsAllocated(0)
+  , m_numHeightsAllocated(0)
+  , m_pcEncCfg(nullptr)
+  , m_pcIntraSearch(nullptr)
+  , m_pcInterSearch(nullptr)
+  , m_pcTrQuant(nullptr)
+  , m_pcRdCost(nullptr)
+  , m_pcSliceEncoder(nullptr)
+  , m_deblockingFilter(nullptr)
+  , m_pcGOPEncoder(nullptr)
+  , m_CABACEstimator(nullptr)
+  , m_pcRateCtrl(nullptr)
+  , m_modeCtrl(nullptr)
+{
+}
 
 void EncCu::create( EncCfg* encCfg )
 {
@@ -77,20 +99,25 @@ void EncCu::create( EncCfg* encCfg )
 
   unsigned      numWidths     = gp_sizeIdxInfo->numWidths();
   unsigned      numHeights    = gp_sizeIdxInfo->numHeights();
-  m_pTempCS = new CodingStructure**  [numWidths];
-  m_pBestCS = new CodingStructure**  [numWidths];
-  m_pTempCS2 = new CodingStructure** [numWidths];
-  m_pBestCS2 = new CodingStructure** [numWidths];
+  m_numWidthsAllocated = numWidths;
+  m_numHeightsAllocated = numHeights;
+
+  try
+  {
+  m_pTempCS = new CodingStructure**  [numWidths]();
+  m_pBestCS = new CodingStructure**  [numWidths]();
+  m_pTempCS2 = new CodingStructure** [numWidths]();
+  m_pBestCS2 = new CodingStructure** [numWidths]();
 
   m_pelUnitBufPool.initPelUnitBufPool(chromaFormat, uiMaxWidth, uiMaxHeight);
   m_mergeItemList.init(encCfg->getMaxMergeRdCandNumTotal(), chromaFormat, uiMaxWidth, uiMaxHeight);
 
   for( unsigned w = 0; w < numWidths; w++ )
   {
-    m_pTempCS[w] = new CodingStructure*  [numHeights];
-    m_pBestCS[w] = new CodingStructure*  [numHeights];
-    m_pTempCS2[w] = new CodingStructure* [numHeights];
-    m_pBestCS2[w] = new CodingStructure* [numHeights];
+    m_pTempCS[w] = new CodingStructure*  [numHeights]();
+    m_pBestCS[w] = new CodingStructure*  [numHeights]();
+    m_pTempCS2[w] = new CodingStructure* [numHeights]();
+    m_pBestCS2[w] = new CodingStructure* [numHeights]();
 
     for( unsigned h = 0; h < numHeights; h++ )
     {
@@ -132,53 +159,72 @@ void EncCu::create( EncCfg* encCfg )
 
   m_ctxBuffer.resize(maxDepth);
   m_CurrCtx = 0;
+  }
+  catch (...)
+  {
+    try
+    {
+      destroy();
+    }
+    catch (...)
+    {
+      // Preserve the allocation/initialization exception that caused create() to fail.
+    }
+    throw;
+  }
 }
 
 
 void EncCu::destroy()
 {
-  unsigned numWidths  = gp_sizeIdxInfo->numWidths();
-  unsigned numHeights = gp_sizeIdxInfo->numHeights();
-
-  for( unsigned w = 0; w < numWidths; w++ )
+  std::exception_ptr firstError;
+  auto destroyTable = [this, &firstError](CodingStructure ***&table)
   {
-    for( unsigned h = 0; h < numHeights; h++ )
+    if (table == nullptr)
     {
-      if (m_pBestCS[w][h])
-      {
-        m_pBestCS[w][h]->destroy();
-      }
-      if (m_pTempCS[w][h])
-      {
-        m_pTempCS[w][h]->destroy();
-      }
-
-      delete m_pBestCS[w][h];
-      delete m_pTempCS[w][h];
-
-      if (m_pBestCS2[w][h])
-      {
-        m_pBestCS2[w][h]->destroy();
-      }
-      if (m_pTempCS2[w][h])
-      {
-        m_pTempCS2[w][h]->destroy();
-      }
-
-      delete m_pBestCS2[w][h];
-      delete m_pTempCS2[w][h];
+      return;
     }
 
-    delete[] m_pTempCS[w];
-    delete[] m_pBestCS[w];
-    delete[] m_pTempCS2[w];
-    delete[] m_pBestCS2[w];
-  }
+    for (unsigned w = 0; w < m_numWidthsAllocated; ++w)
+    {
+      CodingStructure **row = table[w];
+      table[w] = nullptr;
+      if (row == nullptr)
+      {
+        continue;
+      }
+      for (unsigned h = 0; h < m_numHeightsAllocated; ++h)
+      {
+        CodingStructure *codingStructure = row[h];
+        row[h] = nullptr;
+        if (codingStructure != nullptr)
+        {
+          try
+          {
+            codingStructure->destroy();
+          }
+          catch (...)
+          {
+            if (!firstError)
+            {
+              firstError = std::current_exception();
+            }
+          }
+          delete codingStructure;
+        }
+      }
+      delete[] row;
+    }
+    delete[] table;
+    table = nullptr;
+  };
 
-  delete[] m_pBestCS; m_pBestCS = nullptr;
-  delete[] m_pTempCS; m_pTempCS = nullptr;
-  delete[] m_pBestCS2; m_pBestCS2 = nullptr;
-  delete[] m_pTempCS2; m_pTempCS2 = nullptr;
+  destroyTable(m_pBestCS);
+  destroyTable(m_pTempCS);
+  destroyTable(m_pBestCS2);
+  destroyTable(m_pTempCS2);
+  m_numWidthsAllocated = 0;
+  m_numHeightsAllocated = 0;
 
 #if REUSE_CU_RESULTS
   if (m_tmpStorageCtu)
@@ -190,12 +236,29 @@ void EncCu::destroy()
 #endif
 
 #if REUSE_CU_RESULTS
-  m_modeCtrl->destroy();
+  if (m_modeCtrl != nullptr)
+  {
+    try
+    {
+      m_modeCtrl->destroy();
+    }
+    catch (...)
+    {
+      if (!firstError)
+      {
+        firstError = std::current_exception();
+      }
+    }
+  }
 
 #endif
   delete m_modeCtrl;
   m_modeCtrl = nullptr;
 
+  if (firstError)
+  {
+    std::rethrow_exception(firstError);
+  }
 }
 
 EncCu::~EncCu()

@@ -256,6 +256,8 @@ private:
   CodingStructure    ***m_pBestCS;
   CodingStructure    ***m_pTempCS2;
   CodingStructure    ***m_pBestCS2;
+  unsigned              m_numWidthsAllocated;
+  unsigned              m_numHeightsAllocated;
   //  Access channel
   EncCfg*               m_pcEncCfg;
   IntraSearch*          m_pcIntraSearch;

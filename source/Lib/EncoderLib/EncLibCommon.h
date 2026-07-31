@@ -38,11 +38,17 @@
 #pragma once
 #include <list>
 #include <fstream>
+#include <memory>
 #include "CommonLib/Slice.h"
 #include "CommonLib/ParameterSetManager.h"
 #if JVET_AJ0151_DSC_SEI
 #include "CommonLib/SEIDigitallySignedContent.h"
 #endif
+
+namespace vtm
+{
+struct ComputeConfig;
+}
 
 class EncLibCommon
 {
@@ -56,6 +62,8 @@ private:
 #if JVET_AJ0151_DSC_SEI
   DscSubstreamManager       m_dscSubstreamManager;
 #endif
+  struct ComputeState;
+  std::unique_ptr<ComputeState> m_computeState;
 
 public:
   EncLibCommon();
@@ -67,6 +75,10 @@ public:
   EnumArray<ParameterSetMap<APS>, ApsType> &getApsMaps() { return m_apsMaps; }
   VPS*                     getVPS()                { return &m_vps;       }
   int*                     getDecPicBuffering()    { return m_layerDecPicBuffering; }
+  void                     configureComputeBackend(const vtm::ComputeConfig &config);
+  void                     acquireComputeBackend();
+  void                     synchronizeComputeBackend();
+  void                     releaseComputeBackend();
 #if JVET_AJ0151_DSC_SEI
   DscSubstreamManager*     getDscSubstreamManager() { return &m_dscSubstreamManager; }
 #endif

@@ -104,6 +104,8 @@ private:
   TExt360AppEncTop*      m_ext360;
 #endif
   bool m_flush;
+  bool m_encLibCreated;
+  bool m_libInitialized;
 #if GREEN_METADATA_SEI_ENABLED
   FeatureCounterStruct      m_featureCounter;
 #endif

@@ -279,6 +279,7 @@ public:
   void  create  ();
   void  destroy ();
   void  setComputeConfig(const vtm::ComputeConfig &config);
+  void  synchronizeComputeBackend();
 
   void  setDecodedPictureHashSEIEnabled(int enabled) { m_decodedPictureHashSEIEnabled=enabled; }
 

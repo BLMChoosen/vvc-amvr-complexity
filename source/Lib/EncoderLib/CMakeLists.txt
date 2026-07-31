@@ -41,7 +41,7 @@ if( DEFINED ENABLE_HIGH_BITDEPTH )
 endif()
 
 target_include_directories( ${LIB_NAME} PUBLIC . )
-target_link_libraries( ${LIB_NAME} CommonLib CudaBackend )
+target_link_libraries( ${LIB_NAME} PUBLIC CommonLib PRIVATE CudaBackend )
 
 if( CMAKE_COMPILER_IS_GNUCC )
   # this is quite certainly a compiler problem
@@ -52,3 +52,10 @@ source_group( "Natvis Files" FILES ${NATVIS_FILES} )
 
 # set the folder where to place the projects
 set_target_properties( ${LIB_NAME} PROPERTIES FOLDER lib )
+
+if( VTM_BUILD_CUDA_BACKEND_TESTS )
+  add_executable( EncoderBackendLifecycleTest tests/EncoderBackendLifecycleTest.cpp )
+  target_link_libraries( EncoderBackendLifecycleTest PRIVATE ${LIB_NAME} CudaBackend )
+  set_target_properties( EncoderBackendLifecycleTest PROPERTIES FOLDER test )
+  add_test( NAME EncoderBackend.AcquireFailureRetry COMMAND EncoderBackendLifecycleTest )
+endif()

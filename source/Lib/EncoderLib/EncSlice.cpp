@@ -55,10 +55,15 @@
 // ====================================================================================================================
 
 EncSlice::EncSlice()
- : m_encCABACTableIdx(I_SLICE)
+ : m_pcCfg(nullptr)
+ , m_encCABACTableIdx(I_SLICE)
 #if ENABLE_QPA
  , m_adaptedLumaQP(-1)
 #endif
+ , m_pixelPredErr(nullptr)
+ , m_pixelRecDis(nullptr)
+ , m_maxPicWidth(0)
+ , m_maxPicHeight(0)
 {
 }
 
@@ -79,7 +84,7 @@ void EncSlice::destroy()
   m_vdRdPicQp.clear();
   m_viRdPicQp.clear();
 
-  if (m_pcCfg->getDPF())
+  if (m_pixelRecDis != nullptr || m_pixelPredErr != nullptr)
   {
     m_lambdaWeight.clear();
     if (m_pixelRecDis)
@@ -129,12 +134,20 @@ void EncSlice::init( EncLib* pcEncLib, const SPS& sps )
   {
     m_maxPicHeight = sps.getMaxPicHeightInLumaSamples();
     m_maxPicWidth = sps.getMaxPicWidthInLumaSamples();
-    m_pixelPredErr = new int*[m_maxPicHeight];
-    m_pixelRecDis = new int*[m_maxPicHeight];
-    for (int i = 0; i < m_maxPicHeight; i++)
+    m_pixelPredErr = new int *[m_maxPicHeight]();
+    try
     {
-      m_pixelPredErr[i] = new int[m_maxPicWidth];
-      m_pixelRecDis[i] = new int[m_maxPicWidth];
+      m_pixelRecDis = new int *[m_maxPicHeight]();
+      for (int i = 0; i < m_maxPicHeight; i++)
+      {
+        m_pixelPredErr[i] = new int[m_maxPicWidth];
+        m_pixelRecDis[i] = new int[m_maxPicWidth];
+      }
+    }
+    catch (...)
+    {
+      destroy();
+      throw;
     }
   }
 }

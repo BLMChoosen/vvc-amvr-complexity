@@ -150,8 +150,8 @@ private:
   SEINeuralNetworkPostFiltering m_nnPostFiltering;
   EncType                   m_encType;
   SEIPackedRegionsInfoProcess m_priProcess;
-  struct ComputeState;
-  std::unique_ptr<ComputeState> m_computeState;
+  EncLibCommon             *m_encLibCommon;
+  bool                      m_computeBackendAcquired;
 public:
   SPS*                      getSPS( int spsId ) { return m_spsMap.getPS( spsId ); };
   APS**                     getApss() { return m_apss; }
@@ -185,6 +185,7 @@ public:
   void      destroy         ();
   void      init(AUWriterIf *auWriterIf);
   void      setComputeConfig(const vtm::ComputeConfig &config);
+  void      synchronizeComputeBackend();
   void      deletePicBuffer ();
 
   // -------------------------------------------------------------------------------------------------------------------

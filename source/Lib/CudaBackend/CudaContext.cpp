@@ -34,6 +34,8 @@
 #include "CudaContext.h"
 
 #include <stdexcept>
+#include <thread>
+#include <exception>
 
 #if VTM_ENABLE_CUDA
 #include "CudaRuntime.h"
@@ -47,15 +49,40 @@ struct CudaContext::Impl
 #if VTM_ENABLE_CUDA
   cuda_backend::RuntimeContext *runtime = nullptr;
 #endif
+  std::thread::id ownerThread;
 };
+
+namespace
+{
+
+void requireOwnerThread(const std::thread::id &ownerThread)
+{
+  if (ownerThread != std::this_thread::get_id())
+  {
+    throw std::runtime_error("CUDA context APIs must be called from the thread that created the context");
+  }
+}
+
+}   // namespace
 
 CudaContext::CudaContext() : m_impl(new Impl)
 {
 }
 
-CudaContext::~CudaContext()
+CudaContext::~CudaContext() noexcept
 {
-  destroy();
+#if VTM_ENABLE_CUDA
+  if (m_impl->runtime != nullptr)
+  {
+    if (m_impl->ownerThread != std::this_thread::get_id())
+    {
+      std::terminate();
+    }
+    cuda_backend::destroyRuntimeContext(m_impl->runtime);
+    m_impl->runtime = nullptr;
+    m_impl->ownerThread = std::thread::id{};
+  }
+#endif
 }
 
 void CudaContext::create(const int device)
@@ -71,6 +98,7 @@ void CudaContext::create(const int device)
 
 #if VTM_ENABLE_CUDA
   m_impl->runtime = cuda_backend::createRuntimeContext(device);
+  m_impl->ownerThread = std::this_thread::get_id();
 #else
   (void) device;
   throw std::runtime_error("CUDA backend requested, but this binary was built with ENABLE_CUDA=OFF");
@@ -82,19 +110,92 @@ void CudaContext::synchronize()
 #if VTM_ENABLE_CUDA
   if (m_impl->runtime != nullptr)
   {
+    requireOwnerThread(m_impl->ownerThread);
     cuda_backend::synchronizeRuntimeContext(m_impl->runtime);
   }
 #endif
 }
 
-void CudaContext::destroy() noexcept
+void CudaContext::shutdown(const bool synchronize)
 {
 #if VTM_ENABLE_CUDA
   if (m_impl->runtime != nullptr)
   {
-    cuda_backend::destroyRuntimeContext(m_impl->runtime);
+    requireOwnerThread(m_impl->ownerThread);
+    cuda_backend::RuntimeContext *runtime = m_impl->runtime;
     m_impl->runtime = nullptr;
+    m_impl->ownerThread = std::thread::id{};
+    cuda_backend::shutdownRuntimeContext(runtime, synchronize);
   }
+#endif
+}
+
+void CudaContext::destroy()
+{
+  shutdown();
+}
+
+void CudaContext::recordFence(const CudaQueue queue, const CudaFence fence)
+{
+#if VTM_ENABLE_CUDA
+  if (m_impl->runtime == nullptr)
+  {
+    throw std::runtime_error("CUDA context is not initialized");
+  }
+  requireOwnerThread(m_impl->ownerThread);
+  cuda_backend::recordFence(m_impl->runtime, queue, fence);
+#else
+  (void) queue;
+  (void) fence;
+  throw std::runtime_error("CUDA backend requested, but this binary was built with ENABLE_CUDA=OFF");
+#endif
+}
+
+void CudaContext::waitFence(const CudaQueue queue, const CudaFence fence)
+{
+#if VTM_ENABLE_CUDA
+  if (m_impl->runtime == nullptr)
+  {
+    throw std::runtime_error("CUDA context is not initialized");
+  }
+  requireOwnerThread(m_impl->ownerThread);
+  cuda_backend::waitFence(m_impl->runtime, queue, fence);
+#else
+  (void) queue;
+  (void) fence;
+  throw std::runtime_error("CUDA backend requested, but this binary was built with ENABLE_CUDA=OFF");
+#endif
+}
+
+void *CudaContext::allocateDevice(const std::size_t bytes, const CudaQueue queue)
+{
+#if VTM_ENABLE_CUDA
+  if (m_impl->runtime == nullptr)
+  {
+    throw std::runtime_error("CUDA context is not initialized");
+  }
+  requireOwnerThread(m_impl->ownerThread);
+  return cuda_backend::allocateDevice(m_impl->runtime, bytes, queue);
+#else
+  (void) bytes;
+  (void) queue;
+  throw std::runtime_error("CUDA backend requested, but this binary was built with ENABLE_CUDA=OFF");
+#endif
+}
+
+void CudaContext::releaseDevice(void *allocation, const CudaQueue queue)
+{
+#if VTM_ENABLE_CUDA
+  if (m_impl->runtime == nullptr)
+  {
+    throw std::runtime_error("CUDA context is not initialized");
+  }
+  requireOwnerThread(m_impl->ownerThread);
+  cuda_backend::releaseDevice(m_impl->runtime, allocation, queue);
+#else
+  (void) allocation;
+  (void) queue;
+  throw std::runtime_error("CUDA backend requested, but this binary was built with ENABLE_CUDA=OFF");
 #endif
 }
 
@@ -102,15 +203,6 @@ bool CudaContext::isCreated() const noexcept
 {
 #if VTM_ENABLE_CUDA
   return m_impl->runtime != nullptr;
-#else
-  return false;
-#endif
-}
-
-bool CudaContext::supportsMain10() const noexcept
-{
-#if VTM_ENABLE_CUDA
-  return m_impl->runtime != nullptr && cuda_backend::supportsMain10(m_impl->runtime);
 #else
   return false;
 #endif

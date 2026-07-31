@@ -16,14 +16,17 @@ if( ENABLE_CUDA )
   target_link_libraries( ${LIB_NAME} PRIVATE CUDA::cudart )
   set_target_properties( ${LIB_NAME} PROPERTIES
     CUDA_ARCHITECTURES "${_vtm_cuda_architectures}"
+    CUDA_RUNTIME_LIBRARY None
     CUDA_STANDARD 17
     CUDA_STANDARD_REQUIRED ON
   )
+else()
+  target_compile_definitions( ${LIB_NAME} PRIVATE VTM_ENABLE_CUDA=0 )
 endif()
 
 set_target_properties( ${LIB_NAME} PROPERTIES FOLDER lib )
 
-if( BUILD_TESTING )
+if( VTM_BUILD_CUDA_BACKEND_TESTS )
   add_executable( CudaBackendTest tests/CudaBackendTest.cpp )
   target_link_libraries( CudaBackendTest PRIVATE ${LIB_NAME} )
   set_target_properties( CudaBackendTest PROPERTIES FOLDER test )
@@ -32,5 +35,7 @@ if( BUILD_TESTING )
   if( ENABLE_CUDA )
     add_test( NAME CudaBackend.Runtime COMMAND CudaBackendTest --cuda 0 )
     set_tests_properties( CudaBackend.Runtime PROPERTIES LABELS gpu )
+  else()
+    add_test( NAME CudaBackend.Disabled COMMAND CudaBackendTest --disabled )
   endif()
 endif()

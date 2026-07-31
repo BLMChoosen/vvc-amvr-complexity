@@ -38,7 +38,7 @@ if( DEFINED ENABLE_HIGH_BITDEPTH )
 endif()
 
 target_include_directories( ${LIB_NAME} PUBLIC ../DecoderLib )
-target_link_libraries( ${LIB_NAME} CommonAnalyserLib )
+target_link_libraries( ${LIB_NAME} PUBLIC CommonAnalyserLib PRIVATE CudaBackend )
 
 # example: place header files in different folders
 source_group( "Natvis Files" FILES ${NATVIS_FILES} )

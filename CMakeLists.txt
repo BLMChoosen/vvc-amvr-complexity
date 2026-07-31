@@ -2,6 +2,7 @@
 cmake_minimum_required( VERSION 3.10 FATAL_ERROR )
 
 option( ENABLE_CUDA "Build the optional CUDA compute backend" OFF )
+option( VTM_BUILD_CUDA_BACKEND_TESTS "Build the opt-in CUDA backend contract tests" OFF )
 
 if( ENABLE_CUDA AND CMAKE_VERSION VERSION_LESS 3.24 )
   message( FATAL_ERROR "ENABLE_CUDA requires CMake 3.24 or newer (found ${CMAKE_VERSION})" )
@@ -20,11 +21,20 @@ if( ENABLE_CUDA )
   set( _vtm_cuda_architectures "${VTM_CUDA_ARCHITECTURES}" )
   string( REGEX REPLACE "sm_([0-9]+)" "\\1" _vtm_cuda_architectures "${_vtm_cuda_architectures}" )
   set( CMAKE_CUDA_ARCHITECTURES "${_vtm_cuda_architectures}" )
+  string( SHA256 _vtm_cuda_build_hash "${CMAKE_BINARY_DIR}" )
+  string( SUBSTRING "${_vtm_cuda_build_hash}" 0 8 _vtm_cuda_build_hash )
+  set( VTM_CUDA_OUTPUT_SUFFIX "cuda-${_vtm_cuda_architectures}-${_vtm_cuda_build_hash}" CACHE STRING
+       "Unique output directory suffix for this CUDA build tree" )
+  # Disable nvcc's implicit runtime and link the single explicit CUDA::cudart target below.
+  set( CMAKE_CUDA_RUNTIME_LIBRARY None )
   enable_language( CUDA )
   find_package( CUDAToolkit REQUIRED )
 endif()
 
-include( CTest )
+if( VTM_BUILD_CUDA_BACKEND_TESTS )
+  include( CTest )
+  enable_testing()
+endif()
 
 # use ccache
 find_program( CCACHE_FOUND ccache )
@@ -76,6 +86,25 @@ set_property( GLOBAL PROPERTY USE_FOLDERS ON )
 
 # Include a utility module providing functions, macros, and settings
 include( ${CMAKE_SOURCE_DIR}/cmake/CMakeBuild/cmake/modules/BBuildEnv.cmake )
+
+# BBuildEnv normally makes every build tree share the same source-tree bin/lib
+# directories. Keep those legacy locations for CPU builds, but isolate every
+# CUDA artifact in a sibling directory so cleaning a CUDA tree can never remove
+# files or directories owned by a CPU tree.
+if( ENABLE_CUDA )
+  foreach( output_kind ARCHIVE LIBRARY RUNTIME PDB COMPILE_PDB )
+    foreach( output_config "" DEBUG RELEASE RELWITHDEBINFO MINSIZEREL )
+      if( output_config STREQUAL "" )
+        set( output_variable "CMAKE_${output_kind}_OUTPUT_DIRECTORY" )
+      else()
+        set( output_variable "CMAKE_${output_kind}_OUTPUT_DIRECTORY_${output_config}" )
+      endif()
+      if( DEFINED ${output_variable} AND NOT "${${output_variable}}" STREQUAL "" )
+        set( ${output_variable} "${${output_variable}}-${VTM_CUDA_OUTPUT_SUFFIX}" )
+      endif()
+    endforeach()
+  endforeach()
+endif()
 
 # Enable warnings for some generators and toolsets.
 # bb_enable_warnings( gcc warnings-as-errors -Wno-sign-compare )

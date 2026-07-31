@@ -48,14 +48,14 @@ if( CMAKE_COMPILER_IS_GNUCC AND BUILD_STATIC )
   target_compile_definitions( ${EXE_NAME} PUBLIC ENABLE_WPP_STATIC_LINK=1 )
 endif()
 
-target_link_libraries( ${EXE_NAME} CommonLib EncoderLib DecoderLib Utilities ${ADDITIONAL_LIBS} )
+target_link_libraries( ${EXE_NAME} PRIVATE CommonLib EncoderLib DecoderLib Utilities CudaBackend ${ADDITIONAL_LIBS} )
 
 if( EXTENSION_360_VIDEO )
-  target_link_libraries( ${EXE_NAME} Lib360 AppEncHelper360 )
+  target_link_libraries( ${EXE_NAME} PRIVATE Lib360 AppEncHelper360 )
 endif()
 
 if( EXTENSION_HDRTOOLS )
-  target_link_libraries( ${EXE_NAME} HDRLib )
+  target_link_libraries( ${EXE_NAME} PRIVATE HDRLib )
 endif()
 
 # lldb custom data formatters
@@ -80,4 +80,39 @@ source_group( "Natvis Files" FILES ${NATVIS_FILES} )
 
 # set the folder where to place the projects
 set_target_properties( ${EXE_NAME}  PROPERTIES FOLDER app LINKER_LANGUAGE CXX )
+
+if( VTM_BUILD_CUDA_BACKEND_TESTS )
+  set( ENCODER_BACKEND_SMOKE_INPUT "${CMAKE_CURRENT_BINARY_DIR}/encoder-backend-smoke.yuv" )
+  set( ENCODER_BACKEND_SMOKE_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/encoder-backend-smoke.vvc" )
+  file( GENERATE OUTPUT "${ENCODER_BACKEND_SMOKE_INPUT}" CONTENT "0" )
+
+  add_test( NAME EncoderApp.Help COMMAND ${EXE_NAME} --help )
+  add_test( NAME EncoderApp.InvalidBackend COMMAND ${EXE_NAME} --GPUBackend=bogus )
+  add_test( NAME EncoderApp.InvalidDevice COMMAND ${EXE_NAME} --GPUDevice=-1 )
+  set_tests_properties(
+    EncoderApp.Help
+    EncoderApp.InvalidBackend
+    EncoderApp.InvalidDevice
+    PROPERTIES WILL_FAIL TRUE
+  )
+
+  if( ENABLE_CUDA )
+    set( ENCODER_BACKEND_FAILURE_TEST EncoderApp.InvalidCudaDeviceAfterCreate )
+    set( ENCODER_BACKEND_FAILURE_ARGS --GPUBackend=cuda --GPUDevice=999 )
+  else()
+    set( ENCODER_BACKEND_FAILURE_TEST EncoderApp.CudaUnavailableAfterCreate )
+    set( ENCODER_BACKEND_FAILURE_ARGS --GPUBackend=cuda )
+  endif()
+  add_test(
+    NAME ${ENCODER_BACKEND_FAILURE_TEST}
+    COMMAND ${EXE_NAME}
+      -c "${CMAKE_SOURCE_DIR}/cfg/encoder_intra_vtm.cfg"
+      -i "${ENCODER_BACKEND_SMOKE_INPUT}"
+      -b "${ENCODER_BACKEND_SMOKE_OUTPUT}"
+      --SourceWidth=16 --SourceHeight=16 --FrameRate=1 --FramesToBeEncoded=1
+      --InputBitDepth=8 --InputChromaFormat=420
+      ${ENCODER_BACKEND_FAILURE_ARGS}
+  )
+  set_tests_properties( ${ENCODER_BACKEND_FAILURE_TEST} PROPERTIES WILL_FAIL TRUE RUN_SERIAL TRUE )
+endif()
 

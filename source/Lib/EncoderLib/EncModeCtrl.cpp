@@ -49,6 +49,8 @@
 #include "CommonLib/dtrace_next.h"
 
 #include <cmath>
+#include <exception>
+#include <memory>
 
 static constexpr double UNSET_IMV_COST = MAX_DOUBLE * 0.125;   // Some large, unique value
 
@@ -408,21 +410,36 @@ int EncModeCtrl::calculateLumaDQPsmooth(const CPelBuf& rcOrg, int baseQP, double
   return qp;
 }
 
+CacheBlkInfoCtrl::CacheBlkInfoCtrl()
+  : m_numWidths(0), m_numHeights(0), m_slice_chblk(nullptr), m_maxCuSize(0), m_numPosAllocated(0)
+{
+  for (auto &xEntries : m_codedCUInfo)
+  {
+    for (auto &entry : xEntries)
+    {
+      entry = nullptr;
+    }
+  }
+}
+
 void CacheBlkInfoCtrl::create(int maxCuSize)
 {
   const unsigned numPos = maxCuSize >> MIN_CU_LOG2;
   m_maxCuSize = maxCuSize;
+  m_numPosAllocated = numPos;
 
   m_numWidths  = gp_sizeIdxInfo->numWidths();
   m_numHeights = gp_sizeIdxInfo->numHeights();
 
   bool isLog2MttPartitioning = !!dynamic_cast<SizeIndexInfoLog2*>( gp_sizeIdxInfo );
 
+  try
+  {
   for( unsigned x = 0; x < numPos; x++ )
   {
     for( unsigned y = 0; y < numPos; y++ )
     {
-      m_codedCUInfo[x][y] = new CodedCUInfo**[m_numWidths];
+      m_codedCUInfo[x][y] = new CodedCUInfo**[m_numWidths]();
 
       for( int wIdx = 0; wIdx < gp_sizeIdxInfo->numWidths(); wIdx++ )
       {
@@ -440,7 +457,7 @@ void CacheBlkInfoCtrl::create(int maxCuSize)
           continue;
         }
 
-        m_codedCUInfo[x][y][wIdx] = new CodedCUInfo*[gp_sizeIdxInfo->numHeights()];
+        m_codedCUInfo[x][y][wIdx] = new CodedCUInfo*[m_numHeights]();
 
         for( int hIdx = 0; hIdx < gp_sizeIdxInfo->numHeights(); hIdx++ )
         {
@@ -463,35 +480,53 @@ void CacheBlkInfoCtrl::create(int maxCuSize)
       }
     }
   }
+  }
+  catch (...)
+  {
+    try
+    {
+      destroy();
+    }
+    catch (...)
+    {
+    }
+    throw;
+  }
 }
 
 void CacheBlkInfoCtrl::destroy()
 {
-  const unsigned numPos = m_maxCuSize >> MIN_CU_LOG2;
-
-  for( unsigned x = 0; x < numPos; x++ )
+  for( unsigned x = 0; x < m_numPosAllocated; x++ )
   {
-    for( unsigned y = 0; y < numPos; y++ )
+    for( unsigned y = 0; y < m_numPosAllocated; y++ )
     {
-      for( int wIdx = 0; wIdx < gp_sizeIdxInfo->numWidths(); wIdx++ )
+      CodedCUInfo ***widthEntries = m_codedCUInfo[x][y];
+      m_codedCUInfo[x][y] = nullptr;
+      if (widthEntries == nullptr)
       {
-        if( m_codedCUInfo[x][y][wIdx] )
+        continue;
+      }
+      for( unsigned wIdx = 0; wIdx < m_numWidths; wIdx++ )
+      {
+        CodedCUInfo **heightEntries = widthEntries[wIdx];
+        widthEntries[wIdx] = nullptr;
+        if( heightEntries )
         {
-          for( int hIdx = 0; hIdx < gp_sizeIdxInfo->numHeights(); hIdx++ )
+          for( unsigned hIdx = 0; hIdx < m_numHeights; hIdx++ )
           {
-            if( m_codedCUInfo[x][y][wIdx][hIdx] )
-            {
-              delete m_codedCUInfo[x][y][wIdx][hIdx];
-            }
+            delete heightEntries[hIdx];
+            heightEntries[hIdx] = nullptr;
           }
-
-          delete[] m_codedCUInfo[x][y][wIdx];
+          delete[] heightEntries;
         }
       }
-
-      delete[] m_codedCUInfo[x][y];
+      delete[] widthEntries;
     }
   }
+  m_numPosAllocated = 0;
+  m_numWidths = 0;
+  m_numHeights = 0;
+  m_maxCuSize = 0;
 }
 
 void CacheBlkInfoCtrl::init( const Slice &slice )
@@ -585,46 +620,88 @@ void SaveLoadEncInfoSbt::init( const Slice &slice )
   m_sliceSbt = &slice;
 }
 
+SaveLoadEncInfoSbt::SaveLoadEncInfoSbt()
+  : m_saveLoadSbt(nullptr), m_sliceSbt(nullptr), m_maxCuSize(0), m_numPosAllocated(0), m_numSizesAllocated(0)
+{
+}
+
 void SaveLoadEncInfoSbt::create(int maxCuSize)
 {
   int numSizeIdx = gp_sizeIdxInfo->idxFrom( SBT_MAX_SIZE ) - MIN_CU_LOG2 + 1;
   int numPosIdx = maxCuSize >> MIN_CU_LOG2;
   m_maxCuSize = maxCuSize;
+  m_numPosAllocated = numPosIdx;
+  m_numSizesAllocated = numSizeIdx;
 
-  m_saveLoadSbt = new SaveLoadStructSbt***[numPosIdx];
+  try
+  {
+  m_saveLoadSbt = new SaveLoadStructSbt***[numPosIdx]();
 
   for( int xIdx = 0; xIdx < numPosIdx; xIdx++ )
   {
-    m_saveLoadSbt[xIdx] = new SaveLoadStructSbt**[numPosIdx];
+    m_saveLoadSbt[xIdx] = new SaveLoadStructSbt**[numPosIdx]();
     for( int yIdx = 0; yIdx < numPosIdx; yIdx++ )
     {
-      m_saveLoadSbt[xIdx][yIdx] = new SaveLoadStructSbt*[numSizeIdx];
+      m_saveLoadSbt[xIdx][yIdx] = new SaveLoadStructSbt*[numSizeIdx]();
       for( int wIdx = 0; wIdx < numSizeIdx; wIdx++ )
       {
         m_saveLoadSbt[xIdx][yIdx][wIdx] = new SaveLoadStructSbt[numSizeIdx];
       }
     }
   }
+  }
+  catch (...)
+  {
+    try
+    {
+      destroy();
+    }
+    catch (...)
+    {
+    }
+    throw;
+  }
 }
 
 void SaveLoadEncInfoSbt::destroy()
 {
-  int numSizeIdx = gp_sizeIdxInfo->idxFrom( SBT_MAX_SIZE ) - MIN_CU_LOG2 + 1;
-  int numPosIdx = m_maxCuSize >> MIN_CU_LOG2;
-
-  for( int xIdx = 0; xIdx < numPosIdx; xIdx++ )
+  if (m_saveLoadSbt == nullptr)
   {
-    for( int yIdx = 0; yIdx < numPosIdx; yIdx++ )
+    m_numPosAllocated = 0;
+    m_numSizesAllocated = 0;
+    m_maxCuSize = 0;
+    return;
+  }
+  for( int xIdx = 0; xIdx < m_numPosAllocated; xIdx++ )
+  {
+    SaveLoadStructSbt ***yEntries = m_saveLoadSbt[xIdx];
+    m_saveLoadSbt[xIdx] = nullptr;
+    if (yEntries == nullptr)
     {
-      for( int wIdx = 0; wIdx < numSizeIdx; wIdx++ )
-      {
-        delete[] m_saveLoadSbt[xIdx][yIdx][wIdx];
-      }
-      delete[] m_saveLoadSbt[xIdx][yIdx];
+      continue;
     }
-    delete[] m_saveLoadSbt[xIdx];
+    for( int yIdx = 0; yIdx < m_numPosAllocated; yIdx++ )
+    {
+      SaveLoadStructSbt **widthEntries = yEntries[yIdx];
+      yEntries[yIdx] = nullptr;
+      if (widthEntries == nullptr)
+      {
+        continue;
+      }
+      for( int wIdx = 0; wIdx < m_numSizesAllocated; wIdx++ )
+      {
+        delete[] widthEntries[wIdx];
+        widthEntries[wIdx] = nullptr;
+      }
+      delete[] widthEntries;
+    }
+    delete[] yEntries;
   }
   delete[] m_saveLoadSbt;
+  m_saveLoadSbt = nullptr;
+  m_numPosAllocated = 0;
+  m_numSizesAllocated = 0;
+  m_maxCuSize = 0;
 }
 
 SaveLoadEncInfoSbt::BestSbt SaveLoadEncInfoSbt::findBestSbt(const UnitArea &area, const uint32_t curPuSse)
@@ -741,21 +818,44 @@ static bool isTheSameNbHood( const CodingUnit &cu, const CodingStructure& cs, co
   return true;
 }
 
+BestEncInfoCache::BestEncInfoCache()
+  : m_numWidths(0)
+  , m_numHeights(0)
+  , m_slice_bencinf(nullptr)
+  , m_pCoeff(nullptr)
+  , m_pPcmBuf(nullptr)
+  , m_runType(nullptr)
+  , m_dummyCS(m_dummyPool)
+  , m_maxCuSize(0)
+  , m_numPosAllocated(0)
+{
+  for (auto &xEntries : m_bestEncInfo)
+  {
+    for (auto &entry : xEntries)
+    {
+      entry = nullptr;
+    }
+  }
+}
+
 void BestEncInfoCache::create( const ChromaFormat chFmt, int maxCuSize)
 {
   const unsigned numPos = maxCuSize >> MIN_CU_LOG2;
   m_maxCuSize = maxCuSize;
+  m_numPosAllocated = numPos;
 
   m_numWidths  = gp_sizeIdxInfo->numWidths();
   m_numHeights = gp_sizeIdxInfo->numHeights();
 
   bool isLog2MttPartitioning = !!dynamic_cast<SizeIndexInfoLog2*>( gp_sizeIdxInfo );
 
+  try
+  {
   for( unsigned x = 0; x < numPos; x++ )
   {
     for( unsigned y = 0; y < numPos; y++ )
     {
-      m_bestEncInfo[x][y] = new BestEncodingInfo**[m_numWidths];
+      m_bestEncInfo[x][y] = new BestEncodingInfo**[m_numWidths]();
 
       for( int wIdx = 0; wIdx < gp_sizeIdxInfo->numWidths(); wIdx++ )
       {
@@ -773,7 +873,7 @@ void BestEncInfoCache::create( const ChromaFormat chFmt, int maxCuSize)
           continue;
         }
 
-        m_bestEncInfo[x][y][wIdx] = new BestEncodingInfo*[gp_sizeIdxInfo->numHeights()];
+        m_bestEncInfo[x][y][wIdx] = new BestEncodingInfo*[m_numHeights]();
 
         for( int hIdx = 0; hIdx < gp_sizeIdxInfo->numHeights(); hIdx++ )
         {
@@ -816,54 +916,74 @@ void BestEncInfoCache::create( const ChromaFormat chFmt, int maxCuSize)
       }
     }
   }
+  }
+  catch (...)
+  {
+    try
+    {
+      destroy();
+    }
+    catch (...)
+    {
+    }
+    throw;
+  }
 }
 
 void BestEncInfoCache::destroy()
 {
-  const unsigned numPos = m_maxCuSize >> MIN_CU_LOG2;
-
-  for( unsigned x = 0; x < numPos; x++ )
+  for( unsigned x = 0; x < m_numPosAllocated; x++ )
   {
-    for( unsigned y = 0; y < numPos; y++ )
+    for( unsigned y = 0; y < m_numPosAllocated; y++ )
     {
-      for( int wIdx = 0; wIdx < gp_sizeIdxInfo->numWidths(); wIdx++ )
+      BestEncodingInfo ***widthEntries = m_bestEncInfo[x][y];
+      m_bestEncInfo[x][y] = nullptr;
+      if (widthEntries == nullptr)
       {
-        if( m_bestEncInfo[x][y][wIdx] )
+        continue;
+      }
+      for( unsigned wIdx = 0; wIdx < m_numWidths; wIdx++ )
+      {
+        BestEncodingInfo **heightEntries = widthEntries[wIdx];
+        widthEntries[wIdx] = nullptr;
+        if( heightEntries )
         {
-          for( int hIdx = 0; hIdx < gp_sizeIdxInfo->numHeights(); hIdx++ )
+          for( unsigned hIdx = 0; hIdx < m_numHeights; hIdx++ )
           {
-            if( m_bestEncInfo[x][y][wIdx][hIdx] )
-            {
-              delete m_bestEncInfo[x][y][wIdx][hIdx];
-            }
+            delete heightEntries[hIdx];
+            heightEntries[hIdx] = nullptr;
           }
-
-          delete[] m_bestEncInfo[x][y][wIdx];
+          delete[] heightEntries;
         }
       }
-
-      delete[] m_bestEncInfo[x][y];
+      delete[] widthEntries;
     }
   }
 
   delete[] m_pCoeff;
+  m_pCoeff = nullptr;
   delete[] m_pPcmBuf;
+  m_pPcmBuf = nullptr;
 
   if (m_runType != nullptr)
   {
     delete[] m_runType;
     m_runType = nullptr;
   }
+  m_numPosAllocated = 0;
+  m_numWidths = 0;
+  m_numHeights = 0;
+  m_maxCuSize = 0;
+  m_slice_bencinf = nullptr;
 }
 
 void BestEncInfoCache::init( const Slice &slice )
 {
-  bool isInitialized = m_slice_bencinf;
-
-  m_slice_bencinf = &slice;
+  bool isInitialized = m_slice_bencinf != nullptr;
 
   if (isInitialized)
   {
+    m_slice_bencinf = &slice;
     if (slice.getSliceQp() != m_sliceQp)
     {
       const unsigned numPos = m_maxCuSize >> MIN_CU_LOG2;
@@ -919,25 +1039,26 @@ void BestEncInfoCache::init( const Slice &slice )
   }
 
 #if REUSE_CU_RESULTS_WITH_MULTIPLE_TUS
-  m_pCoeff  = new TCoeff[numCoeff*MAX_NUM_TUS];
-  m_pPcmBuf = new Pel   [numCoeff*MAX_NUM_TUS];
-  if (slice.getSPS()->getPLTMode())
-  {
-    m_runType = new PLTRunMode[numCoeff * MAX_NUM_TUS];
-  }
+  const size_t storageSize = numCoeff * MAX_NUM_TUS;
 #else
-  m_pCoeff  = new TCoeff[numCoeff];
-  m_pPcmBuf = new Pel   [numCoeff];
+  const size_t storageSize = numCoeff;
+#endif
+  std::unique_ptr<TCoeff[]> coeffStorage(new TCoeff[storageSize]);
+  std::unique_ptr<Pel[]> pcmStorage(new Pel[storageSize]);
+  std::unique_ptr<PLTRunMode[]> runTypeStorage;
   if (slice.getSPS()->getPLTMode())
   {
-    m_runType = new PLTRunMode[numCoeff];
+    runTypeStorage.reset(new PLTRunMode[storageSize]);
   }
-#endif
+  m_pCoeff = coeffStorage.release();
+  m_pPcmBuf = pcmStorage.release();
+  m_runType = runTypeStorage.release();
+  m_slice_bencinf = &slice;
 
   TCoeff *coeffPtr = m_pCoeff;
   Pel    *pcmPtr   = m_pPcmBuf;
   PLTRunMode* runTypePtr = m_runType;
-  m_dummyCS.pcv = m_slice_bencinf->getPPS()->pcv;
+  m_dummyCS.pcv = slice.getPPS()->pcv;
 
   for( unsigned x = 0; x < numPos; x++ )
   {
