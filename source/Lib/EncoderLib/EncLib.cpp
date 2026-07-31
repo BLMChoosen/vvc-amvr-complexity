@@ -229,6 +229,11 @@ void EncLib::synchronizeComputeBackend()
   }
 }
 
+vtm::CudaSadStats EncLib::cudaSadStats() const
+{
+  return m_encLibCommon->cudaSadStats();
+}
+
 void EncLib::init(AUWriterIf *auWriterIf)
 {
   m_AUWriterIf = auWriterIf;

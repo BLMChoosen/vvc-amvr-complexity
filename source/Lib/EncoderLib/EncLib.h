@@ -65,6 +65,7 @@
 namespace vtm
 {
 struct ComputeConfig;
+struct CudaSadStats;
 }
 
 class EncLibCommon;
@@ -186,6 +187,7 @@ public:
   void      init(AUWriterIf *auWriterIf);
   void      setComputeConfig(const vtm::ComputeConfig &config);
   void      synchronizeComputeBackend();
+  vtm::CudaSadStats cudaSadStats() const;
   void      deletePicBuffer ();
 
   // -------------------------------------------------------------------------------------------------------------------

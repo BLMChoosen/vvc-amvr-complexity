@@ -1976,6 +1976,13 @@ void EncApp::destroyLib()
 
   if (m_encLibCreated)
   {
+    const vtm::CudaSadStats sadStats = m_cEncLib.cudaSadStats();
+    if (m_computeConfig.backend == vtm::ComputeBackend::CUDA)
+    {
+      msg(INFO, "\nCUDA SAD batches: %llu, failures: %llu, disabled: %d\n",
+          static_cast<unsigned long long>(sadStats.dispatches),
+          static_cast<unsigned long long>(sadStats.failures), sadStats.disabled ? 1 : 0);
+    }
     try
     {
       m_cEncLib.synchronizeComputeBackend();

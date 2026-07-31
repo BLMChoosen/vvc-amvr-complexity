@@ -242,29 +242,16 @@ bool runSadBatchCase(vtm::CudaContext &context, const std::uint8_t elementSize, 
   const auto &referencePlane = reference.descriptor.planes[0];
   const auto *sourceBlock = static_cast<const std::uint8_t *>(sourcePlane.data)
                             + 5 * sourcePlane.strideBytes + 7 * elementSize;
-  std::vector<vtm::CudaDistortionCandidateDesc> candidates(66);
-  std::size_t index = 0;
-  for (std::uint32_t y = 0; y < 8; ++y)
-  {
-    for (std::uint32_t x = 0; x < 8; ++x)
-    {
-      candidates[index++].reference = static_cast<const std::uint8_t *>(referencePlane.data)
-                                      + y * referencePlane.strideBytes + x * elementSize;
-    }
-  }
-  candidates[63].reference = static_cast<const std::uint8_t *>(referencePlane.data)
-                             - referencePlane.marginTop * referencePlane.strideBytes
-                             - referencePlane.marginLeft * elementSize;
-  // Duplicate candidates prove stable result ordering and first-candidate tie behavior independently of the kernel.
-  candidates[64] = candidates[0];
-  candidates[65] = candidates[0];
+  const auto *referenceOrigin = static_cast<const std::uint8_t *>(referencePlane.data);
+  constexpr std::uint32_t candidateColumns = 8;
+  constexpr std::uint32_t candidateRows = 8;
+  constexpr std::uint32_t candidateCount = candidateColumns * candidateRows;
 
   vtm::CudaDistortionBatchDesc batch{};
   batch.sourceMirror = sourceMirror;
   batch.referenceMirror = referenceMirror;
   batch.source = sourceBlock;
-  batch.candidates = candidates.data();
-  batch.candidateCount = static_cast<std::uint32_t>(candidates.size());
+  batch.candidateGrid = { referenceOrigin, candidateColumns, candidateRows, 1, 1 };
   batch.width = blockWidth;
   batch.height = blockHeight;
   batch.sourcePlane = 0;
@@ -275,25 +262,28 @@ bool runSadBatchCase(vtm::CudaContext &context, const std::uint8_t elementSize, 
   batch.metric = vtm::CudaDistortionMetric::Sad;
 
   const std::uint64_t dispatchesBefore = context.distortionBatchDispatchCount();
-  std::vector<std::uint64_t> results(candidates.size());
-  context.computeDistortionBatch(batch, results.data());
+  std::vector<std::uint64_t> results(candidateCount);
+  if (!context.computeDistortionBatch(batch, results.data()))
+  {
+    return false;
+  }
   if (context.distortionBatchDispatchCount() != dispatchesBefore + 1)
   {
     return false;
   }
-  for (std::size_t candidate = 0; candidate < candidates.size(); ++candidate)
+  for (std::uint32_t candidate = 0; candidate < candidateCount; ++candidate)
   {
+    const std::uint32_t candidateX = candidate % candidateColumns;
+    const std::uint32_t candidateY = candidate / candidateColumns;
+    const void *candidateReference = referenceOrigin + candidateY * referencePlane.strideBytes
+                                     + candidateX * elementSize;
     const std::uint64_t expected = referenceSad(sourceBlock, sourcePlane.strideBytes,
-                                                candidates[candidate].reference, referencePlane.strideBytes,
+                                                candidateReference, referencePlane.strideBytes,
                                                 blockWidth, blockHeight, elementSize, bitDepth, subShift);
     if (results[candidate] != expected)
     {
       return false;
     }
-  }
-  if (results[0] != results[64] || results[64] != results[65])
-  {
-    return false;
   }
   std::size_t best = 0;
   for (std::size_t candidate = 1; candidate < results.size(); ++candidate)
@@ -320,23 +310,18 @@ bool runSadBatchCase(vtm::CudaContext &context, const std::uint8_t elementSize, 
   const std::uint64_t dispatchesAfterValidBatch = context.distortionBatchDispatchCount();
   vtm::CudaDistortionBatchDesc invalidFormat = batch;
   invalidFormat.elementSize = 1;
-  if (!throws([&context, &invalidFormat, &results]() {
-        context.computeDistortionBatch(invalidFormat, results.data());
-      })
+  if (context.computeDistortionBatch(invalidFormat, results.data())
       || context.distortionBatchDispatchCount() != dispatchesAfterValidBatch)
   {
     return false;
   }
-  vtm::CudaDistortionCandidateDesc outsideCandidate{};
-  outsideCandidate.reference = static_cast<const std::uint8_t *>(referencePlane.data)
-                               + (referencePlane.height + referencePlane.marginBottom)
-                                   * referencePlane.strideBytes;
   vtm::CudaDistortionBatchDesc outsideBatch = batch;
-  outsideBatch.candidates = &outsideCandidate;
-  outsideBatch.candidateCount = 1;
-  if (!throws([&context, &outsideBatch, &results]() {
-        context.computeDistortionBatch(outsideBatch, results.data());
-      })
+  outsideBatch.candidateGrid.reference = static_cast<const std::uint8_t *>(referencePlane.data)
+                                         + (referencePlane.height + referencePlane.marginBottom)
+                                             * referencePlane.strideBytes;
+  outsideBatch.candidateGrid.columns = 1;
+  outsideBatch.candidateGrid.rows = 1;
+  if (context.computeDistortionBatch(outsideBatch, results.data())
       || context.distortionBatchDispatchCount() != dispatchesAfterValidBatch)
   {
     return false;
@@ -361,20 +346,11 @@ bool benchmarkSadBatch(vtm::CudaContext &context)
     &referenceOwner, vtm::CudaPictureRole::Reconstruction, reference.descriptor);
   const auto &sourcePlane = source.descriptor.planes[0];
   const auto &referencePlane = reference.descriptor.planes[0];
-  std::vector<vtm::CudaDistortionCandidateDesc> candidates(256);
-  for (std::uint32_t index = 0; index < candidates.size(); ++index)
-  {
-    const std::uint32_t x = index & 15;
-    const std::uint32_t y = index >> 4;
-    candidates[index].reference = static_cast<const std::uint8_t *>(referencePlane.data)
-                                  + y * referencePlane.strideBytes + x * 2;
-  }
   vtm::CudaDistortionBatchDesc batch{};
   batch.sourceMirror = sourceMirror;
   batch.referenceMirror = referenceMirror;
   batch.source = sourcePlane.data;
-  batch.candidates = candidates.data();
-  batch.candidateCount = static_cast<std::uint32_t>(candidates.size());
+  batch.candidateGrid = { referencePlane.data, 16, 16, 1, 1 };
   batch.width = 64;
   batch.height = 64;
   batch.sourcePlane = 0;
@@ -383,7 +359,7 @@ bool benchmarkSadBatch(vtm::CudaContext &context)
   batch.bitDepth = 10;
   batch.subShift = 0;
   batch.metric = vtm::CudaDistortionMetric::Sad;
-  std::vector<std::uint64_t> results(candidates.size());
+  std::vector<std::uint64_t> results(256);
   context.computeDistortionBatch(batch, results.data());
 
   constexpr unsigned gpuIterations = 200;
@@ -399,9 +375,12 @@ bool benchmarkSadBatch(vtm::CudaContext &context)
   const auto cpuStart = std::chrono::steady_clock::now();
   for (unsigned iteration = 0; iteration < cpuIterations; ++iteration)
   {
-    for (const auto &candidate : candidates)
+    for (std::uint32_t candidate = 0; candidate < 256; ++candidate)
     {
-      checksum += referenceSad(sourcePlane.data, sourcePlane.strideBytes, candidate.reference,
+      const void *candidateReference = static_cast<const std::uint8_t *>(referencePlane.data)
+                                       + (candidate >> 4) * referencePlane.strideBytes
+                                       + (candidate & 15) * 2;
+      checksum += referenceSad(sourcePlane.data, sourcePlane.strideBytes, candidateReference,
                                referencePlane.strideBytes, 64, 64, 2, 10, 0) + iteration;
     }
   }
@@ -417,6 +396,48 @@ bool benchmarkSadBatch(vtm::CudaContext &context)
   context.releasePictureMirrors(&referenceOwner);
   return gpuMilliseconds > 0.0;
 }
+
+#if VTM_CUDA_TESTING
+bool runSadFailureCase(const int device, const unsigned allocationFailureStep, const unsigned executionFailures)
+{
+  vtm::CudaContext context;
+  context.create(device);
+  TestPicture source(32, 32, 2, 10, 5);
+  TestPicture reference(32, 32, 2, 10, 17);
+  source.fillSamples(5);
+  reference.fillSamples(17);
+  const auto sourceMirror = context.registerPictureMirror(
+    &source, vtm::CudaPictureRole::Original, source.descriptor);
+  const auto referenceMirror = context.registerPictureMirror(
+    &reference, vtm::CudaPictureRole::Reconstruction, reference.descriptor);
+  vtm::CudaDistortionBatchDesc batch{};
+  batch.sourceMirror = sourceMirror;
+  batch.referenceMirror = referenceMirror;
+  batch.source = source.descriptor.planes[0].data;
+  batch.candidateGrid = { reference.descriptor.planes[0].data, 8, 8, 1, 1 };
+  batch.width = 8;
+  batch.height = 8;
+  batch.elementSize = 2;
+  batch.bitDepth = 10;
+  batch.metric = vtm::CudaDistortionMetric::Sad;
+  std::array<std::uint64_t, 64> results{};
+  context.injectDistortionFailuresForTesting(allocationFailureStep, executionFailures);
+  if (context.computeDistortionBatch(batch, results.data())
+      || context.isDistortionAccelerationAvailable()
+      || context.distortionBatchFailureCount() != 1
+      || context.distortionBatchDispatchCount() != 0)
+  {
+    return false;
+  }
+  // Poisoning is permanent for this context and must reject without touching CUDA again.
+  if (context.computeDistortionBatch(batch, results.data()) || context.distortionBatchFailureCount() != 1)
+  {
+    return false;
+  }
+  context.shutdown();
+  return true;
+}
+#endif
 
 }   // namespace
 
@@ -687,6 +708,14 @@ int main(const int argc, char *argv[])
     {
       return fail("CUDA SAD batch differed from the ordered scalar reference");
     }
+#if VTM_CUDA_TESTING
+    if (!runSadFailureCase(std::stoi(argv[2]), 1, 0)
+        || !runSadFailureCase(std::stoi(argv[2]), 2, 0)
+        || !runSadFailureCase(std::stoi(argv[2]), 0, 1))
+    {
+      return fail("CUDA SAD failure recovery or permanent poisoning is invalid");
+    }
+#endif
     if (runBenchmark && !benchmarkSadBatch(context))
     {
       return fail("CUDA SAD microbenchmark failed");

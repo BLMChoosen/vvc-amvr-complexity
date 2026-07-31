@@ -180,6 +180,8 @@ struct CudaContext::Impl
   std::unordered_map<const void *, std::array<CudaMirrorHandle, 2>> owners;
   std::uint32_t generation = 0;
   std::uint32_t nextHandle = 1;
+  bool distortionAccelerationEnabled = true;
+  std::uint64_t distortionFailures = 0;
 #endif
   std::thread::id ownerThread;
 };
@@ -589,6 +591,8 @@ void CudaContext::create(const int device)
 
 #if VTM_ENABLE_CUDA
   m_impl->runtime = cuda_backend::createRuntimeContext(device);
+  m_impl->distortionAccelerationEnabled = true;
+  m_impl->distortionFailures = 0;
   m_impl->ownerThread = std::this_thread::get_id();
   m_impl->generation = nextContextGeneration.fetch_add(1, std::memory_order_relaxed);
   if (m_impl->generation == 0)
@@ -1153,61 +1157,93 @@ void CudaContext::ensureHost(const CudaMirrorHandle handle)
 #endif
 }
 
-void CudaContext::computeDistortionBatch(const CudaDistortionBatchDesc &batch, std::uint64_t *results)
+bool CudaContext::isDistortionAccelerationAvailable() const noexcept
 {
 #if VTM_ENABLE_CUDA
-  requireRuntime(m_impl.get());
-  if (results == nullptr || batch.candidates == nullptr || batch.candidateCount == 0)
-  {
-    throw std::runtime_error("CUDA distortion batch requires candidates and result storage");
-  }
-  if (batch.metric != CudaDistortionMetric::Sad)
-  {
-    throw std::runtime_error("CUDA distortion metric is not implemented");
-  }
-  if ((batch.elementSize != 2 && batch.elementSize != 4) || (batch.bitDepth != 8 && batch.bitDepth != 10))
-  {
-    throw std::runtime_error("CUDA SAD supports 16-bit or 32-bit Pel storage at 8-bit or 10-bit depth");
-  }
-  if (batch.subShift > 4 || batch.height == 0 || (batch.height % (1u << batch.subShift)) != 0)
-  {
-    throw std::runtime_error("CUDA SAD vertical subsampling is invalid for this block height");
-  }
+  return m_impl->runtime != nullptr && m_impl->distortionAccelerationEnabled;
+#else
+  return false;
+#endif
+}
 
-  ensureDevice(batch.sourceMirror);
-  if (batch.referenceMirror != batch.sourceMirror)
+bool CudaContext::computeDistortionBatch(const CudaDistortionBatchDesc &batch, std::uint64_t *results) noexcept
+{
+#if VTM_ENABLE_CUDA
+  if (!isDistortionAccelerationAvailable() || results == nullptr || batch.candidateGrid.reference == nullptr
+      || batch.candidateGrid.columns == 0 || batch.candidateGrid.rows == 0
+      || batch.candidateGrid.stepX == 0 || batch.candidateGrid.stepY == 0)
   {
-    ensureDevice(batch.referenceMirror);
+    return false;
   }
-  PictureMirror &sourceMirror = findMirror(m_impl.get(), batch.sourceMirror);
-  PictureMirror &referenceMirror = findMirror(m_impl.get(), batch.referenceMirror);
-  if (batch.sourcePlane >= sourceMirror.host.planeCount || batch.referencePlane >= referenceMirror.host.planeCount)
+  const std::uint64_t candidateCount64 = static_cast<std::uint64_t>(batch.candidateGrid.columns)
+                                         * batch.candidateGrid.rows;
+  if (candidateCount64 > CUDA_MAX_DISTORTION_CANDIDATES || batch.metric != CudaDistortionMetric::Sad
+      || (batch.elementSize != 2 && batch.elementSize != 4) || (batch.bitDepth != 8 && batch.bitDepth != 10)
+      || batch.subShift > 4 || batch.width == 0 || batch.height == 0
+      || (batch.height % (1u << batch.subShift)) != 0)
   {
-    throw std::runtime_error("CUDA distortion plane index is invalid");
+    return false;
   }
-  const CudaHostPlaneDesc &sourcePlane = sourceMirror.host.planes[batch.sourcePlane];
-  const CudaHostPlaneDesc &referencePlane = referenceMirror.host.planes[batch.referencePlane];
-  if (sourcePlane.elementSize != batch.elementSize || referencePlane.elementSize != batch.elementSize
-      || sourcePlane.bitDepth != batch.bitDepth || referencePlane.bitDepth != batch.bitDepth)
+  try
   {
-    throw std::runtime_error("CUDA distortion batch does not match its picture mirror sample format");
+    requireRuntime(m_impl.get());
+    PictureMirror &sourceMirror = findMirror(m_impl.get(), batch.sourceMirror);
+    PictureMirror &referenceMirror = findMirror(m_impl.get(), batch.referenceMirror);
+    if (batch.sourcePlane >= sourceMirror.host.planeCount || batch.referencePlane >= referenceMirror.host.planeCount)
+    {
+      return false;
+    }
+    const CudaHostPlaneDesc &sourcePlane = sourceMirror.host.planes[batch.sourcePlane];
+    const CudaHostPlaneDesc &referencePlane = referenceMirror.host.planes[batch.referencePlane];
+    if (sourcePlane.elementSize != batch.elementSize || referencePlane.elementSize != batch.elementSize
+        || sourcePlane.bitDepth != batch.bitDepth || referencePlane.bitDepth != batch.bitDepth)
+    {
+      return false;
+    }
+    const std::uint64_t referenceWidth64 = batch.width
+      + static_cast<std::uint64_t>(batch.candidateGrid.columns - 1) * batch.candidateGrid.stepX;
+    const std::uint64_t referenceHeight64 = batch.height
+      + static_cast<std::uint64_t>(batch.candidateGrid.rows - 1) * batch.candidateGrid.stepY;
+    if (referenceWidth64 > std::numeric_limits<std::uint32_t>::max()
+        || referenceHeight64 > std::numeric_limits<std::uint32_t>::max())
+    {
+      return false;
+    }
+    const void *sourceDevice = mapHostBlock(sourceMirror, batch.sourcePlane, batch.source,
+                                            batch.width, batch.height);
+    const void *referenceDevice = mapHostBlock(referenceMirror, batch.referencePlane,
+                                               batch.candidateGrid.reference,
+                                               static_cast<std::uint32_t>(referenceWidth64),
+                                               static_cast<std::uint32_t>(referenceHeight64));
+    try
+    {
+      ensureDevice(batch.sourceMirror);
+      if (batch.referenceMirror != batch.sourceMirror)
+      {
+        ensureDevice(batch.referenceMirror);
+      }
+      cuda_backend::computeDistortionBatch(m_impl->runtime, batch, sourceDevice,
+                                           sourceMirror.device.planes[batch.sourcePlane].pitchBytes,
+                                           referenceDevice,
+                                           referenceMirror.device.planes[batch.referencePlane].pitchBytes, results);
+      return true;
+    }
+    catch (...)
+    {
+      ++m_impl->distortionFailures;
+      m_impl->distortionAccelerationEnabled = false;
+      cuda_backend::recoverDistortionRuntime(m_impl->runtime);
+      return false;
+    }
   }
-
-  const void *sourceDevice = mapHostBlock(sourceMirror, batch.sourcePlane, batch.source, batch.width, batch.height);
-  std::vector<const void *> referenceDevices(batch.candidateCount);
-  for (std::size_t index = 0; index < referenceDevices.size(); ++index)
+  catch (...)
   {
-    referenceDevices[index] = mapHostBlock(referenceMirror, batch.referencePlane,
-                                           batch.candidates[index].reference, batch.width, batch.height);
+    return false;
   }
-  cuda_backend::computeDistortionBatch(m_impl->runtime, batch, sourceDevice,
-                                       sourceMirror.device.planes[batch.sourcePlane].pitchBytes,
-                                       referenceDevices.data(),
-                                       referenceMirror.device.planes[batch.referencePlane].pitchBytes, results);
 #else
   (void) batch;
   (void) results;
-  throw std::runtime_error("CUDA distortion requested, but this binary was built with ENABLE_CUDA=OFF");
+  return false;
 #endif
 }
 
@@ -1216,6 +1252,15 @@ std::uint64_t CudaContext::distortionBatchDispatchCount() const
 #if VTM_ENABLE_CUDA
   requireRuntime(m_impl.get());
   return cuda_backend::distortionBatchDispatchCount(m_impl->runtime);
+#else
+  return 0;
+#endif
+}
+
+std::uint64_t CudaContext::distortionBatchFailureCount() const noexcept
+{
+#if VTM_ENABLE_CUDA
+  return m_impl->distortionFailures;
 #else
   return 0;
 #endif
@@ -1231,6 +1276,19 @@ void CudaContext::injectReleaseFailuresForTesting(const unsigned asyncFailures, 
   (void) asyncFailures;
   (void) immediateFailures;
   throw std::runtime_error("CUDA release failure injection requires ENABLE_CUDA=ON");
+#endif
+}
+
+
+void CudaContext::injectDistortionFailuresForTesting(const unsigned allocationFailureStep,
+                                                      const unsigned executionFailures)
+{
+#if VTM_ENABLE_CUDA
+  requireRuntime(m_impl.get());
+  cuda_backend::injectDistortionFailures(m_impl->runtime, allocationFailureStep, executionFailures);
+#else
+  (void) allocationFailureStep;
+  (void) executionFailures;
 #endif
 }
 #endif

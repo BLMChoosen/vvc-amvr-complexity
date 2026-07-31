@@ -51,15 +51,15 @@ struct RuntimeContext
   std::array<cudaStream_t, 3> streams{};
   std::array<cudaEvent_t, 3>  fences{};
   cudaMemPool_t               memoryPool = nullptr;
-  const void                **distortionCandidatesDevice = nullptr;
   std::uint64_t              *distortionResultsDevice = nullptr;
-  const void                **distortionCandidatesHost = nullptr;
   std::uint64_t              *distortionResultsHost = nullptr;
   std::size_t                 distortionCapacity = 0;
   std::uint64_t               distortionDispatches = 0;
 #if VTM_CUDA_TESTING
   unsigned                    asyncReleaseFailures = 0;
   unsigned                    immediateReleaseFailures = 0;
+  unsigned                    distortionAllocationFailureStep = 0;
+  unsigned                    distortionExecutionFailures = 0;
 #endif
 };
 
@@ -116,13 +116,6 @@ void releaseRuntimeContext(RuntimeContext *context, const bool checked, const bo
   cudaError_t firstError = cudaSuccess;
   const char *firstOperation = nullptr;
   rememberCudaError(firstError, firstOperation, cudaSetDevice(context->device), "device selection during shutdown");
-  if (context->distortionCandidatesDevice != nullptr)
-  {
-    rememberCudaError(firstError, firstOperation,
-                      cudaFreeAsync(context->distortionCandidatesDevice, context->streams[queueIndex(CudaQueue::Compute)]),
-                      "distortion candidate release");
-    context->distortionCandidatesDevice = nullptr;
-  }
   if (context->distortionResultsDevice != nullptr)
   {
     rememberCudaError(firstError, firstOperation,
@@ -137,12 +130,6 @@ void releaseRuntimeContext(RuntimeContext *context, const bool checked, const bo
       rememberCudaError(firstError, firstOperation, cudaStreamSynchronize(stream),
                         "stream synchronization during shutdown");
     }
-  }
-  if (context->distortionCandidatesHost != nullptr)
-  {
-    rememberCudaError(firstError, firstOperation, cudaFreeHost(context->distortionCandidatesHost),
-                      "pinned distortion candidate release");
-    context->distortionCandidatesHost = nullptr;
   }
   if (context->distortionResultsHost != nullptr)
   {
@@ -186,53 +173,49 @@ void ensureDistortionCapacity(RuntimeContext *context, const std::size_t require
     return;
   }
 
-  std::size_t capacity = context->distortionCapacity == 0 ? 64 : context->distortionCapacity;
-  while (capacity < required)
+  if (required > CUDA_MAX_DISTORTION_CANDIDATES)
   {
-    if (capacity > std::numeric_limits<std::size_t>::max() / 2)
-    {
-      throw std::runtime_error("CUDA distortion batch capacity overflows size_t");
-    }
-    capacity *= 2;
+    throw std::runtime_error("CUDA distortion batch exceeds the fixed scratch limit");
   }
+  // Allocate the bounded maximum on first use. This avoids replacement of live scratch and makes every
+  // partial-allocation rollback transactional: either both resources become owned by the context or neither does.
+  constexpr std::size_t capacity = CUDA_MAX_DISTORTION_CANDIDATES;
 
   cudaStream_t stream = context->streams[queueIndex(CudaQueue::Compute)];
   checkCuda(cudaStreamSynchronize(stream), "distortion scratch synchronization");
 
-  const void **newCandidatesDevice = nullptr;
   std::uint64_t *newResultsDevice = nullptr;
-  const void **newCandidatesHost = nullptr;
   std::uint64_t *newResultsHost = nullptr;
   try
   {
-    checkCuda(cudaMallocFromPoolAsync(reinterpret_cast<void **>(&newCandidatesDevice),
-                                      capacity * sizeof(*newCandidatesDevice), context->memoryPool, stream),
-              "distortion candidate allocation");
+#if VTM_CUDA_TESTING
+    if (context->distortionAllocationFailureStep == 1)
+    {
+      context->distortionAllocationFailureStep = 0;
+      throw std::runtime_error("Injected CUDA distortion device allocation failure");
+    }
+#endif
     checkCuda(cudaMallocFromPoolAsync(reinterpret_cast<void **>(&newResultsDevice),
                                       capacity * sizeof(*newResultsDevice), context->memoryPool, stream),
               "distortion result allocation");
-    checkCuda(cudaHostAlloc(reinterpret_cast<void **>(&newCandidatesHost), capacity * sizeof(*newCandidatesHost),
-                            cudaHostAllocPortable),
-              "pinned distortion candidate allocation");
+#if VTM_CUDA_TESTING
+    if (context->distortionAllocationFailureStep == 2)
+    {
+      context->distortionAllocationFailureStep = 0;
+      throw std::runtime_error("Injected CUDA distortion pinned allocation failure");
+    }
+#endif
     checkCuda(cudaHostAlloc(reinterpret_cast<void **>(&newResultsHost), capacity * sizeof(*newResultsHost),
                             cudaHostAllocPortable),
               "pinned distortion result allocation");
   }
   catch (...)
   {
-    if (newCandidatesDevice != nullptr)
-    {
-      cudaFreeAsync(newCandidatesDevice, stream);
-    }
     if (newResultsDevice != nullptr)
     {
       cudaFreeAsync(newResultsDevice, stream);
     }
     cudaStreamSynchronize(stream);
-    if (newCandidatesHost != nullptr)
-    {
-      cudaFreeHost(newCandidatesHost);
-    }
     if (newResultsHost != nullptr)
     {
       cudaFreeHost(newResultsHost);
@@ -240,42 +223,41 @@ void ensureDistortionCapacity(RuntimeContext *context, const std::size_t require
     throw;
   }
 
-  if (context->distortionCandidatesDevice != nullptr)
+  if (context->distortionResultsDevice != nullptr || context->distortionResultsHost != nullptr)
   {
-    checkCuda(cudaFreeAsync(context->distortionCandidatesDevice, stream), "old distortion candidate release");
+    if (newResultsDevice != nullptr)
+    {
+      (void) cudaFreeAsync(newResultsDevice, stream);
+      (void) cudaStreamSynchronize(stream);
+    }
+    if (newResultsHost != nullptr)
+    {
+      (void) cudaFreeHost(newResultsHost);
+    }
+    throw std::runtime_error("CUDA distortion scratch ownership is inconsistent");
   }
-  if (context->distortionResultsDevice != nullptr)
-  {
-    checkCuda(cudaFreeAsync(context->distortionResultsDevice, stream), "old distortion result release");
-  }
-  checkCuda(cudaStreamSynchronize(stream), "distortion scratch replacement");
-  if (context->distortionCandidatesHost != nullptr)
-  {
-    checkCuda(cudaFreeHost(context->distortionCandidatesHost), "old pinned distortion candidate release");
-  }
-  if (context->distortionResultsHost != nullptr)
-  {
-    checkCuda(cudaFreeHost(context->distortionResultsHost), "old pinned distortion result release");
-  }
-
-  context->distortionCandidatesDevice = newCandidatesDevice;
   context->distortionResultsDevice = newResultsDevice;
-  context->distortionCandidatesHost = newCandidatesHost;
   context->distortionResultsHost = newResultsHost;
   context->distortionCapacity = capacity;
 }
 
 template<typename Sample>
 __global__ void sadBatchKernel(const Sample *source, const std::size_t sourcePitchBytes,
-                               const void *const *references, const std::size_t referencePitchBytes,
+                               const Sample *referenceBase, const std::size_t referencePitchBytes,
                                const std::uint32_t width, const std::uint32_t height,
+                               const std::uint32_t candidateColumns, const std::uint16_t candidateStepX,
+                               const std::uint16_t candidateStepY,
                                const std::uint8_t subShift, const std::uint8_t distortionShift,
                                std::uint64_t *results)
 {
   const std::uint32_t candidate = blockIdx.x;
-  const auto *reference = static_cast<const Sample *>(references[candidate]);
+  const std::uint32_t candidateX = candidate % candidateColumns;
+  const std::uint32_t candidateY = candidate / candidateColumns;
   const std::size_t sourceStride = sourcePitchBytes / sizeof(Sample);
   const std::size_t referenceStride = referencePitchBytes / sizeof(Sample);
+  const Sample *reference = referenceBase
+                            + static_cast<std::size_t>(candidateY) * candidateStepY * referenceStride
+                            + static_cast<std::size_t>(candidateX) * candidateStepX;
   const std::uint32_t sampledRows = height >> subShift;
   const std::uint64_t sampleCount = static_cast<std::uint64_t>(width) * sampledRows;
 
@@ -285,8 +267,8 @@ __global__ void sadBatchKernel(const Sample *source, const std::size_t sourcePit
     const std::uint32_t sampledY = static_cast<std::uint32_t>(sample / width);
     const std::uint32_t x = static_cast<std::uint32_t>(sample - static_cast<std::uint64_t>(sampledY) * width);
     const std::uint32_t y = sampledY << subShift;
-    const int difference = static_cast<int>(source[static_cast<std::size_t>(y) * sourceStride + x])
-                           - static_cast<int>(reference[static_cast<std::size_t>(y) * referenceStride + x]);
+    const std::int64_t difference = static_cast<std::int64_t>(source[static_cast<std::size_t>(y) * sourceStride + x])
+                                    - static_cast<std::int64_t>(reference[static_cast<std::size_t>(y) * referenceStride + x]);
     sum += static_cast<std::uint64_t>(difference < 0 ? -difference : difference);
   }
 
@@ -496,45 +478,51 @@ void synchronizeQueue(RuntimeContext *context, const CudaQueue queue)
 
 void computeDistortionBatch(RuntimeContext *context, const CudaDistortionBatchDesc &batch,
                             const void *sourceDevice, const std::size_t sourcePitchBytes,
-                            const void *const *referenceDevices, const std::size_t referencePitchBytes,
+                            const void *referenceDevice, const std::size_t referencePitchBytes,
                             std::uint64_t *results)
 {
   checkCuda(cudaSetDevice(context->device), "device selection");
-  ensureDistortionCapacity(context, batch.candidateCount);
-  std::memcpy(context->distortionCandidatesHost, referenceDevices,
-              static_cast<std::size_t>(batch.candidateCount) * sizeof(*referenceDevices));
+  const std::uint32_t candidateCount = batch.candidateGrid.columns * batch.candidateGrid.rows;
+  ensureDistortionCapacity(context, candidateCount);
 
   cudaStream_t stream = context->streams[queueIndex(CudaQueue::Compute)];
-  checkCuda(cudaMemcpyAsync(context->distortionCandidatesDevice, context->distortionCandidatesHost,
-                            static_cast<std::size_t>(batch.candidateCount) * sizeof(*referenceDevices),
-                            cudaMemcpyHostToDevice, stream),
-            "distortion candidate upload");
+#if VTM_CUDA_TESTING
+  if (context->distortionExecutionFailures > 0)
+  {
+    --context->distortionExecutionFailures;
+    throw std::runtime_error("Injected CUDA distortion execution failure");
+  }
+#endif
 
   constexpr unsigned threads = 256;
   // VTM 24 builds use FULL_NBIT=1 for both Pel configurations, so SAD retains all source precision.
   constexpr std::uint8_t distortionShift = 0;
   if (batch.elementSize == 2)
   {
-    sadBatchKernel<std::int16_t><<<batch.candidateCount, threads, 0, stream>>>(
-      static_cast<const std::int16_t *>(sourceDevice), sourcePitchBytes, context->distortionCandidatesDevice,
-      referencePitchBytes, batch.width, batch.height, batch.subShift, distortionShift,
+    sadBatchKernel<std::int16_t><<<candidateCount, threads, 0, stream>>>(
+      static_cast<const std::int16_t *>(sourceDevice), sourcePitchBytes,
+      static_cast<const std::int16_t *>(referenceDevice), referencePitchBytes, batch.width, batch.height,
+      batch.candidateGrid.columns, batch.candidateGrid.stepX, batch.candidateGrid.stepY,
+      batch.subShift, distortionShift,
       context->distortionResultsDevice);
   }
   else
   {
-    sadBatchKernel<std::int32_t><<<batch.candidateCount, threads, 0, stream>>>(
-      static_cast<const std::int32_t *>(sourceDevice), sourcePitchBytes, context->distortionCandidatesDevice,
-      referencePitchBytes, batch.width, batch.height, batch.subShift, distortionShift,
+    sadBatchKernel<std::int32_t><<<candidateCount, threads, 0, stream>>>(
+      static_cast<const std::int32_t *>(sourceDevice), sourcePitchBytes,
+      static_cast<const std::int32_t *>(referenceDevice), referencePitchBytes, batch.width, batch.height,
+      batch.candidateGrid.columns, batch.candidateGrid.stepX, batch.candidateGrid.stepY,
+      batch.subShift, distortionShift,
       context->distortionResultsDevice);
   }
   checkCuda(cudaGetLastError(), "SAD batch launch");
   checkCuda(cudaMemcpyAsync(context->distortionResultsHost, context->distortionResultsDevice,
-                            static_cast<std::size_t>(batch.candidateCount) * sizeof(*results),
+                            static_cast<std::size_t>(candidateCount) * sizeof(*results),
                             cudaMemcpyDeviceToHost, stream),
             "distortion result download");
   checkCuda(cudaStreamSynchronize(stream), "distortion batch completion");
   std::memcpy(results, context->distortionResultsHost,
-              static_cast<std::size_t>(batch.candidateCount) * sizeof(*results));
+              static_cast<std::size_t>(candidateCount) * sizeof(*results));
   ++context->distortionDispatches;
 }
 
@@ -543,11 +531,57 @@ std::uint64_t distortionBatchDispatchCount(const RuntimeContext *context)
   return context->distortionDispatches;
 }
 
+void recoverDistortionRuntime(RuntimeContext *context) noexcept
+{
+  if (context == nullptr)
+  {
+    return;
+  }
+  (void) cudaSetDevice(context->device);
+  const std::size_t computeIndex = queueIndex(CudaQueue::Compute);
+  if (context->streams[computeIndex] != nullptr)
+  {
+    (void) cudaStreamSynchronize(context->streams[computeIndex]);
+    if (context->distortionResultsDevice != nullptr)
+    {
+      if (cudaFreeAsync(context->distortionResultsDevice, context->streams[computeIndex]) == cudaSuccess)
+      {
+        context->distortionResultsDevice = nullptr; // ownership transferred even if later synchronization fails
+        (void) cudaStreamSynchronize(context->streams[computeIndex]);
+      }
+      else
+      {
+        (void) cudaGetLastError(); // retain ownership so normal context teardown can retry
+      }
+    }
+    (void) cudaStreamDestroy(context->streams[computeIndex]);
+    context->streams[computeIndex] = nullptr;
+  }
+  if (context->distortionResultsHost != nullptr)
+  {
+    if (cudaFreeHost(context->distortionResultsHost) == cudaSuccess)
+    {
+      context->distortionResultsHost = nullptr;
+    }
+  }
+  context->distortionCapacity = 0;
+  (void) cudaGetLastError();
+  (void) cudaStreamCreateWithFlags(&context->streams[computeIndex], cudaStreamNonBlocking);
+}
+
 #if VTM_CUDA_TESTING
 void injectReleaseFailures(RuntimeContext *context, const unsigned asyncFailures, const unsigned immediateFailures)
 {
   context->asyncReleaseFailures = asyncFailures;
   context->immediateReleaseFailures = immediateFailures;
+}
+
+
+void injectDistortionFailures(RuntimeContext *context, const unsigned allocationFailureStep,
+                              const unsigned executionFailures)
+{
+  context->distortionAllocationFailureStep = allocationFailureStep;
+  context->distortionExecutionFailures = executionFailures;
 }
 #endif
 

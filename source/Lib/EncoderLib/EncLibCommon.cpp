@@ -48,6 +48,7 @@ struct EncLibCommon::ComputeState
   unsigned           users = 0;
   bool               configured = false;
   bool               synchronized = false;
+  std::vector<std::uint64_t> sadResults;
 };
 
 EncLibCommon::EncLibCommon()
@@ -68,7 +69,8 @@ void EncLibCommon::configureComputeBackend(const vtm::ComputeConfig &config)
 {
   if (m_computeState->configured)
   {
-    CHECK(m_computeState->config.backend != config.backend || m_computeState->config.device != config.device,
+    CHECK(m_computeState->config.backend != config.backend || m_computeState->config.device != config.device
+            || m_computeState->config.enableExperimentalSad != config.enableExperimentalSad,
           "All encoder layers must use the same GPUBackend and GPUDevice");
     return;
   }
@@ -148,14 +150,22 @@ void EncLibCommon::releasePictureMirrors(const void *owner)
   }
 }
 
-bool EncLibCommon::computeSadBatch(const void *sourceOwner, const void *source, const void *referenceOwner,
-                                   const vtm::CudaDistortionCandidateDesc *candidates,
-                                   const std::uint32_t candidateCount, const std::uint32_t width,
-                                   const std::uint32_t height, const std::uint8_t elementSize,
-                                   const std::uint8_t bitDepth, const std::uint8_t subShift,
-                                   std::uint64_t *results)
+bool EncLibCommon::isCudaSadBatchAvailable(const void *sourceOwner, const void *referenceOwner) const
 {
-  if (!m_computeState->cudaContext.isCreated()
+  return m_computeState->config.enableExperimentalSad
+         && m_computeState->cudaContext.isDistortionAccelerationAvailable()
+         && m_computeState->cudaContext.hasPictureMirror(sourceOwner, vtm::CudaPictureRole::Original)
+         && m_computeState->cudaContext.hasPictureMirror(referenceOwner, vtm::CudaPictureRole::Reconstruction);
+}
+
+bool EncLibCommon::computeSadGrid(const void *sourceOwner, const void *source, const void *referenceOwner,
+                                  const void *reference, const std::uint32_t columns, const std::uint32_t rows,
+                                  const std::uint32_t width, const std::uint32_t height,
+                                  const std::uint8_t elementSize, const std::uint8_t bitDepth,
+                                  const std::uint8_t subShift, const std::uint64_t *&results)
+{
+  results = nullptr;
+  if (!isCudaSadBatchAvailable(sourceOwner, referenceOwner)
       || !m_computeState->cudaContext.hasPictureMirror(sourceOwner, vtm::CudaPictureRole::Original)
       || !m_computeState->cudaContext.hasPictureMirror(referenceOwner, vtm::CudaPictureRole::Reconstruction))
   {
@@ -167,8 +177,11 @@ bool EncLibCommon::computeSadBatch(const void *sourceOwner, const void *source, 
   batch.referenceMirror =
     m_computeState->cudaContext.pictureMirrorHandle(referenceOwner, vtm::CudaPictureRole::Reconstruction);
   batch.source = source;
-  batch.candidates = candidates;
-  batch.candidateCount = candidateCount;
+  batch.candidateGrid.reference = reference;
+  batch.candidateGrid.columns = columns;
+  batch.candidateGrid.rows = rows;
+  batch.candidateGrid.stepX = 1;
+  batch.candidateGrid.stepY = 1;
   batch.width = width;
   batch.height = height;
   batch.sourcePlane = 0;
@@ -177,6 +190,27 @@ bool EncLibCommon::computeSadBatch(const void *sourceOwner, const void *source, 
   batch.bitDepth = bitDepth;
   batch.subShift = subShift;
   batch.metric = vtm::CudaDistortionMetric::Sad;
-  m_computeState->cudaContext.computeDistortionBatch(batch, results);
+  const std::uint64_t candidateCount = static_cast<std::uint64_t>(columns) * rows;
+  if (candidateCount == 0 || candidateCount > vtm::CUDA_MAX_DISTORTION_CANDIDATES)
+  {
+    return false;
+  }
+  if (m_computeState->sadResults.size() < candidateCount)
+  {
+    m_computeState->sadResults.resize(static_cast<std::size_t>(candidateCount));
+  }
+  if (!m_computeState->cudaContext.computeDistortionBatch(batch, m_computeState->sadResults.data()))
+  {
+    return false;
+  }
+  results = m_computeState->sadResults.data();
   return true;
+}
+
+vtm::CudaSadStats EncLibCommon::cudaSadStats() const
+{
+  return { m_computeState->cudaContext.isCreated() ? m_computeState->cudaContext.distortionBatchDispatchCount() : 0,
+           m_computeState->cudaContext.distortionBatchFailureCount(),
+           m_computeState->cudaContext.isCreated()
+             && !m_computeState->cudaContext.isDistortionAccelerationAvailable() };
 }

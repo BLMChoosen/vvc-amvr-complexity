@@ -26,9 +26,15 @@ enum class CudaDistortionMetric : std::uint8_t
 
 // The host pointers identify locations in registered picture mirrors. CudaContext translates them to the
 // corresponding pitched device addresses before submission, so codec code never handles a CUDA type or header.
-struct CudaDistortionCandidateDesc
+constexpr std::uint32_t CUDA_MAX_DISTORTION_CANDIDATES = 1u << 20;
+
+struct CudaDistortionCandidateGridDesc
 {
   const void *reference;
+  std::uint32_t columns;
+  std::uint32_t rows;
+  std::uint16_t stepX;
+  std::uint16_t stepY;
 };
 
 struct CudaDistortionBatchDesc
@@ -36,8 +42,7 @@ struct CudaDistortionBatchDesc
   CudaMirrorHandle                    sourceMirror;
   CudaMirrorHandle                    referenceMirror;
   const void                         *source;
-  const CudaDistortionCandidateDesc  *candidates;
-  std::uint32_t                       candidateCount;
+  CudaDistortionCandidateGridDesc     candidateGrid;
   std::uint32_t                       width;
   std::uint32_t                       height;
   std::uint8_t                        sourcePlane;
@@ -48,9 +53,9 @@ struct CudaDistortionBatchDesc
   CudaDistortionMetric                metric;
 };
 
-static_assert(std::is_standard_layout<CudaDistortionCandidateDesc>::value
-                && std::is_trivial<CudaDistortionCandidateDesc>::value,
-              "CUDA distortion candidate descriptor must remain POD");
+static_assert(std::is_standard_layout<CudaDistortionCandidateGridDesc>::value
+                && std::is_trivial<CudaDistortionCandidateGridDesc>::value,
+              "CUDA distortion candidate grid descriptor must remain POD");
 static_assert(std::is_standard_layout<CudaDistortionBatchDesc>::value
                 && std::is_trivial<CudaDistortionBatchDesc>::value,
               "CUDA distortion batch descriptor must remain POD");

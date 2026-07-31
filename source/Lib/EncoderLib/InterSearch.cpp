@@ -5298,45 +5298,52 @@ void InterSearch::xPatternSearch(const PredictionUnit &pu, const RefPicList refP
   m_pcRdCost->setDistParam( m_cDistParam, *cStruct.pcPatternKey, cStruct.piRefY, cStruct.iRefStride, m_lumaClpRng.bd, COMPONENT_Y, cStruct.subShiftMode );
 
   const SearchRange& sr = cStruct.searchRange;
+  Picture *referencePicture = pu.cu->slice->getRefPic(refPicList, refIdx);
+  const bool cudaPreflight = m_encLibCommon != nullptr && !wrap
+                             && !referencePicture->isRefScaled(pu.cs->sps, pu.cs->pps)
+                             && m_encLibCommon->isCudaSadBatchAvailable(pu.cs->picture, referencePicture);
 
-  const std::uint64_t searchWidth = static_cast<std::uint64_t>(sr.right - sr.left + 1);
-  const std::uint64_t searchHeight = static_cast<std::uint64_t>(sr.bottom - sr.top + 1);
-  const std::uint64_t candidateCount64 = searchWidth * searchHeight;
-  const std::uint64_t sampledRows = static_cast<std::uint64_t>(cStruct.pcPatternKey->height) >> m_cDistParam.subShift;
+  const bool searchRectangleValid = sr.right >= sr.left && sr.bottom >= sr.top;
+  const std::uint64_t searchWidth = searchRectangleValid
+                                      ? static_cast<std::uint64_t>(sr.right - sr.left + 1) : 0;
+  const std::uint64_t searchHeight = searchRectangleValid
+                                       ? static_cast<std::uint64_t>(sr.bottom - sr.top + 1) : 0;
+  const bool candidateCountSafe = searchHeight != 0
+                                  && searchWidth <= std::numeric_limits<std::uint64_t>::max() / searchHeight;
+  const std::uint64_t candidateCount64 = candidateCountSafe ? searchWidth * searchHeight : 0;
+  const bool subShiftValid = m_cDistParam.subShift >= 0 && m_cDistParam.subShift <= 4;
+  const std::uint64_t sampledRows = subShiftValid
+                                      ? static_cast<std::uint64_t>(cStruct.pcPatternKey->height)
+                                          >> m_cDistParam.subShift : 0;
+  const bool comparisonCountSafe = cStruct.pcPatternKey->width != 0
+                                   && candidateCount64 <= std::numeric_limits<std::uint64_t>::max()
+                                                          / cStruct.pcPatternKey->width
+                                   && sampledRows != 0
+                                   && candidateCount64 * cStruct.pcPatternKey->width
+                                        <= std::numeric_limits<std::uint64_t>::max() / sampledRows;
+  const std::uint64_t sampleComparisons = comparisonCountSafe
+    ? candidateCount64 * cStruct.pcPatternKey->width * sampledRows : 0;
   constexpr std::uint64_t minCudaCandidates = 64;
-  constexpr std::uint64_t minCudaSampleComparisons = 65536;
-  const bool cudaEligible = m_encLibCommon != nullptr && !wrap && !m_cDistParam.isBiPred
+  constexpr std::uint64_t minCudaSampleComparisons = 1u << 20;
+  const bool cudaEligible = cudaPreflight && !m_cDistParam.isBiPred
                             && !m_cDistParam.applyWeight && !m_cDistParam.useMR && m_cDistParam.step == 1
-                            && m_cDistParam.subShift >= 0 && m_cDistParam.subShift <= 4
+                            && subShiftValid
                             && (cStruct.pcPatternKey->height % (1 << m_cDistParam.subShift)) == 0
                             && candidateCount64 >= minCudaCandidates
                             && candidateCount64 <= std::numeric_limits<std::uint32_t>::max()
-                            && candidateCount64 * cStruct.pcPatternKey->width * sampledRows
-                                 >= minCudaSampleComparisons;
+                            && sampleComparisons >= minCudaSampleComparisons;
 
   if (cudaEligible)
   {
-    const std::uint32_t candidateCount = static_cast<std::uint32_t>(candidateCount64);
-    std::vector<vtm::CudaDistortionCandidateDesc> candidates(candidateCount);
-    std::vector<std::uint64_t> distortions(candidateCount);
-    std::size_t index = 0;
-    const Pel *referenceRow = cStruct.piRefY + sr.top * cStruct.iRefStride;
-    for (int y = sr.top; y <= sr.bottom; ++y)
+    const Pel *referenceOrigin = cStruct.piRefY + sr.top * cStruct.iRefStride + sr.left;
+    const std::uint64_t *distortions = nullptr;
+    if (m_encLibCommon->computeSadGrid(pu.cs->picture, cStruct.pcPatternKey->buf, referencePicture,
+                                      referenceOrigin, static_cast<std::uint32_t>(searchWidth),
+                                      static_cast<std::uint32_t>(searchHeight), cStruct.pcPatternKey->width,
+                                      cStruct.pcPatternKey->height, sizeof(Pel), m_lumaClpRng.bd,
+                                      static_cast<std::uint8_t>(m_cDistParam.subShift), distortions))
     {
-      for (int x = sr.left; x <= sr.right; ++x)
-      {
-        candidates[index++].reference = referenceRow + x;
-      }
-      referenceRow += cStruct.iRefStride;
-    }
-
-    Picture *referencePicture = pu.cu->slice->getRefPic(refPicList, refIdx);
-    if (m_encLibCommon->computeSadBatch(pu.cs->picture, cStruct.pcPatternKey->buf, referencePicture,
-                                        candidates.data(), candidateCount, cStruct.pcPatternKey->width,
-                                        cStruct.pcPatternKey->height, sizeof(Pel), m_lumaClpRng.bd,
-                                        static_cast<std::uint8_t>(m_cDistParam.subShift), distortions.data()))
-    {
-      index = 0;
+      std::size_t index = 0;
       for (int y = sr.top; y <= sr.bottom; ++y)
       {
         for (int x = sr.left; x <= sr.right; ++x, ++index)

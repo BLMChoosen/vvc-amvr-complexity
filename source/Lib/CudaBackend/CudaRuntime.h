@@ -63,11 +63,13 @@ void copy2DToHostAsync(RuntimeContext *context, void *destination, std::size_t d
 void synchronizeQueue(RuntimeContext *context, CudaQueue queue);
 void computeDistortionBatch(RuntimeContext *context, const CudaDistortionBatchDesc &batch,
                             const void *sourceDevice, std::size_t sourcePitchBytes,
-                            const void *const *referenceDevices, std::size_t referencePitchBytes,
+                            const void *referenceDevice, std::size_t referencePitchBytes,
                             std::uint64_t *results);
 std::uint64_t distortionBatchDispatchCount(const RuntimeContext *context);
+void recoverDistortionRuntime(RuntimeContext *context) noexcept;
 #if VTM_CUDA_TESTING
 void injectReleaseFailures(RuntimeContext *context, unsigned asyncFailures, unsigned immediateFailures);
+void injectDistortionFailures(RuntimeContext *context, unsigned allocationFailureStep, unsigned executionFailures);
 #endif
 
 }   // namespace vtm::cuda_backend
