@@ -51,6 +51,7 @@ struct ComputeConfig;
 enum class CudaPictureRole : std::uint8_t;
 struct CudaHostPictureDesc;
 struct CudaSadStats;
+struct CudaSadHadResult;
 }
 
 class EncLibCommon
@@ -89,12 +90,18 @@ public:
                                              const vtm::CudaHostPictureDesc &picture);
   void                     releasePictureMirrors(const void *owner);
   bool                     isCudaSadBatchAvailable(const void *sourceOwner, const void *referenceOwner) const;
+  bool                     isCudaIntraSatdBatchAvailable(const void *sourceOwner) const;
   bool                     computeSadGrid(const void *sourceOwner, const void *source,
                                           const void *referenceOwner, const void *reference,
                                           std::uint32_t columns, std::uint32_t rows,
                                           std::uint32_t width, std::uint32_t height,
                                           std::uint8_t elementSize, std::uint8_t bitDepth,
                                           std::uint8_t subShift, const std::uint64_t *&results);
+  bool                     computeIntraSatdBatch(const void *sourceOwner, const void *source,
+                                                 const void *packedCandidates, std::uint32_t candidateCount,
+                                                 std::uint32_t width, std::uint32_t height,
+                                                 std::uint8_t elementSize, std::uint8_t bitDepth,
+                                                 const vtm::CudaSadHadResult *&results);
   vtm::CudaSadStats        cudaSadStats() const;
 #if JVET_AJ0151_DSC_SEI
   DscSubstreamManager*     getDscSubstreamManager() { return &m_dscSubstreamManager; }

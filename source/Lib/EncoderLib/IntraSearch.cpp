@@ -36,6 +36,8 @@
  */
 
 #include "IntraSearch.h"
+#include "EncLibCommon.h"
+#include "CudaBackend/CudaDistortion.h"
 
 #include "EncModeCtrl.h"
 
@@ -60,6 +62,7 @@ IntraSearch::IntraSearch()
   , m_pcTrQuant(nullptr)
   , m_pcRdCost(nullptr)
   , m_pcReshape(nullptr)
+  , m_encLibCommon(nullptr)
   , m_CABACEstimator(nullptr)
   , m_ctxPool(nullptr)
   , m_isInitialized(false)
@@ -194,7 +197,8 @@ IntraSearch::~IntraSearch()
 
 void IntraSearch::init(EncCfg *pcEncCfg, TrQuant *pcTrQuant, RdCost *pcRdCost, CABACWriter *CABACEstimator,
                        CtxPool *ctxPool, const uint32_t maxCUWidth, const uint32_t maxCUHeight,
-                       const uint32_t maxTotalCUDepth, EncReshape *pcReshape, const unsigned bitDepthY)
+                       const uint32_t maxTotalCUDepth, EncReshape *pcReshape, const unsigned bitDepthY,
+                       EncLibCommon *encLibCommon)
 {
   CHECK(m_isInitialized, "Already initialized");
 
@@ -204,6 +208,7 @@ void IntraSearch::init(EncCfg *pcEncCfg, TrQuant *pcTrQuant, RdCost *pcRdCost, C
   m_CABACEstimator = CABACEstimator;
   m_ctxPool        = ctxPool;
   m_pcReshape      = pcReshape;
+  m_encLibCommon   = encLibCommon;
 
   const ChromaFormat cform = pcEncCfg->getChromaFormatIdc();
 

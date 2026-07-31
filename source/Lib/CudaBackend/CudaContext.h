@@ -123,6 +123,7 @@ public:
   void ensureHost(CudaMirrorHandle handle);
   bool isDistortionAccelerationAvailable() const noexcept;
   bool computeDistortionBatch(const CudaDistortionBatchDesc &batch, std::uint64_t *results) noexcept;
+  bool computeIntraSatdBatch(const CudaIntraSatdBatchDesc &batch, CudaSadHadResult *results) noexcept;
   std::uint64_t distortionBatchDispatchCount() const;
   std::uint64_t distortionBatchFailureCount() const noexcept;
 #if VTM_CUDA_TESTING
