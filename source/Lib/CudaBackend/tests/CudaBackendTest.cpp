@@ -346,7 +346,16 @@ bool runIntraSatdBatchCase(vtm::CudaContext &context, const std::uint8_t element
                             + 3 * sourcePlane.strideBytes + 2 * elementSize;
   constexpr std::uint32_t candidateCount = 34;
   const std::size_t blockSamples = static_cast<std::size_t>(blockSize) * blockSize;
-  std::vector<std::uint8_t> candidates(blockSamples * candidateCount * elementSize);
+  std::vector<Pel> original(blockSamples);
+  for (std::uint32_t y = 0; y < blockSize; ++y)
+  {
+    for (std::uint32_t x = 0; x < blockSize; ++x)
+    {
+      original[static_cast<std::size_t>(y) * blockSize + x] = static_cast<Pel>(readSample(
+        sourceBlock + static_cast<std::size_t>(y) * sourcePlane.strideBytes + x * elementSize, elementSize));
+    }
+  }
+  std::vector<Pel> candidates(blockSamples * candidateCount);
   const std::uint32_t maximum = (1u << bitDepth) - 1;
   for (std::uint32_t candidate = 0; candidate < candidateCount; ++candidate)
   {
@@ -356,8 +365,7 @@ bool runIntraSatdBatchCase(vtm::CudaContext &context, const std::uint8_t element
       value &= maximum;
       if ((sample + candidate) % 31 == 0) value = 0;
       if ((sample * 3 + candidate) % 47 == 0) value = maximum;
-      writeSample(candidates.data() + (static_cast<std::size_t>(candidate) * blockSamples + sample) * elementSize,
-                  elementSize, static_cast<std::int32_t>(value));
+      candidates[static_cast<std::size_t>(candidate) * blockSamples + sample] = static_cast<Pel>(value);
     }
   }
 
@@ -380,17 +388,19 @@ bool runIntraSatdBatchCase(vtm::CudaContext &context, const std::uint8_t element
   }
 
   RdCost rdCost;
-  const CPelBuf original(reinterpret_cast<const Pel *>(sourceBlock),
-                         sourcePlane.strideBytes / elementSize, blockSize, blockSize);
+  const CPelBuf originalBuf(original.data(), blockSize, blockSize);
   for (std::uint32_t candidate = 0; candidate < candidateCount; ++candidate)
   {
-    const auto *candidateBytes = candidates.data()
-      + static_cast<std::size_t>(candidate) * blockSamples * elementSize;
-    const CPelBuf prediction(reinterpret_cast<const Pel *>(candidateBytes), blockSize, blockSize, blockSize);
-    const Distortion expectedSad = rdCost.getDistPart(original, prediction, bitDepth, COMPONENT_Y, DFunc::SAD);
-    const Distortion expectedHad = rdCost.getDistPart(original, prediction, bitDepth, COMPONENT_Y, DFunc::HAD);
+    const Pel *candidateSamples = candidates.data() + static_cast<std::size_t>(candidate) * blockSamples;
+    const CPelBuf prediction(candidateSamples, blockSize, blockSize);
+    const Distortion expectedSad = rdCost.getDistPart(originalBuf, prediction, bitDepth, COMPONENT_Y, DFunc::SAD);
+    const Distortion expectedHad = rdCost.getDistPart(originalBuf, prediction, bitDepth, COMPONENT_Y, DFunc::HAD);
     if (results[candidate].sad != expectedSad || results[candidate].had != expectedHad)
     {
+      std::cerr << "intra SATD mismatch: Pel" << unsigned(elementSize * 8) << " bitDepth "
+                << unsigned(bitDepth) << " size " << blockSize << " candidate " << candidate
+                << " SAD gpu/cpu " << results[candidate].sad << '/' << expectedSad
+                << " HAD gpu/cpu " << results[candidate].had << '/' << expectedHad << '\n';
       return false;
     }
   }
@@ -466,6 +476,60 @@ bool benchmarkSadBatch(vtm::CudaContext &context)
             << (cpuMilliseconds / gpuMilliseconds) << "x, checksum " << checksum << '\n';
   context.releasePictureMirrors(&sourceOwner);
   context.releasePictureMirrors(&referenceOwner);
+  return gpuMilliseconds > 0.0;
+}
+
+bool benchmarkIntraSatdBatch(vtm::CudaContext &context)
+{
+  constexpr std::uint32_t blockSize = 64;
+  constexpr std::uint32_t candidateCount = 34;
+  TestPicture source(72, 72, sizeof(Pel), 10, 29);
+  source.fillSamples(29);
+  const auto mirror = context.registerPictureMirror(&source, vtm::CudaPictureRole::Original, source.descriptor);
+  const auto &plane = source.descriptor.planes[0];
+  const auto *sourceBytes = static_cast<const std::uint8_t *>(plane.data);
+  std::vector<Pel> original(blockSize * blockSize);
+  for (std::uint32_t y = 0; y < blockSize; ++y)
+    for (std::uint32_t x = 0; x < blockSize; ++x)
+      original[y * blockSize + x] = static_cast<Pel>(readSample(
+        sourceBytes + static_cast<std::size_t>(y) * plane.strideBytes + x * sizeof(Pel), sizeof(Pel)));
+  std::vector<Pel> candidates(static_cast<std::size_t>(candidateCount) * blockSize * blockSize);
+  for (std::size_t index = 0; index < candidates.size(); ++index)
+    candidates[index] = static_cast<Pel>((index * 73 + (index >> 8) * 17) & 1023);
+  vtm::CudaIntraSatdBatchDesc batch{ mirror, sourceBytes, candidates.data(), candidateCount,
+                                     blockSize, blockSize, 0, sizeof(Pel), 10 };
+  std::array<vtm::CudaSadHadResult, candidateCount> results{};
+  context.computeIntraSatdBatch(batch, results.data());
+  constexpr unsigned gpuIterations = 100;
+  const auto gpuStart = std::chrono::steady_clock::now();
+  for (unsigned iteration = 0; iteration < gpuIterations; ++iteration)
+    context.computeIntraSatdBatch(batch, results.data());
+  const auto gpuEnd = std::chrono::steady_clock::now();
+
+  RdCost rdCost;
+  const CPelBuf originalBuf(original.data(), blockSize, blockSize);
+  std::uint64_t checksum = 0;
+  constexpr unsigned cpuIterations = 10;
+  const auto cpuStart = std::chrono::steady_clock::now();
+  for (unsigned iteration = 0; iteration < cpuIterations; ++iteration)
+  {
+    for (std::uint32_t candidate = 0; candidate < candidateCount; ++candidate)
+    {
+      const CPelBuf prediction(candidates.data() + static_cast<std::size_t>(candidate) * blockSize * blockSize,
+                               blockSize, blockSize);
+      checksum += rdCost.getDistPart(originalBuf, prediction, 10, COMPONENT_Y, DFunc::SAD);
+      checksum += rdCost.getDistPart(originalBuf, prediction, 10, COMPONENT_Y, DFunc::HAD);
+    }
+  }
+  const auto cpuEnd = std::chrono::steady_clock::now();
+  const double gpuMilliseconds = std::chrono::duration<double, std::milli>(gpuEnd - gpuStart).count()
+                                 / gpuIterations;
+  const double cpuMilliseconds = std::chrono::duration<double, std::milli>(cpuEnd - cpuStart).count()
+                                 / cpuIterations;
+  std::cout << "Intra SAD+HAD microbenchmark 34x64x64: CPU " << cpuMilliseconds
+            << " ms/batch, CUDA " << gpuMilliseconds << " ms/batch, ratio "
+            << (cpuMilliseconds / gpuMilliseconds) << "x, checksum " << checksum << '\n';
+  context.releasePictureMirrors(&source);
   return gpuMilliseconds > 0.0;
 }
 
@@ -794,7 +858,7 @@ int main(const int argc, char *argv[])
       return fail("CUDA SAD failure recovery or permanent poisoning is invalid");
     }
 #endif
-    if (runBenchmark && !benchmarkSadBatch(context))
+    if (runBenchmark && (!benchmarkSadBatch(context) || !benchmarkIntraSatdBatch(context)))
     {
       return fail("CUDA SAD microbenchmark failed");
     }

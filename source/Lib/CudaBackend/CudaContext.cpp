@@ -1247,59 +1247,6 @@ bool CudaContext::computeDistortionBatch(const CudaDistortionBatchDesc &batch, s
 #endif
 }
 
-bool CudaContext::computeIntraSatdBatch(const CudaIntraSatdBatchDesc &batch, CudaSadHadResult *results) noexcept
-{
-#if VTM_ENABLE_CUDA
-  const std::uint64_t blockSamples = static_cast<std::uint64_t>(batch.width) * batch.height;
-  if (!isDistortionAccelerationAvailable() || results == nullptr || batch.candidates == nullptr
-      || batch.candidateCount < 2 || batch.candidateCount > CUDA_MAX_INTRA_CANDIDATES
-      || batch.width < 8 || batch.width > 128 || batch.height != batch.width || (batch.width & 7) != 0
-      || (batch.elementSize != 2 && batch.elementSize != 4) || (batch.bitDepth != 8 && batch.bitDepth != 10)
-      || blockSamples > std::numeric_limits<std::size_t>::max() / batch.elementSize / batch.candidateCount)
-  {
-    return false;
-  }
-  try
-  {
-    requireRuntime(m_impl.get());
-    PictureMirror &sourceMirror = findMirror(m_impl.get(), batch.sourceMirror);
-    if (batch.sourcePlane >= sourceMirror.host.planeCount)
-    {
-      return false;
-    }
-    const CudaHostPlaneDesc &sourcePlane = sourceMirror.host.planes[batch.sourcePlane];
-    if (sourcePlane.elementSize != batch.elementSize || sourcePlane.bitDepth != batch.bitDepth)
-    {
-      return false;
-    }
-    const void *sourceDevice = mapHostBlock(sourceMirror, batch.sourcePlane, batch.source,
-                                            batch.width, batch.height);
-    try
-    {
-      ensureDevice(batch.sourceMirror);
-      cuda_backend::computeIntraSatdBatch(m_impl->runtime, batch, sourceDevice,
-                                           sourceMirror.device.planes[batch.sourcePlane].pitchBytes, results);
-      return true;
-    }
-    catch (...)
-    {
-      ++m_impl->distortionFailures;
-      m_impl->distortionAccelerationEnabled = false;
-      cuda_backend::recoverDistortionRuntime(m_impl->runtime);
-      return false;
-    }
-  }
-  catch (...)
-  {
-    return false;
-  }
-#else
-  (void) batch;
-  (void) results;
-  return false;
-#endif
-}
-
 std::uint64_t CudaContext::distortionBatchDispatchCount() const
 {
 #if VTM_ENABLE_CUDA

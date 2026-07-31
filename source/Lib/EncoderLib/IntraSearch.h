@@ -56,7 +56,6 @@
 // Class definition
 // ====================================================================================================================
 class EncModeCtrl;
-class EncLibCommon;
 
 enum PLTScanMode
 {
@@ -382,7 +381,6 @@ private:
 
   PelStorage      m_tmpStorageCtu;
   PelStorage      m_colorTransResiBuf;
-  std::vector<Pel> m_cudaIntraPredictions;
 
   std::vector<TransformUnit *> m_orgTUs;
 
@@ -394,7 +392,6 @@ protected:
   TrQuant*        m_pcTrQuant;
   RdCost*         m_pcRdCost;
   EncReshape*     m_pcReshape;
-  EncLibCommon*   m_encLibCommon;
 
   // RD computation
   CABACWriter*    m_CABACEstimator;
@@ -417,7 +414,7 @@ public:
 
   void init(EncCfg *pcEncCfg, TrQuant *pcTrQuant, RdCost *pcRdCost, CABACWriter *CABACEstimator, CtxPool *ctxPool,
             const uint32_t maxCUWidth, const uint32_t maxCUHeight, const uint32_t maxTotalCUDepth,
-            EncReshape *m_pcReshape, const unsigned bitDepthY, EncLibCommon *encLibCommon);
+            EncReshape *m_pcReshape, const unsigned bitDepthY);
 
   void destroy                    ();
 

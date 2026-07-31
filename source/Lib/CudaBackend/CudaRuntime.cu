@@ -54,11 +54,6 @@ struct RuntimeContext
   std::uint64_t              *distortionResultsDevice = nullptr;
   std::uint64_t              *distortionResultsHost = nullptr;
   std::size_t                 distortionCapacity = 0;
-  void                       *intraCandidatesDevice = nullptr;
-  void                       *intraCandidatesHost = nullptr;
-  CudaSadHadResult           *intraResultsDevice = nullptr;
-  CudaSadHadResult           *intraResultsHost = nullptr;
-  std::size_t                 intraCandidateCapacityBytes = 0;
   std::uint64_t               distortionDispatches = 0;
 #if VTM_CUDA_TESTING
   unsigned                    asyncReleaseFailures = 0;
@@ -128,18 +123,6 @@ void releaseRuntimeContext(RuntimeContext *context, const bool checked, const bo
                       "distortion result release");
     context->distortionResultsDevice = nullptr;
   }
-  for (void *allocation : { context->intraCandidatesDevice,
-                            static_cast<void *>(context->intraResultsDevice) })
-  {
-    if (allocation != nullptr)
-    {
-      rememberCudaError(firstError, firstOperation,
-                        cudaFreeAsync(allocation, context->streams[queueIndex(CudaQueue::Compute)]),
-                        "intra SATD scratch release");
-    }
-  }
-  context->intraCandidatesDevice = nullptr;
-  context->intraResultsDevice = nullptr;
   for (cudaStream_t stream : context->streams)
   {
     if (synchronize && stream != nullptr)
@@ -154,16 +137,6 @@ void releaseRuntimeContext(RuntimeContext *context, const bool checked, const bo
                       "pinned distortion result release");
     context->distortionResultsHost = nullptr;
   }
-  for (void *allocation : { context->intraCandidatesHost,
-                            static_cast<void *>(context->intraResultsHost) })
-  {
-    if (allocation != nullptr)
-    {
-      rememberCudaError(firstError, firstOperation, cudaFreeHost(allocation), "pinned intra SATD scratch release");
-    }
-  }
-  context->intraCandidatesHost = nullptr;
-  context->intraResultsHost = nullptr;
   for (cudaEvent_t &fence : context->fences)
   {
     if (fence != nullptr)
@@ -268,59 +241,6 @@ void ensureDistortionCapacity(RuntimeContext *context, const std::size_t require
   context->distortionCapacity = capacity;
 }
 
-void ensureIntraCapacity(RuntimeContext *context, const std::size_t requiredBytes)
-{
-  if (requiredBytes <= context->intraCandidateCapacityBytes)
-  {
-    return;
-  }
-  constexpr std::size_t maximumBytes = static_cast<std::size_t>(CUDA_MAX_INTRA_CANDIDATES) * 128 * 128 * 4;
-  if (requiredBytes == 0 || requiredBytes > maximumBytes)
-  {
-    throw std::runtime_error("CUDA intra SATD batch exceeds the fixed scratch limit");
-  }
-
-  cudaStream_t stream = context->streams[queueIndex(CudaQueue::Compute)];
-  checkCuda(cudaStreamSynchronize(stream), "intra SATD scratch synchronization");
-  if (context->intraCandidatesDevice != nullptr || context->intraCandidatesHost != nullptr
-      || context->intraResultsDevice != nullptr || context->intraResultsHost != nullptr)
-  {
-    throw std::runtime_error("CUDA intra SATD scratch ownership is inconsistent");
-  }
-
-  void *candidateDevice = nullptr;
-  void *candidateHost = nullptr;
-  CudaSadHadResult *resultDevice = nullptr;
-  CudaSadHadResult *resultHost = nullptr;
-  try
-  {
-    checkCuda(cudaMallocFromPoolAsync(&candidateDevice, maximumBytes, context->memoryPool, stream),
-              "intra SATD candidate allocation");
-    checkCuda(cudaMallocFromPoolAsync(reinterpret_cast<void **>(&resultDevice),
-                                      CUDA_MAX_INTRA_CANDIDATES * sizeof(*resultDevice),
-                                      context->memoryPool, stream), "intra SATD result allocation");
-    checkCuda(cudaHostAlloc(&candidateHost, maximumBytes, cudaHostAllocPortable),
-              "pinned intra SATD candidate allocation");
-    checkCuda(cudaHostAlloc(reinterpret_cast<void **>(&resultHost),
-                            CUDA_MAX_INTRA_CANDIDATES * sizeof(*resultHost), cudaHostAllocPortable),
-              "pinned intra SATD result allocation");
-  }
-  catch (...)
-  {
-    if (candidateDevice != nullptr) (void) cudaFreeAsync(candidateDevice, stream);
-    if (resultDevice != nullptr) (void) cudaFreeAsync(resultDevice, stream);
-    (void) cudaStreamSynchronize(stream);
-    if (candidateHost != nullptr) (void) cudaFreeHost(candidateHost);
-    if (resultHost != nullptr) (void) cudaFreeHost(resultHost);
-    throw;
-  }
-  context->intraCandidatesDevice = candidateDevice;
-  context->intraCandidatesHost = candidateHost;
-  context->intraResultsDevice = resultDevice;
-  context->intraResultsHost = resultHost;
-  context->intraCandidateCapacityBytes = maximumBytes;
-}
-
 template<typename Sample>
 __global__ void sadBatchKernel(const Sample *source, const std::size_t sourcePitchBytes,
                                const Sample *referenceBase, const std::size_t referencePitchBytes,
@@ -366,100 +286,6 @@ __global__ void sadBatchKernel(const Sample *source, const std::size_t sourcePit
   if (threadIdx.x == 0)
   {
     results[candidate] = (partial[0] << subShift) >> distortionShift;
-  }
-}
-
-template<typename Sample>
-__global__ void intraSadHadBatchKernel(const Sample *source, const std::size_t sourcePitchBytes,
-                                       const Sample *candidates, const std::uint32_t width,
-                                       const std::uint32_t height, CudaSadHadResult *results)
-{
-  const std::uint32_t candidate = blockIdx.x;
-  const std::size_t sourceStride = sourcePitchBytes / sizeof(Sample);
-  const std::size_t blockSamples = static_cast<std::size_t>(width) * height;
-  const Sample *prediction = candidates + static_cast<std::size_t>(candidate) * blockSamples;
-  const std::uint32_t tileColumns = width >> 3;
-  const std::uint32_t tileRows = height >> 3;
-  const std::uint32_t tileCount = tileColumns * tileRows;
-
-  std::uint64_t sad = 0;
-  std::uint64_t had = 0;
-  for (std::uint32_t tile = threadIdx.x; tile < tileCount; tile += blockDim.x)
-  {
-    const std::uint32_t tileX = (tile % tileColumns) << 3;
-    const std::uint32_t tileY = (tile / tileColumns) << 3;
-    std::int32_t coefficients[64];
-    for (std::uint32_t y = 0; y < 8; ++y)
-    {
-      for (std::uint32_t x = 0; x < 8; ++x)
-      {
-        const std::int32_t difference = static_cast<std::int32_t>(
-          source[static_cast<std::size_t>(tileY + y) * sourceStride + tileX + x])
-          - static_cast<std::int32_t>(prediction[static_cast<std::size_t>(tileY + y) * width + tileX + x]);
-        coefficients[y * 8 + x] = difference;
-        sad += static_cast<std::uint64_t>(difference < 0 ? -difference : difference);
-      }
-    }
-    for (std::uint32_t y = 0; y < 8; ++y)
-    {
-      for (std::uint32_t span = 1; span < 8; span <<= 1)
-      {
-        for (std::uint32_t base = 0; base < 8; base += span << 1)
-        {
-          for (std::uint32_t offset = 0; offset < span; ++offset)
-          {
-            const std::int32_t a = coefficients[y * 8 + base + offset];
-            const std::int32_t b = coefficients[y * 8 + base + offset + span];
-            coefficients[y * 8 + base + offset] = a + b;
-            coefficients[y * 8 + base + offset + span] = a - b;
-          }
-        }
-      }
-    }
-    for (std::uint32_t x = 0; x < 8; ++x)
-    {
-      for (std::uint32_t span = 1; span < 8; span <<= 1)
-      {
-        for (std::uint32_t base = 0; base < 8; base += span << 1)
-        {
-          for (std::uint32_t offset = 0; offset < span; ++offset)
-          {
-            const std::int32_t a = coefficients[(base + offset) * 8 + x];
-            const std::int32_t b = coefficients[(base + offset + span) * 8 + x];
-            coefficients[(base + offset) * 8 + x] = a + b;
-            coefficients[(base + offset + span) * 8 + x] = a - b;
-          }
-        }
-      }
-    }
-    std::uint64_t tileHad = 0;
-    for (const std::int32_t coefficient : coefficients)
-    {
-      tileHad += static_cast<std::uint64_t>(coefficient < 0 ? -coefficient : coefficient);
-    }
-    const std::int32_t dc = coefficients[0];
-    const std::uint64_t absDc = static_cast<std::uint64_t>(dc < 0 ? -dc : dc);
-    tileHad = tileHad - absDc + (absDc >> 2);
-    had += (tileHad + 2) >> 2;
-  }
-
-  __shared__ std::uint64_t sadPartial[256];
-  __shared__ std::uint64_t hadPartial[256];
-  sadPartial[threadIdx.x] = sad;
-  hadPartial[threadIdx.x] = had;
-  __syncthreads();
-  for (unsigned offset = blockDim.x / 2; offset != 0; offset >>= 1)
-  {
-    if (threadIdx.x < offset)
-    {
-      sadPartial[threadIdx.x] += sadPartial[threadIdx.x + offset];
-      hadPartial[threadIdx.x] += hadPartial[threadIdx.x + offset];
-    }
-    __syncthreads();
-  }
-  if (threadIdx.x == 0)
-  {
-    results[candidate] = { sadPartial[0], hadPartial[0] };
   }
 }
 
@@ -700,44 +526,6 @@ void computeDistortionBatch(RuntimeContext *context, const CudaDistortionBatchDe
   ++context->distortionDispatches;
 }
 
-void computeIntraSatdBatch(RuntimeContext *context, const CudaIntraSatdBatchDesc &batch,
-                           const void *sourceDevice, const std::size_t sourcePitchBytes,
-                           CudaSadHadResult *results)
-{
-  checkCuda(cudaSetDevice(context->device), "device selection");
-  const std::size_t blockBytes = static_cast<std::size_t>(batch.width) * batch.height * batch.elementSize;
-  const std::size_t candidateBytes = blockBytes * batch.candidateCount;
-  ensureIntraCapacity(context, candidateBytes);
-  std::memcpy(context->intraCandidatesHost, batch.candidates, candidateBytes);
-
-  cudaStream_t stream = context->streams[queueIndex(CudaQueue::Compute)];
-  checkCuda(cudaMemcpyAsync(context->intraCandidatesDevice, context->intraCandidatesHost, candidateBytes,
-                            cudaMemcpyHostToDevice, stream), "intra SATD candidate upload");
-  constexpr unsigned threads = 256;
-  if (batch.elementSize == 2)
-  {
-    intraSadHadBatchKernel<std::int16_t><<<batch.candidateCount, threads, 0, stream>>>(
-      static_cast<const std::int16_t *>(sourceDevice), sourcePitchBytes,
-      static_cast<const std::int16_t *>(context->intraCandidatesDevice), batch.width, batch.height,
-      context->intraResultsDevice);
-  }
-  else
-  {
-    intraSadHadBatchKernel<std::int32_t><<<batch.candidateCount, threads, 0, stream>>>(
-      static_cast<const std::int32_t *>(sourceDevice), sourcePitchBytes,
-      static_cast<const std::int32_t *>(context->intraCandidatesDevice), batch.width, batch.height,
-      context->intraResultsDevice);
-  }
-  checkCuda(cudaGetLastError(), "intra SAD/HAD batch launch");
-  checkCuda(cudaMemcpyAsync(context->intraResultsHost, context->intraResultsDevice,
-                            static_cast<std::size_t>(batch.candidateCount) * sizeof(*results),
-                            cudaMemcpyDeviceToHost, stream), "intra SAD/HAD result download");
-  checkCuda(cudaStreamSynchronize(stream), "intra SAD/HAD batch completion");
-  std::memcpy(results, context->intraResultsHost,
-              static_cast<std::size_t>(batch.candidateCount) * sizeof(*results));
-  ++context->distortionDispatches;
-}
-
 std::uint64_t distortionBatchDispatchCount(const RuntimeContext *context)
 {
   return context->distortionDispatches;
@@ -766,15 +554,6 @@ void recoverDistortionRuntime(RuntimeContext *context) noexcept
         (void) cudaGetLastError(); // retain ownership so normal context teardown can retry
       }
     }
-    for (void **allocation : { &context->intraCandidatesDevice,
-                               reinterpret_cast<void **>(&context->intraResultsDevice) })
-    {
-      if (*allocation != nullptr && cudaFreeAsync(*allocation, context->streams[computeIndex]) == cudaSuccess)
-      {
-        *allocation = nullptr;
-      }
-    }
-    (void) cudaStreamSynchronize(context->streams[computeIndex]);
     (void) cudaStreamDestroy(context->streams[computeIndex]);
     context->streams[computeIndex] = nullptr;
   }
@@ -785,16 +564,7 @@ void recoverDistortionRuntime(RuntimeContext *context) noexcept
       context->distortionResultsHost = nullptr;
     }
   }
-  if (context->intraCandidatesHost != nullptr && cudaFreeHost(context->intraCandidatesHost) == cudaSuccess)
-  {
-    context->intraCandidatesHost = nullptr;
-  }
-  if (context->intraResultsHost != nullptr && cudaFreeHost(context->intraResultsHost) == cudaSuccess)
-  {
-    context->intraResultsHost = nullptr;
-  }
   context->distortionCapacity = 0;
-  context->intraCandidateCapacityBytes = 0;
   (void) cudaGetLastError();
   (void) cudaStreamCreateWithFlags(&context->streams[computeIndex], cudaStreamNonBlocking);
 }

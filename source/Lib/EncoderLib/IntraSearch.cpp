@@ -36,8 +36,6 @@
  */
 
 #include "IntraSearch.h"
-#include "EncLibCommon.h"
-#include "CudaBackend/CudaDistortion.h"
 
 #include "EncModeCtrl.h"
 
@@ -62,7 +60,6 @@ IntraSearch::IntraSearch()
   , m_pcTrQuant(nullptr)
   , m_pcRdCost(nullptr)
   , m_pcReshape(nullptr)
-  , m_encLibCommon(nullptr)
   , m_CABACEstimator(nullptr)
   , m_ctxPool(nullptr)
   , m_isInitialized(false)
@@ -197,8 +194,7 @@ IntraSearch::~IntraSearch()
 
 void IntraSearch::init(EncCfg *pcEncCfg, TrQuant *pcTrQuant, RdCost *pcRdCost, CABACWriter *CABACEstimator,
                        CtxPool *ctxPool, const uint32_t maxCUWidth, const uint32_t maxCUHeight,
-                       const uint32_t maxTotalCUDepth, EncReshape *pcReshape, const unsigned bitDepthY,
-                       EncLibCommon *encLibCommon)
+                       const uint32_t maxTotalCUDepth, EncReshape *pcReshape, const unsigned bitDepthY)
 {
   CHECK(m_isInitialized, "Already initialized");
 
@@ -208,7 +204,6 @@ void IntraSearch::init(EncCfg *pcEncCfg, TrQuant *pcTrQuant, RdCost *pcRdCost, C
   m_CABACEstimator = CABACEstimator;
   m_ctxPool        = ctxPool;
   m_pcReshape      = pcReshape;
-  m_encLibCommon   = encLibCommon;
 
   const ChromaFormat cform = pcEncCfg->getChromaFormatIdc();
 
@@ -693,28 +688,6 @@ bool IntraSearch::estIntraPredLumaQT(CodingUnit &cu, Partitioner &partitioner, c
 
           if (!lfnstLoadFlag)
           {
-            struct CudaIntraCandidate
-            {
-              uint32_t mode;
-              uint64_t fracModeBits;
-              bool valid;
-            };
-            std::vector<CudaIntraCandidate> cudaCandidates;
-            const std::uint64_t expectedRegularCandidates = (static_cast<std::uint64_t>(numModesAvailable) + 1) / 2;
-            constexpr std::uint64_t minCudaIntraSamples = 1u << 17;
-            const bool cudaIntraBatch = m_encLibCommon != nullptr
-              && !(cu.slice->getLmcsEnabledFlag() && m_pcReshape->getCTUFlag())
-              && area.width == area.height && area.width >= 8 && area.width <= 128 && (area.width & 7) == 0
-              && expectedRegularCandidates <= vtm::CUDA_MAX_INTRA_CANDIDATES
-              && expectedRegularCandidates * area.width * area.height >= minCudaIntraSamples
-              && m_encLibCommon->isCudaIntraSatdBatchAvailable(pu.cs->picture);
-            if (cudaIntraBatch)
-            {
-              cudaCandidates.reserve(static_cast<std::size_t>(expectedRegularCandidates));
-              m_cudaIntraPredictions.clear();
-              m_cudaIntraPredictions.reserve(static_cast<std::size_t>(expectedRegularCandidates)
-                                               * area.width * area.height);
-            }
             for (int modeIdx = 0; modeIdx < numModesAvailable; modeIdx++)
             {
               uint32_t   mode      = modeIdx;
@@ -734,18 +707,7 @@ bool IntraSearch::estIntraPredLumaQT(CodingUnit &cu, Partitioner &partitioner, c
               predIntraAng(COMPONENT_Y, piPred, pu);
               // Use the min between SAD and HAD as the cost criterion
               // SAD is scaled by 2 to align with the scaling of HAD
-              if (cudaIntraBatch)
-              {
-                for (int y = 0; y < piPred.height; ++y)
-                {
-                  const Pel *row = piPred.buf + static_cast<ptrdiff_t>(y) * piPred.stride;
-                  m_cudaIntraPredictions.insert(m_cudaIntraPredictions.end(), row, row + piPred.width);
-                }
-              }
-              else
-              {
-                minSadHad = std::min(distParamSad.distFunc(distParamSad) * 2, distParamHad.distFunc(distParamHad));
-              }
+              minSadHad += std::min(distParamSad.distFunc(distParamSad) * 2, distParamHad.distFunc(distParamHad));
 
               // NB xFracModeBitsIntra will not affect the mode for chroma that may have already been pre-estimated.
               m_CABACEstimator->getCtx() = SubCtx( Ctx::MipFlag, ctxStartMipFlag );
@@ -755,16 +717,6 @@ bool IntraSearch::estIntraPredLumaQT(CodingUnit &cu, Partitioner &partitioner, c
               m_CABACEstimator->getCtx() = SubCtx( Ctx::MultiRefLineIdx, ctxStartMrlIdx );
 
               uint64_t fracModeBits = xFracModeBitsIntra(pu, mode, ChannelType::LUMA);
-
-              bool validCudaCandidate = true;
-#if GDR_ENABLED
-              validCudaCandidate = !isEncodeGdrClean || isValidIntraPredLuma(pu, mode);
-#endif
-              if (cudaIntraBatch)
-              {
-                cudaCandidates.push_back({ mode, fracModeBits, validCudaCandidate });
-                continue;
-              }
 
               double cost = (double) minSadHad + (double) fracModeBits * sqrtLambdaForFirstPass;
 
@@ -777,45 +729,6 @@ bool IntraSearch::estIntraPredLumaQT(CodingUnit &cu, Partitioner &partitioner, c
                 const ModeInfo mi(false, false, 0, ISPType::NONE, mode);
                 updateCandList(mi, cost, rdModeList, candCostList, numModesForFullRD);
                 updateCandList(mi, double(minSadHad), hadModeList, candHadList, numHadCand);
-              }
-            }
-            if (cudaIntraBatch)
-            {
-              const vtm::CudaSadHadResult *cudaResults = nullptr;
-              const bool dispatched = m_encLibCommon->computeIntraSatdBatch(
-                pu.cs->picture, piOrg.buf, m_cudaIntraPredictions.data(),
-                static_cast<std::uint32_t>(cudaCandidates.size()), area.width, area.height,
-                sizeof(Pel), sps.getBitDepth(ChannelType::LUMA), cudaResults);
-              DistParam stagedSad = distParamSad;
-              DistParam stagedHad = distParamHad;
-              stagedSad.cur.stride = area.width;
-              stagedHad.cur.stride = area.width;
-              const std::size_t blockSamples = static_cast<std::size_t>(area.width) * area.height;
-              for (std::size_t index = 0; index < cudaCandidates.size(); ++index)
-              {
-                Distortion minSadHad;
-                if (dispatched)
-                {
-                  minSadHad = std::min<Distortion>(cudaResults[index].sad * 2, cudaResults[index].had);
-                }
-                else
-                {
-                  const Pel *prediction = m_cudaIntraPredictions.data() + index * blockSamples;
-                  stagedSad.cur.buf = prediction;
-                  stagedHad.cur.buf = prediction;
-                  minSadHad = std::min(stagedSad.distFunc(stagedSad) * 2, stagedHad.distFunc(stagedHad));
-                }
-                const CudaIntraCandidate &candidate = cudaCandidates[index];
-                const double cost = static_cast<double>(minSadHad)
-                                    + static_cast<double>(candidate.fracModeBits) * sqrtLambdaForFirstPass;
-                DTRACE(g_trace_ctx, D_INTRA_COST, "IntraHAD: %u, %llu, %f (%d)\n", minSadHad,
-                       candidate.fracModeBits, cost, candidate.mode);
-                if (candidate.valid)
-                {
-                  const ModeInfo mi(false, false, 0, ISPType::NONE, candidate.mode);
-                  updateCandList(mi, cost, rdModeList, candCostList, numModesForFullRD);
-                  updateCandList(mi, double(minSadHad), hadModeList, candHadList, numHadCand);
-                }
               }
             }
             if (!sps.getUseMIP() && lfnstSaveFlag)

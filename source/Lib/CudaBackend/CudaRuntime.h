@@ -65,9 +65,6 @@ void computeDistortionBatch(RuntimeContext *context, const CudaDistortionBatchDe
                             const void *sourceDevice, std::size_t sourcePitchBytes,
                             const void *referenceDevice, std::size_t referencePitchBytes,
                             std::uint64_t *results);
-void computeIntraSatdBatch(RuntimeContext *context, const CudaIntraSatdBatchDesc &batch,
-                           const void *sourceDevice, std::size_t sourcePitchBytes,
-                           CudaSadHadResult *results);
 std::uint64_t distortionBatchDispatchCount(const RuntimeContext *context);
 void recoverDistortionRuntime(RuntimeContext *context) noexcept;
 #if VTM_CUDA_TESTING

@@ -49,7 +49,6 @@ struct EncLibCommon::ComputeState
   bool               configured = false;
   bool               synchronized = false;
   std::vector<std::uint64_t> sadResults;
-  std::vector<vtm::CudaSadHadResult> intraSatdResults;
 };
 
 EncLibCommon::EncLibCommon()
@@ -159,13 +158,6 @@ bool EncLibCommon::isCudaSadBatchAvailable(const void *sourceOwner, const void *
          && m_computeState->cudaContext.hasPictureMirror(referenceOwner, vtm::CudaPictureRole::Reconstruction);
 }
 
-bool EncLibCommon::isCudaIntraSatdBatchAvailable(const void *sourceOwner) const
-{
-  return m_computeState->config.enableExperimentalSad
-         && m_computeState->cudaContext.isDistortionAccelerationAvailable()
-         && m_computeState->cudaContext.hasPictureMirror(sourceOwner, vtm::CudaPictureRole::Original);
-}
-
 bool EncLibCommon::computeSadGrid(const void *sourceOwner, const void *source, const void *referenceOwner,
                                   const void *reference, const std::uint32_t columns, const std::uint32_t rows,
                                   const std::uint32_t width, const std::uint32_t height,
@@ -212,37 +204,6 @@ bool EncLibCommon::computeSadGrid(const void *sourceOwner, const void *source, c
     return false;
   }
   results = m_computeState->sadResults.data();
-  return true;
-}
-
-bool EncLibCommon::computeIntraSatdBatch(const void *sourceOwner, const void *source,
-                                         const void *packedCandidates, const std::uint32_t candidateCount,
-                                         const std::uint32_t width, const std::uint32_t height,
-                                         const std::uint8_t elementSize, const std::uint8_t bitDepth,
-                                         const vtm::CudaSadHadResult *&results)
-{
-  results = nullptr;
-  if (!isCudaIntraSatdBatchAvailable(sourceOwner) || packedCandidates == nullptr
-      || candidateCount == 0 || candidateCount > vtm::CUDA_MAX_INTRA_CANDIDATES)
-  {
-    return false;
-  }
-  vtm::CudaIntraSatdBatchDesc batch{};
-  batch.sourceMirror = m_computeState->cudaContext.pictureMirrorHandle(sourceOwner, vtm::CudaPictureRole::Original);
-  batch.source = source;
-  batch.candidates = packedCandidates;
-  batch.candidateCount = candidateCount;
-  batch.width = width;
-  batch.height = height;
-  batch.sourcePlane = 0;
-  batch.elementSize = elementSize;
-  batch.bitDepth = bitDepth;
-  m_computeState->intraSatdResults.resize(candidateCount);
-  if (!m_computeState->cudaContext.computeIntraSatdBatch(batch, m_computeState->intraSatdResults.data()))
-  {
-    return false;
-  }
-  results = m_computeState->intraSatdResults.data();
   return true;
 }
 
