@@ -33,6 +33,9 @@
 
 #include "CudaBackend/ComputeBackend.h"
 #include "CudaBackend/CudaContext.h"
+#include "CudaBackend/CudaInterpolation.h"
+#include "CommonLib/InterpolationFilter.h"
+#include "CommonLib/Mv.h"
 
 #include <cstdlib>
 #include <array>
@@ -137,11 +140,11 @@ struct TestPicture
     {
       const std::uint32_t planeWidth = index == 0 ? width : (width + 1) / 2;
       const std::uint32_t planeHeight = index == 0 ? height : (height + 1) / 2;
-      const std::uint16_t horizontalMargin = index == 0 ? 3 : 1;
-      const std::uint16_t verticalMargin = index == 0 ? 2 : 1;
+      const std::uint16_t horizontalMargin = index == 0 ? 8 : 1;
+      const std::uint16_t verticalMargin = index == 0 ? 8 : 1;
       Plane &plane = planes[index];
       plane.rowBytes = (horizontalMargin + planeWidth + horizontalMargin) * elementSize;
-      plane.stride = plane.rowBytes + 11 + index;
+      plane.stride = plane.rowBytes + (11 + index) * elementSize;
       plane.fullHeight = verticalMargin + planeHeight + verticalMargin;
       plane.storage.resize(plane.stride * plane.fullHeight, 0xcd);
       for (std::size_t row = 0; row < plane.fullHeight; ++row)
@@ -330,6 +333,238 @@ bool runSadBatchCase(vtm::CudaContext &context, const std::uint8_t elementSize, 
   context.releasePictureMirrors(&sourceOwner);
   context.releasePictureMirrors(&referenceOwner);
   return true;
+}
+
+int floorDivideByFour(const int value)
+{
+  return value >= 0 ? value / 4 : -((-value + 3) / 4);
+}
+
+void referenceFractionalSadCore(const vtm::CudaFractionalSadBatchDesc &batch,
+                                const std::ptrdiff_t sourceStride, const std::ptrdiff_t referenceStride,
+                                std::uint64_t *results, InterpolationFilter &filter,
+                                std::vector<Pel> &temporary, std::vector<Pel> &prediction)
+{
+  static const std::array<Mv, vtm::CUDA_FRACTIONAL_CANDIDATE_COUNT> halfCandidates =
+    { Mv(0, 0), Mv(0, -1), Mv(0, 1), Mv(-1, 0), Mv(1, 0),
+      Mv(-1, -1), Mv(1, -1), Mv(-1, 1), Mv(1, 1) };
+  static const std::array<Mv, vtm::CUDA_FRACTIONAL_CANDIDATE_COUNT> quarterCandidates =
+    { Mv(0, 0), Mv(0, -1), Mv(0, 1), Mv(-1, -1), Mv(1, -1),
+      Mv(-1, 0), Mv(1, 0), Mv(-1, 1), Mv(1, 1) };
+  const auto *source = static_cast<const Pel *>(batch.source);
+  const auto *reference = static_cast<const Pel *>(batch.reference);
+  const ClpRng clipping{ 0, (1 << batch.bitDepth) - 1, batch.bitDepth };
+  const auto &candidates = batch.stage == vtm::CudaFractionalStage::Half ? halfCandidates : quarterCandidates;
+  for (std::size_t candidate = 0; candidate < candidates.size(); ++candidate)
+  {
+    const int displacementHor = batch.stage == vtm::CudaFractionalStage::Half
+      ? candidates[candidate].getHor() * 2 : batch.centreHorQuarter + candidates[candidate].getHor();
+    const int displacementVer = batch.stage == vtm::CudaFractionalStage::Half
+      ? candidates[candidate].getVer() * 2 : batch.centreVerQuarter + candidates[candidate].getVer();
+    const int integerHor = floorDivideByFour(displacementHor);
+    const int integerVer = floorDivideByFour(displacementVer);
+    const int phaseHor = displacementHor - integerHor * 4;
+    const int phaseVer = displacementVer - integerVer * 4;
+    const Pel *candidateReference = reference + integerVer * referenceStride + integerHor;
+    const auto horizontalFilter = batch.useAltHalfFilter
+      ? InterpolationFilter::Filter::HALFPEL_ALT : InterpolationFilter::Filter::DEFAULT;
+    const auto verticalFilter = batch.useAltHalfFilter && batch.stage == vtm::CudaFractionalStage::Half
+      ? InterpolationFilter::Filter::HALFPEL_ALT : InterpolationFilter::Filter::DEFAULT;
+    filter.filterHor(COMPONENT_Y, candidateReference - 3 * referenceStride, referenceStride,
+                     temporary.data(), batch.width, batch.width, batch.height + 7,
+                     phaseHor << 2, false, clipping, horizontalFilter);
+    filter.filterVer(COMPONENT_Y, temporary.data() + 3 * batch.width, batch.width,
+                     prediction.data(), batch.width, batch.width, batch.height,
+                     phaseVer << 2, false, true, clipping, verticalFilter);
+    std::uint64_t sad = 0;
+    for (std::uint32_t y = 0; y < batch.height; ++y)
+    {
+      for (std::uint32_t x = 0; x < batch.width; ++x)
+      {
+        const std::int32_t difference = static_cast<std::int32_t>(source[y * sourceStride + x])
+                                        - prediction[static_cast<std::size_t>(y) * batch.width + x];
+        sad += static_cast<std::uint64_t>(difference < 0 ? -difference : difference);
+      }
+    }
+    results[candidate] = sad;
+  }
+}
+
+void referenceFractionalSad(const vtm::CudaFractionalSadBatchDesc &batch,
+                            const std::ptrdiff_t sourceStride, const std::ptrdiff_t referenceStride,
+                            std::uint64_t *results)
+{
+  InterpolationFilter filter;
+  filter.initInterpolationFilter(true);
+  std::vector<Pel> temporary(static_cast<std::size_t>(batch.width) * (batch.height + 7));
+  std::vector<Pel> prediction(static_cast<std::size_t>(batch.width) * batch.height);
+  referenceFractionalSadCore(batch, sourceStride, referenceStride, results, filter, temporary, prediction);
+}
+
+bool runFractionalSadCase(vtm::CudaContext &context, const std::uint8_t bitDepth,
+                          const std::uint32_t width, const std::uint32_t height,
+                          const vtm::CudaFractionalStage stage, const int centreHor,
+                          const int centreVer, const bool alternateHalf)
+{
+  TestPicture source(width, height, sizeof(Pel), bitDepth, 43);
+  TestPicture reference(width, height, sizeof(Pel), bitDepth, 97);
+  source.fillSamples(43);
+  reference.fillSamples(97);
+  const auto sourceMirror = context.registerPictureMirror(
+    &source, vtm::CudaPictureRole::Original, source.descriptor);
+  const auto referenceMirror = context.registerPictureMirror(
+    &reference, vtm::CudaPictureRole::Reconstruction, reference.descriptor);
+  vtm::CudaFractionalSadBatchDesc batch{};
+  batch.sourceMirror = sourceMirror;
+  batch.referenceMirror = referenceMirror;
+  batch.source = source.descriptor.planes[0].data;
+  batch.reference = reference.descriptor.planes[0].data;
+  batch.width = width;
+  batch.height = height;
+  batch.elementSize = sizeof(Pel);
+  batch.bitDepth = bitDepth;
+  batch.stage = stage;
+  batch.centreHorQuarter = static_cast<std::int8_t>(centreHor);
+  batch.centreVerQuarter = static_cast<std::int8_t>(centreVer);
+  batch.useAltHalfFilter = alternateHalf;
+  std::array<std::uint64_t, vtm::CUDA_FRACTIONAL_CANDIDATE_COUNT> gpu{};
+  std::array<std::uint64_t, vtm::CUDA_FRACTIONAL_CANDIDATE_COUNT> cpu{};
+  const bool dispatched = context.computeFractionalSadBatch(batch, gpu.data());
+  referenceFractionalSad(batch,
+                         source.descriptor.planes[0].strideBytes / sizeof(Pel),
+                         reference.descriptor.planes[0].strideBytes / sizeof(Pel), cpu.data());
+  context.releasePictureMirrors(&source);
+  context.releasePictureMirrors(&reference);
+  if (!dispatched)
+  {
+    return false;
+  }
+  for (std::size_t candidate = 0; candidate < gpu.size(); ++candidate)
+  {
+    if (gpu[candidate] != cpu[candidate])
+    {
+      std::cerr << "fractional SAD mismatch: stage " << static_cast<int>(stage)
+                << " Pel" << sizeof(Pel) * 8 << " bitDepth " << unsigned(bitDepth)
+                << " size " << width << 'x' << height << " centre " << centreHor << ',' << centreVer
+                << " alt " << alternateHalf << " candidate " << candidate
+                << " gpu/cpu " << gpu[candidate] << '/' << cpu[candidate] << '\n';
+      return false;
+    }
+  }
+  return true;
+}
+
+void referenceHalfVtmSad(const vtm::CudaFractionalSadBatchDesc &batch,
+                         const std::ptrdiff_t sourceStride, const std::ptrdiff_t referenceStride,
+                         std::uint64_t *results, InterpolationFilter &filter,
+                         std::array<std::vector<Pel>, 2> &temporary,
+                         std::array<std::vector<Pel>, 4> &blocks)
+{
+  static const std::array<Mv, vtm::CUDA_FRACTIONAL_CANDIDATE_COUNT> candidates =
+    { Mv(0, 0), Mv(0, -1), Mv(0, 1), Mv(-1, 0), Mv(1, 0),
+      Mv(-1, -1), Mv(1, -1), Mv(-1, 1), Mv(1, 1) };
+  const auto *source = static_cast<const Pel *>(batch.source);
+  const auto *reference = static_cast<const Pel *>(batch.reference);
+  const int stride = static_cast<int>(batch.width) + 1;
+  const ClpRng clipping{ 0, (1 << batch.bitDepth) - 1, batch.bitDepth };
+  const auto filterIndex = batch.useAltHalfFilter
+    ? InterpolationFilter::Filter::HALFPEL_ALT : InterpolationFilter::Filter::DEFAULT;
+  const Pel *filterSource = reference - 4 * referenceStride - 1;
+  filter.filterHor(COMPONENT_Y, filterSource, referenceStride, temporary[0].data(), stride,
+                   batch.width + 1, batch.height + 8, 0, false, clipping, filterIndex);
+  filter.filterHor(COMPONENT_Y, filterSource, referenceStride, temporary[1].data(), stride,
+                   batch.width + 1, batch.height + 8, 8, false, clipping, filterIndex);
+  filter.filterVer(COMPONENT_Y, temporary[0].data() + 4 * stride + 1, stride, blocks[0].data(), stride,
+                   batch.width, batch.height, 0, false, true, clipping, filterIndex);
+  filter.filterVer(COMPONENT_Y, temporary[0].data() + 3 * stride + 1, stride, blocks[1].data(), stride,
+                   batch.width, batch.height + 1, 8, false, true, clipping, filterIndex);
+  filter.filterVer(COMPONENT_Y, temporary[1].data() + 4 * stride, stride, blocks[2].data(), stride,
+                   batch.width + 1, batch.height, 0, false, true, clipping, filterIndex);
+  filter.filterVer(COMPONENT_Y, temporary[1].data() + 3 * stride, stride, blocks[3].data(), stride,
+                   batch.width + 1, batch.height + 1, 8, false, true, clipping, filterIndex);
+  for (std::size_t candidate = 0; candidate < candidates.size(); ++candidate)
+  {
+    const int hor = candidates[candidate].getHor() * 2;
+    const int ver = candidates[candidate].getVer() * 2;
+    const Pel *prediction = nullptr;
+    if ((ver & 3) == 0 && (hor & 3) == 0) prediction = blocks[0].data();
+    if ((ver & 3) == 2 && (hor & 3) == 0) prediction = blocks[1].data();
+    if ((ver & 3) == 0 && (hor & 3) == 2) prediction = blocks[2].data();
+    if ((ver & 3) == 2 && (hor & 3) == 2) prediction = blocks[3].data();
+    if (hor == 2 && (ver & 1) == 0) ++prediction;
+    if ((hor & 1) == 0 && ver == 2) prediction += stride;
+    std::uint64_t sad = 0;
+    for (std::uint32_t y = 0; y < batch.height; ++y)
+    {
+      for (std::uint32_t x = 0; x < batch.width; ++x)
+      {
+        const std::int32_t difference = static_cast<std::int32_t>(source[y * sourceStride + x])
+                                        - prediction[static_cast<std::size_t>(y) * stride + x];
+        sad += static_cast<std::uint64_t>(difference < 0 ? -difference : difference);
+      }
+    }
+    results[candidate] = sad;
+  }
+}
+
+bool benchmarkFractionalSad(vtm::CudaContext &context)
+{
+  constexpr std::uint32_t width = 128;
+  constexpr std::uint32_t height = 128;
+  TestPicture source(width, height, sizeof(Pel), 10, 31);
+  TestPicture reference(width, height, sizeof(Pel), 10, 79);
+  source.fillSamples(31);
+  reference.fillSamples(79);
+  const auto sourceMirror = context.registerPictureMirror(
+    &source, vtm::CudaPictureRole::Original, source.descriptor);
+  const auto referenceMirror = context.registerPictureMirror(
+    &reference, vtm::CudaPictureRole::Reconstruction, reference.descriptor);
+  vtm::CudaFractionalSadBatchDesc batch{};
+  batch.sourceMirror = sourceMirror;
+  batch.referenceMirror = referenceMirror;
+  batch.source = source.descriptor.planes[0].data;
+  batch.reference = reference.descriptor.planes[0].data;
+  batch.width = width;
+  batch.height = height;
+  batch.elementSize = sizeof(Pel);
+  batch.bitDepth = 10;
+  batch.stage = vtm::CudaFractionalStage::Half;
+  std::array<std::uint64_t, vtm::CUDA_FRACTIONAL_CANDIDATE_COUNT> results{};
+  context.computeFractionalSadBatch(batch, results.data());
+  constexpr unsigned iterations = 100;
+  const auto gpuStart = std::chrono::steady_clock::now();
+  for (unsigned iteration = 0; iteration < iterations; ++iteration)
+  {
+    context.computeFractionalSadBatch(batch, results.data());
+  }
+  const auto gpuEnd = std::chrono::steady_clock::now();
+
+  InterpolationFilter filter;
+  filter.initInterpolationFilter(true);
+  const std::size_t stride = width + 1;
+  std::array<std::vector<Pel>, 2> temporary;
+  for (auto &buffer : temporary) buffer.resize(stride * (height + 8));
+  std::array<std::vector<Pel>, 4> blocks;
+  for (auto &buffer : blocks) buffer.resize(stride * (height + 1));
+  const std::ptrdiff_t sourceStride = source.descriptor.planes[0].strideBytes / sizeof(Pel);
+  const std::ptrdiff_t referenceStride = reference.descriptor.planes[0].strideBytes / sizeof(Pel);
+  std::uint64_t checksum = 0;
+  const auto cpuStart = std::chrono::steady_clock::now();
+  for (unsigned iteration = 0; iteration < iterations; ++iteration)
+  {
+    referenceHalfVtmSad(batch, sourceStride, referenceStride, results.data(), filter, temporary, blocks);
+    checksum += results[iteration % results.size()];
+  }
+  const auto cpuEnd = std::chrono::steady_clock::now();
+  const double gpuMilliseconds = std::chrono::duration<double, std::milli>(gpuEnd - gpuStart).count() / iterations;
+  const double cpuMilliseconds = std::chrono::duration<double, std::milli>(cpuEnd - cpuStart).count() / iterations;
+  std::cout << "Fractional half-pel SAD microbenchmark 9x128x128 Pel" << sizeof(Pel) * 8
+            << "/10-bit: CPU InterpolationFilter " << cpuMilliseconds
+            << " ms/batch, CUDA " << gpuMilliseconds << " ms/batch, ratio "
+            << (cpuMilliseconds / gpuMilliseconds) << "x, checksum " << checksum << '\n';
+  context.releasePictureMirrors(&source);
+  context.releasePictureMirrors(&reference);
+  return gpuMilliseconds > 0.0;
 }
 
 bool benchmarkSadBatch(vtm::CudaContext &context)
@@ -708,6 +943,13 @@ int main(const int argc, char *argv[])
     {
       return fail("CUDA SAD batch differed from the ordered scalar reference");
     }
+    if (!runFractionalSadCase(context, 8, 4, 4, vtm::CudaFractionalStage::Half, 0, 0, false)
+        || !runFractionalSadCase(context, 10, 16, 12, vtm::CudaFractionalStage::Half, 0, 0, true)
+        || !runFractionalSadCase(context, 10, 64, 32, vtm::CudaFractionalStage::Quarter, -2, 2, false)
+        || !runFractionalSadCase(context, 10, 128, 128, vtm::CudaFractionalStage::Quarter, 2, -2, true))
+    {
+      return fail("CUDA fused fractional interpolation/SAD differed from InterpolationFilter");
+    }
 #if VTM_CUDA_TESTING
     if (!runSadFailureCase(std::stoi(argv[2]), 1, 0)
         || !runSadFailureCase(std::stoi(argv[2]), 2, 0)
@@ -716,7 +958,7 @@ int main(const int argc, char *argv[])
       return fail("CUDA SAD failure recovery or permanent poisoning is invalid");
     }
 #endif
-    if (runBenchmark && !benchmarkSadBatch(context))
+    if (runBenchmark && (!benchmarkSadBatch(context) || !benchmarkFractionalSad(context)))
     {
       return fail("CUDA SAD microbenchmark failed");
     }
