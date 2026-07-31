@@ -817,261 +817,7 @@ bool EncAppCfg::parseCfg( int argc, char* argv[] )
   SMultiValueInput<uint32_t>   cfg_generativeFaceVideoSEIMatrixPredFlag                      (0, 2550, 0, 102400);
   SMultiValueInput<uint32_t>   cfg_generativeFaceVideoSEINumMatrixType                       (0, 2550, 0, 102400);
   SMultiValueInput<uint32_t>   cfg_generativeFaceVideoSEIMatrixTypeIdx                       (0, 2550, 0, 102400);
-  SMultiValueInput<uint32_t>   cfg_generativeFaceVideoSEIMatrix3DSpaceFlag                   (0, 1, 0, 102400);
-  SMultiValueInput<uint32_t>   cfg_generativeFaceVideoSEINumMatrices                         (0, 2550, 0, 102400);
-  SMultiValueInput<uint32_t>   cfg_generativeFaceVideoSEIMatrixWidth                         (0, 2550, 0, 102400);
-  SMultiValueInput<uint32_t>   cfg_generativeFaceVideoSEIMatrixHeight                        (0, 2550, 0, 102400);
-  SMultiValueInput<uint32_t>   cfg_generativeFaceVideoSEINumMatricestoNumKpsFlag             (0, 2550, 0, 102400);
-  SMultiValueInput<uint32_t>   cfg_generativeFaceVideoSEINumMatricesInfo                     (0, 2550, 0, 102400);
-  SMultiValueInput<double>     cfg_generativeFaceVideoSEIMatrixElement                       (-50960.0, 50960.0, 0, 5095000);
-  SMultiValueInput<uint32_t>   cfg_generativeFaceVideoSEIChromaKeyValuePresentFlag           (0, 2550, 0, 102400);
-  SMultiValueInput<uint32_t>   cfg_generativeFaceVideoSEIChromaKeyValue                      (0, 2550, 0, 102400);
-
-  SMultiValueInput<uint32_t>   cfg_generativeFaceVideoEnhancementSEIId                                  (0, 2550, 0, 102400);
-  SMultiValueInput<uint32_t>   cfg_generativeFaceVideoEnhancementSEIGFVId                               (0, 2550, 0, 102400);
-  SMultiValueInput<uint32_t>   cfg_generativeFaceVideoEnhancementSEIGFVCnt                              (0, 2550, 0, 102400);
-  SMultiValueInput<uint32_t>   cfg_generativeFaceVideoEnhancementSEIMatrixPresentFlag                   (0, 2550, 0, 102400);
-  SMultiValueInput<uint32_t>   cfg_generativeFaceVideoEnhancementSEIMatrixPredFlag                      (0, 2550, 0, 102400);
-  SMultiValueInput<uint32_t>   cfg_generativeFaceVideoEnhancementSEIMatrixElementPrecisionFactor        (0, 2550, 0, 102400);
-  SMultiValueInput<uint32_t>   cfg_generativeFaceVideoEnhancementSEINumMatrices                         (0, 2550, 0, 102400);
-  SMultiValueInput<uint32_t>   cfg_generativeFaceVideoEnhancementSEIMatrixWidth                         (0, 2550, 0, 102400);
-  SMultiValueInput<uint32_t>   cfg_generativeFaceVideoEnhancementSEIMatrixHeight                        (0, 2550, 0, 102400);
-  SMultiValueInput<double>     cfg_generativeFaceVideoEnhancementSEIMatrixElement                       (-50960.0, 50960.0, 0, 5095000);
-  SMultiValueInput<uint32_t>   cfg_generativeFaceVideoEnhancementSEIPupilPresentIdx                     (0, 2550, 0, 102400);
-  SMultiValueInput<uint32_t>   cfg_generativeFaceVideoEnhancementSEIPupilCoordinatePrecisionFactor      (0, 2550, 0, 102400);
-  SMultiValueInput<double>     cfg_generativeFaceVideoEnhancementSEIPupilLeftEyeCoordinateX             (-50960.0, 50960.0, 0, 5095000);
-  SMultiValueInput<double>     cfg_generativeFaceVideoEnhancementSEIPupilLeftEyeCoordinateY             (-50960.0, 50960.0, 0, 5095000);
-  SMultiValueInput<double>     cfg_generativeFaceVideoEnhancementSEIPupilRightEyeCoordinateX            (-50960.0, 50960.0, 0, 5095000);
-  SMultiValueInput<double>     cfg_generativeFaceVideoEnhancementSEIPupilRightEyeCoordinateY            (-50960.0, 50960.0, 0, 5095000);
-
-  SMultiValueInput<uint32_t>   cfg_aurSEIRestrictions                                        (0, MAX_AUR_RESTRICTION, 0, std::numeric_limits<uint32_t>::max());
-  SMultiValueInput<bool>       cfg_aurSEIContextPresentFlag                                  (0, 1, 0, 4096);
-  SMultiValueInput<uint32_t>   cfg_aurSEIContext                                             (0, 15, 0, std::numeric_limits<uint32_t>::max());
-  SMultiValueInput<bool>       cfg_aurSEIExclusionFlag                                       (0, 1, 0, 4096);
-
-  SMultiValueInput<uint32_t> cfg_priSEIResamplingWidthNumMinus1(0, 65535, 0, std::numeric_limits<uint32_t>::max());
-  SMultiValueInput<uint32_t> cfg_priSEIResamplingWidthDenomMinus1(0, 65535, 0, std::numeric_limits<uint32_t>::max());
-  SMultiValueInput<uint32_t> cfg_priSEIResamplingHeightNumMinus1(0, std::numeric_limits<uint32_t>::max() - 1, 0, std::numeric_limits<uint32_t>::max());
-  SMultiValueInput<uint32_t> cfg_priSEIResamplingHeightDenomMinus1(0, std::numeric_limits<uint32_t>::max() - 1, 0, std::numeric_limits<uint32_t>::max());
-  SMultiValueInput<uint32_t> cfg_priSEIRegionId(0, std::numeric_limits<uint32_t>::max(), 0, std::numeric_limits<uint32_t>::max());
-  SMultiValueInput<uint32_t> cfg_priSEIRegionTopLeftInUnitsX(0, std::numeric_limits<uint32_t>::max(), 0, std::numeric_limits<uint32_t>::max());
-  SMultiValueInput<uint32_t> cfg_priSEIRegionTopLeftInUnitsY(0, std::numeric_limits<uint32_t>::max(), 0, std::numeric_limits<uint32_t>::max());
-  SMultiValueInput<uint32_t> cfg_priSEIRegionWidthInUnitsMinus1(0, std::numeric_limits<uint32_t>::max() - 1, 0, std::numeric_limits<uint32_t>::max());
-  SMultiValueInput<uint32_t> cfg_priSEIRegionHeightInUnitsMinus1(0, std::numeric_limits<uint32_t>::max() - 1, 0, std::numeric_limits<uint32_t>::max());
-  SMultiValueInput<uint32_t> cfg_priSEIResamplingRatioIdx(0, std::numeric_limits<uint32_t>::max(), 0, std::numeric_limits<uint32_t>::max());
-  SMultiValueInput<uint32_t> cfg_priSEITargetRegionTopLeftInUnitsX(0, std::numeric_limits<uint32_t>::max(), 0, std::numeric_limits<uint32_t>::max());
-  SMultiValueInput<uint32_t> cfg_priSEITargetRegionTopLeftInUnitsY(0, std::numeric_limits<uint32_t>::max(), 0, std::numeric_limits<uint32_t>::max());
-  SMultiValueInput<uint32_t> cfg_priSEIRegionLayerId(0, std::numeric_limits<uint32_t>::max(), 0, std::numeric_limits<uint32_t>::max());
-  SMultiValueInput<bool> cfg_priSEIRegionIsALayerFlag(0, 1, 0, std::numeric_limits<uint32_t>::max());
-  std::vector<SMultiValueInput<uint8_t>> cfg_ifmDataPayloadByteDataValuesList;
-  for (int i = 0; i < MAX_NUM_IMAGE_FORMAT_METADATA_SEI; i++)
-  { 
-    cfg_ifmDataPayloadByteDataValuesList.push_back(SMultiValueInput<uint8_t>(0, std::numeric_limits<uint8_t>::max(), 0, std::numeric_limits<uint32_t>::max()));   
-  }
-
-#if GREEN_METADATA_SEI_AMI_ENABLED_WG03_N01464
-  CHECK(GREEN_METADATA_SEI_ENABLED == 0, "GREEN_METADATA_SEI_AMI_ENABLED_WG03_N01464 cannot be enabled when GREEN_METADATA_SEI_ENABLED is not enabled.");
-#endif
-
-#if GREEN_METADATA_SEI_ENABLED
-#if GREEN_METADATA_SEI_AMI_ENABLED_WG03_N01464
-  SMultiValueInput<uint16_t> cfg_greenMetadataAMILayerId(0, 255, 0, 256);
-  SMultiValueInput<uint16_t> cfg_greenMetadataAMIOlsNumber(0, 15, 0, 16);
-  SMultiValueInput<uint16_t> cfg_greenMetadataAMIOlsId(0, 4, 0, 5);
-  SMultiValueInput<uint16_t> cfg_greenMetadataAMIEnergyReductionRate(0, 31, 0, 32);
-  SMultiValueInput<uint16_t> cfg_greenMetadataAMIVideoQualityMetricType(0, 7, 0, 8);
-  SMultiValueInput<double>   cfg_greenMetadataAMIVideoQualityLevel(0, 1.0, 0, 65536);
-  SMultiValueInput<uint16_t> cfg_greenMetadataAMIMaxValue(0, 255, 0, 256);
-  SMultiValueInput<uint16_t> cfg_greenMetadataAMIAttenuationUseIdc(0, 15, 0, 16);
-  SMultiValueInput<uint16_t> cfg_greenMetadataAMIAttenuationCompIdc(0, 15, 0, 16);
-  SMultiValueInput<bool>     cfg_greenMetadataAMIPreprocessingFlag(false, true, 0, 2);
-  SMultiValueInput<uint16_t> cfg_greenMetadataAMIPreprocessingTypeIdc(0, 3, 0, 4);
-  SMultiValueInput<uint16_t> cfg_greenMetadataAMIPreprocessingScaleIdc(0, 255, 0, 256);
-  SMultiValueInput<uint16_t> cfg_greenMetadataAMIBacklightScalingIdc(0, 15, 0, 16);
-#endif
-#endif
-
-#if ENABLE_TRACING
-  std::string sTracingRule;
-  std::string sTracingFile;
-  bool   bTracingChannelsList = false;
-#endif
-#if ENABLE_SIMD_OPT
-  std::string ignore;
-#endif
-  std::string frameRate;
-  std::string gpuBackend;
-
-  int chromaSampleLocType;
-  int chromaSampleLocTypeTopField;
-  int chromaSampleLocTypeBottomField;
-
-  // clang-format off
-  po::Options opts;
-  opts.addOptions()
-  ("help",                                            do_help,                                          false, "this help text")
-  ("c",    po::parseConfigFile, "configuration file name")
-  ("WarnUnknowParameter,w",                           warnUnknowParameter,                                  0, "warn for unknown configuration parameters instead of failing")
-#if ENABLE_SIMD_OPT
-  ("SIMD",                                            ignore,                                      std::string(""), "SIMD extension to use (SCALAR, SSE41, SSE42, AVX, AVX2, AVX512), default: the highest supported extension\n")
-#endif
-  // File, I/O and source parameters
-  ("InputFile,i",                                     m_inputFileName,                             std::string(""), "Original YUV input file name")
-  ("InputPathPrefix,-ipp",                            inputPathPrefix,                             std::string(""), "pathname to prepend to input filename")
-  ("BitstreamFile,b",                                 m_bitstreamFileName,                         std::string(""), "Bitstream output file name")
-  ("ReconFile,o",                                     m_reconFileName,                             std::string(""), "Reconstructed YUV output file name")
-  ("GPUBackend",                                      gpuBackend,                                  std::string("cpu"), "Compute backend (cpu or cuda)")
-  ("GPUDevice",                                       m_computeConfig.device,                                  0, "CUDA device index")
-  ("GPUExperimentalSAD",                              m_computeConfig.enableExperimentalSad,               false, "Enable experimental CUDA full-search SAD batching")
-  ("SEIShutterIntervalPreFilename,-sii",              m_shutterIntervalPreFileName, std::string(""), "File name of Pre-Filtering video. If empty, not output video\n")
-  ("SourceWidth,-wdt",                                m_sourceWidth,                                       0, "Source picture width")
-  ("SourceHeight,-hgt",                               m_sourceHeight,                                      0, "Source picture height")
-  ("SourceScalingRatioHor",                           m_sourceScalingRatioHor,                           1.0, "Source picture  horizontal scaling ratio")
-  ("SourceScalingRatioVer",                           m_sourceScalingRatioVer,                           1.0, "Source picture vertical scaling ratio")
-  ("InputBitDepth",                                   m_inputBitDepth[ChannelType::LUMA],                   8, "Bit-depth of input file")
-  ("OutputBitDepth",                                  m_outputBitDepth[ChannelType::LUMA],                  0, "Bit-depth of output file (default:InternalBitDepth)")
-  ("MSBExtendedBitDepth",                             m_msbExtendedBitDepth[ChannelType::LUMA],             0, "bit depth of luma component after addition of MSBs of value 0 (used for synthesising High Dynamic Range source material). (default:InputBitDepth)")
-  ("InternalBitDepth",                                m_internalBitDepth[ChannelType::LUMA],                0, "Bit-depth the codec operates at. (default: MSBExtendedBitDepth). If different to MSBExtendedBitDepth, source data will be converted")
-  ("InputBitDepthC",                                  m_inputBitDepth[ChannelType::CHROMA],                 0, "As per InputBitDepth but for chroma component. (default:InputBitDepth)")
-  ("OutputBitDepthC",                                 m_outputBitDepth[ChannelType::CHROMA],                0, "As per OutputBitDepth but for chroma component. (default: use luma output bit-depth)")
-  ("MSBExtendedBitDepthC",                            m_msbExtendedBitDepth[ChannelType::CHROMA],           0, "As per MSBExtendedBitDepth but for chroma component. (default:MSBExtendedBitDepth)")
-  ("ExtendedPrecision",                               m_extendedPrecisionProcessingFlag,                false, "Increased internal accuracies to support high bit depths (not valid in V1 profiles)")
-  ("TSRCRicePresent",                                 m_tsrcRicePresentFlag,                            false, "Indicate that TSRC Rice information is present in slice header (not valid in V1 profiles)")
-  ("ReverseLastSigCoeff",                             m_reverseLastSigCoeffEnabledFlag,                 false, "enable reverse last significant coefficient postion in RRC (not valid in V1 profiles)")
-  ("HighPrecisionPredictionWeighting",                m_highPrecisionOffsetsEnabledFlag,                false, "Use high precision option for weighted prediction (not valid in V1 profiles)")
-  ("InputColourSpaceConvert",                         inputColourSpaceConvert,                     std::string(""), "Colour space conversion to apply to input video. Permitted values are (empty string=UNCHANGED) " + getListOfColourSpaceConverts(true))
-  ("SNRInternalColourSpace",                          m_snrInternalColourSpace,                         false, "If true, then no colour space conversion is applied prior to SNR, otherwise inverse of input is applied.")
-  ("OutputInternalColourSpace",                       m_outputInternalColourSpace,                      false, "If true, then no colour space conversion is applied for reconstructed video, otherwise inverse of input is applied.")
-  ("InputChromaFormat",                               tmpInputChromaFormat,                               420, "InputChromaFormatIDC")
-  ("MSEBasedSequencePSNR",                            m_printMSEBasedSequencePSNR,                      false, "0 (default) emit sequence PSNR only as a linear average of the frame PSNRs, 1 = also emit a sequence PSNR based on an average of the frame MSEs")
-  ("PrintHexPSNR",                                    m_printHexPsnr,                                   false, "0 (default) don't emit hexadecimal PSNR for each frame, 1 = also emit hexadecimal PSNR values")
-  ("PrintFrameMSE",                                   m_printFrameMSE,                                  false, "0 (default) emit only bit count and PSNRs for each frame, 1 = also emit MSE values")
-  ("PrintSequenceMSE",                                m_printSequenceMSE,                               false, "0 (default) emit only bit rate and PSNRs for the whole sequence, 1 = also emit MSE values")
-  ("PrintMSSSIM",                                     m_printMSSSIM,                                    false, "0 (default) do not print MS-SSIM scores, 1 = print MS-SSIM scores for each frame and for the whole sequence")
-  ("PrintWPSNR",                                      m_printWPSNR,                                     false, "0 (default) do not print HDR-PQ based wPSNR, 1 = print HDR-PQ based wPSNR")
-  ("PrintHighPrecEncTime",                            m_printHighPrecEncTime,                           false, "0 (default): print integer value of encoding time in seconds, 1: print floating-point value of encoding time")
-  ("CabacZeroWordPaddingEnabled",                     m_cabacZeroWordPaddingEnabled,                     true, "0 do not add conforming cabac-zero-words to bit streams, 1 (default) = add cabac-zero-words as required")
-  ("ChromaFormatIDC,-cf",                             tmpChromaFormat,                                      0, "ChromaFormatIDC (400|420|422|444 or set 0 (default) for same as InputChromaFormat)")
-  ("ConformanceWindowMode",                           m_conformanceWindowMode,                              1, "Window conformance mode (0: no window, 1:automatic padding (default), 2:padding parameters specified, 3:conformance window parameters specified")
-  ("HorizontalPadding,-pdx",                          m_sourcePadding[0],                                   0, "Horizontal source padding for conformance window mode 2")
-  ("VerticalPadding,-pdy",                            m_sourcePadding[1],                                   0, "Vertical source padding for conformance window mode 2")
-  ("ConfWinLeft",                                     m_confWinLeft,                                        0, "Left offset for window conformance mode 3")
-  ("ConfWinRight",                                    m_confWinRight,                                       0, "Right offset for window conformance mode 3")
-  ("ConfWinTop",                                      m_confWinTop,                                         0, "Top offset for window conformance mode 3")
-  ("ConfWinBottom",                                   m_confWinBottom,                                      0, "Bottom offset for window conformance mode 3")
-  ("ScalingWindow",                                   m_explicitScalingWindowEnabled,                   false, "Enable scaling window")
-  ("ScalWinLeft,-swl",                                m_scalWinLeft,                                        0, "Left offset for scaling window")
-  ("ScalWinRight,-swr",                               m_scalWinRight,                                       0, "Right offset for scaling window")
-  ("ScalWinTop,-swt",                                 m_scalWinTop,                                         0, "Top offset for scaling window")
-  ("ScalWinBottom,-swb",                              m_scalWinBottom,                                      0, "Bottom offset for scaling window")
-  ("AccessUnitDelimiter",                             m_AccessUnitDelimiter,                            false, "Enable Access Unit Delimiter NALUs")
-  ("EnablePictureHeaderInSliceHeader",                m_enablePictureHeaderInSliceHeader,                true, "Enable Picture Header in Slice Header")
-  ("FrameRate,-fr",                                   frameRate,                            std::to_string(0), "Frame rate")
-  ("FrameSkip,-fs",                                   m_frameSkip,                                         0u, "Number of frames to skip at start of input YUV")
-  ("TemporalSubsampleRatio,-ts",                      m_temporalSubsampleRatio,                            1u, "Temporal sub-sample ratio when reading input YUV")
-  ("FramesToBeEncoded,f",                             m_framesToBeEncoded,                                  0, "Number of frames to be encoded (default=all)")
-  ("ClipInputVideoToRec709Range",                     m_clipInputVideoToRec709Range,                   false, "If true then clip input video to the Rec. 709 Range on loading when InternalBitDepth is less than MSBExtendedBitDepth")
-  ("ClipOutputVideoToRec709Range",                    m_clipOutputVideoToRec709Range,                  false, "If true then clip output video to the Rec. 709 Range on saving when OutputBitDepth is less than InternalBitDepth")
-  ("PYUV",                                            m_packedYUVMode,                                  false, "If true then output 10-bit and 12-bit YUV data as 5-byte and 3-byte (respectively) packed YUV data. Ignored for interlaced output.")
-  ("SummaryOutFilename",                              m_summaryOutFilename,                          std::string(), "Filename to use for producing summary output file. If empty, do not produce a file.")
-  ("SummaryPicFilenameBase",                          m_summaryPicFilenameBase,                      std::string(), "Base filename to use for producing summary picture output files. The actual filenames used will have I.txt, P.txt and B.txt appended. If empty, do not produce a file.")
-  ("SummaryVerboseness",                              m_summaryVerboseness,                                0u, "Specifies the level of the verboseness of the text output")
-  ("Verbosity,v",                                     m_verbosity,                               (int)VERBOSE, "Specifies the level of the verboseness")
-
-#if JVET_O0756_CONFIG_HDRMETRICS || JVET_O0756_CALCULATE_HDRMETRICS
-  ( "WhitePointDeltaE1",                              m_whitePointDeltaE[0],                            100.0, "1st reference white point value")
-  ( "WhitePointDeltaE2",                              m_whitePointDeltaE[1],                           1000.0, "2nd reference white point value")
-  ( "WhitePointDeltaE3",                              m_whitePointDeltaE[2],                           5000.0, "3rd reference white point value")
-  ( "MaxSampleValue",                                 m_maxSampleValue,                               10000.0, "Maximum sample value for floats")
-  ( "InputSampleRange",                               m_sampleRange,                                        0, "Sample Range")
-  ( "InputColorPrimaries",                            m_colorPrimaries,                                     1, "Input Color Primaries")
-  ( "EnableTFunctionLUT",                             m_enableTFunctionLUT,                             false, "Input Color Primaries")
-  ( "ChromaLocation",                                 m_chromaLocation,                                     2, "Location of Chroma Samples")
-  ( "ChromaUpsampleFilter",                           m_chromaUPFilter,                                     1, "420 to 444 conversion filters")
-  ( "CropOffsetLeft",                                 m_cropOffsetLeft,                                     0, "Crop Offset Left position")
-  ( "CropOffsetTop",                                  m_cropOffsetTop,                                      0, "Crop Offset Top position")
-  ( "CropOffsetRight",                                m_cropOffsetRight,                                    0, "Crop Offset Right position")
-  ( "CropOffsetBottom",                               m_cropOffsetBottom,                                   0, "Crop Offset Bottom position")
-  ( "CalculateHdrMetrics",                            m_calculateHdrMetrics,                            false, "Enable HDR metric calculation")
-#endif
-#if GREEN_METADATA_SEI_ENABLED
-  ("SEIGreenMetadataType",                            m_greenMetadataType,                                  -1, "Value for the green_metadata_type specifies the type of metadata that is present in the SEI message. -1: Green metadata disabled (default); 0: Decoder complexity metrics; 1: quality recovery after low-power encoding")
-  ("SEIGreenMetadataGranularityType",                 m_greenMetadataGranularityType,                       -1, "Specifies the type of granularity for which the metadata are applicable. Only implemented for picture granularity. ")
-  ("SEIGreenMetadataPeriodType",                      m_greenMetadataPeriodType,                             0, "Value for the Period Type incidacting over which amount of time the metadata have been calculated")
-  ("SEIGreenMetadataPeriodTypeSeconds",               m_greenMetadataPeriodNumSeconds,                       1, "indicates the number of seconds over which the metadata are applicable when SEIGreenMetadataPeriodType is 2.")
-  ("SEIGreenMetadataPeriodTypePictures",              m_greenMetadataPeriodNumPictures,                      1, "specifies the number of pictures, counted in decoding order, over which the metadata are applicable when SEIGreenMetadataPeriodType is 3.")
-  ("SEIXSDMetricNumber",                              m_xsdNumberMetrics,                                    1, "Number of quality metrics.")
-  ("SEIXSDMetricTypePSNR",                            m_xsdMetricTypePSNR,                               false, "Set to 'true' if PSNR shall be signalled. ")
-  ("SEIXSDMetricTypeSSIM",                            m_xsdMetricTypeSSIM,                               false, "Set to 'true' if SSIM shall be signalled. ")
-  ("SEIXSDMetricTypeWPSNR",                           m_xsdMetricTypeWPSNR,                              false, "Set to 'true' if WPSNR shall be signalled. ")
-  ("SEIXSDMetricTypeWSPSNR",                          m_xsdMetricTypeWSPSNR,                             false, "Set to 'true' if WSSPSNR shall be signalled. ")
-  ("SEIGreenMetadataExtendedRepresentation",          m_greenMetadataExtendedRepresentation,                 0, "Specifies whether reduced or extended set of complexity metrics is signelled. ")
-  ("GMFA",                                            m_GMFA,                                            false, "Write output file for the Green-Metadata analyzer for decoder complexity metrics (JVET-P0085)\n")
-  ("GMFAFile",                                        m_GMFAFile,                                   std::string(""), "File for the Green Metadata Bit Stream Feature Analyzer output (JVET-P0085)\n")
-#if GREEN_METADATA_SEI_AMI_ENABLED_WG03_N01464
-  ("SEIGreenMetadataAMIFlags",                        m_greenMetadataAMIFlags, (unsigned)GREEN_METADATA_AMI_FLAGS::CANCEL, "Specifies which parameters are needed to apply the attenuation map.")
-  ("SEIGreenMetadataAMIDisplayModel",                 m_greenMetadataAMIDisplayModel,                       0u, "Specifies the display models for which the application of attenuation maps may be used.")
-  ("SEIGreenMetadataAMIApproximationModel",           m_greenMetadataAMIApproximationModel,                 0u, "Specifies the model used to extrapolate the attenuation map samples for another energy reduction rate.")
-  ("SEIGreenMetadataAMIMapNumber",                    m_greenMetadataAMIMapNumber,                          1u, "Specifies the number of auxiliary pictures of type AUX_ALPHA in the CVS. It corresponds to the number of attenuation maps.")
-  ("SEIGreenMetadataAMILayerId",                      cfg_greenMetadataAMILayerId, cfg_greenMetadataAMILayerId,                               "Specifies the identifier of the decoded layer for the attenuation map of index i.")
-  ("SEIGreenMetadataAMIOlsNumber",                    cfg_greenMetadataAMIOlsNumber, cfg_greenMetadataAMIOlsNumber,                           "Specifies the number of output layer sets to which the attenuation map of index i belongs.")
-  ("SEIGreenMetadataAMIOlsId",                        cfg_greenMetadataAMIOlsId, cfg_greenMetadataAMIOlsId,                                   "Specifies the identifier of the output layer set of index j for the attenuation map of index i.")
-  ("SEIGreenMetadataAMIEnergyReductionRate",          cfg_greenMetadataAMIEnergyReductionRate, cfg_greenMetadataAMIEnergyReductionRate,       "Specifies the expected energy savings rate when the video is displayed after applying the attenuation map of index i.")
-  ("SEIGreenMetadataAMIVideoQualityMetricType",       cfg_greenMetadataAMIVideoQualityMetricType, cfg_greenMetadataAMIVideoQualityMetricType, "Specifies the quality metric which was considered to inform of the reduction of the video quality due to the application of the attenuation map of index i.")
-  ("SEIGreenMetadataAMIVideoQualityLevel",            cfg_greenMetadataAMIVideoQualityLevel, cfg_greenMetadataAMIVideoQualityLevel,           "Indicates the expected video quality when the video is rendered on a display after application of the attenuation map of index i.")
-  ("SEIGreenMetadataAMIMaxValue",                     cfg_greenMetadataAMIMaxValue, cfg_greenMetadataAMIMaxValue,                             "Indicates the maximum value of the attenuation map of index i.")
-  ("SEIGreenMetadataAMIAttenuationUseIdc",            cfg_greenMetadataAMIAttenuationUseIdc, cfg_greenMetadataAMIAttenuationUseIdc,           "Specifies the use of the attenuation map sample values of the decoded auxiliary picture of index i")
-  ("SEIGreenMetadataAMIAttenuationCompIdc",           cfg_greenMetadataAMIAttenuationCompIdc, cfg_greenMetadataAMIAttenuationCompIdc,         "Specifies on which colour component(s) of the associated primary picture the attenuation map of index i should be applied.")
-  ("SEIGreenMetadataAMIPreprocessingFlag",            cfg_greenMetadataAMIPreprocessingFlag, cfg_greenMetadataAMIPreprocessingFlag,           "Specifies whether some pre-upsampling is to be used on the attenuation map of index i.")
-  ("SEIGreenMetadataAMIPreprocessingTypeIdc",         cfg_greenMetadataAMIPreprocessingTypeIdc, cfg_greenMetadataAMIPreprocessingTypeIdc,     "Specifies the recommended type of the interpolation used to resample the attenuation map on index i.")
-  ("SEIGreenMetadataAMIPreprocessingScaleIdc",        cfg_greenMetadataAMIPreprocessingScaleIdc, cfg_greenMetadataAMIPreprocessingScaleIdc,   "Specifies which scaling should be applied to the attenuation map of index i before applying it on the decoded picture.")
-  ("SEIGreenMetadataAMIBacklightScalingIdc",          cfg_greenMetadataAMIBacklightScalingIdc, cfg_greenMetadataAMIBacklightScalingIdc,       "Specifies the process to compute the scaling factor of the backlight of transmissive pixel displays, derived from the attenuation map of index i.")
-#endif
-#endif
-  //Field coding parameters
-  ("FieldCoding",                                     m_isField,                                        false, "Signals if it's a field based coding")
-  ("TopFieldFirst, Tff",                              m_isTopFieldFirst,                                false, "In case of field based coding, signals whether if it's a top field first or not")
-  ("EfficientFieldIRAPEnabled",                       m_efficientFieldIRAPEnabled,                      true, "Enable to code fields in a specific, potentially more efficient, order.")
-  ("HarmonizeGopFirstFieldCoupleEnabled",             m_harmonizeGopFirstFieldCoupleEnabled,            true, "Enables harmonization of Gop first field couple")
-
-  // Profile and level
-  ("Profile",                                         extendedProfile,              ExtendedProfileName::NONE, "Profile name to use for encoding. Use [multilayer_]main_10[_444][_still_picture], auto, or none")
-  ("Level",                                           m_level,                                    Level::NONE, "Level limit to be used, eg 5.1, or none")
-  ("Tier",                                            m_levelTier,                                Level::MAIN, "Tier to use for interpretation of --Level (main or high only)")
-  ("FrameOnlyConstraintFlag",                         m_frameOnlyConstraintFlag,                        true, "Bitstream contains only frames")
-  ("MultiLayerEnabledFlag",                           m_multiLayerEnabledFlag,                         false, "Bitstream might contain more than one layer")
-  ("SubProfile",                                      cfg_SubProfile,                          cfg_SubProfile,  "Sub-profile idc")
-  ("EnableDecodingCapabilityInformation",             m_DCIEnabled,                                     false, "Enables writing of Decoding Capability Information")
-  ("MaxBitDepthConstraint",                           m_bitDepthConstraint,                                0u, "Bit depth to use for profile-constraint for RExt profiles. 0=automatically choose based upon other parameters")
-  ("MaxChromaFormatConstraint",                       tmpConstraintChromaFormat,                            0, "Chroma-format to use for the profile-constraint for RExt profiles. 0=automatically choose based upon other parameters")
-
-  ("GciPresentFlag",                                  m_gciPresentFlag,                                 false, "GCI field present")
-  ("IntraOnlyConstraintFlag",                         m_intraOnlyConstraintFlag,                        false, "Value of intra_only_constraint_flag")
-  ("AllLayersIndependentConstraintFlag",              m_allLayersIndependentConstraintFlag,             false, "Indicate that all layers are independent")
-  ("OnePictureOnlyConstraintFlag",                    m_onePictureOnlyConstraintFlag,                   false, "Value of general_intra_constraint_flag. Can only be used for single frame encodings. Will be set to true for still picture profiles")
-  ("MaxBitDepthConstraintIdc",                        m_maxBitDepthConstraintIdc,                          16u, "Indicate that sps_bitdepth_minus8 plus 8 shall be in the range of 0 to m_maxBitDepthConstraintIdc")
-  ("MaxChromaFormatConstraintIdc",                    tmpMaxChromaFormatConstraintIdc,                        3, "Indicate that sps_chroma_format_idc shall be in the range of 0 to m_maxChromaFormatConstraintIdc")
-  ("NoTrailConstraintFlag",                           m_noTrailConstraintFlag,                          false, "Indicate that TRAIL is deactivated")
-  ("NoStsaConstraintFlag",                            m_noStsaConstraintFlag,                           false, "Indicate that STSA is deactivated")
-  ("NoRaslConstraintFlag",                            m_noRaslConstraintFlag,                           false, "Indicate that RSAL is deactivated")
-  ("NoRadlConstraintFlag",                            m_noRadlConstraintFlag,                           false, "Indicate that RADL is deactivated")
-  ("NoIdrConstraintFlag",                             m_noIdrConstraintFlag,                            false, "Indicate that IDR is deactivated")
-  ("NoCraConstraintFlag",                             m_noCraConstraintFlag,                            false, "Indicate that CRA is deactivated")
-  ("NoGdrConstraintFlag",                             m_noGdrConstraintFlag,                            false, "Indicate that GDR is deactivated")
-  ("NoApsConstraintFlag",                             m_noApsConstraintFlag,                            false, "Indicate that APS is deactivated")
-  ("OneTilePerPicConstraintFlag",                     m_oneTilePerPicConstraintFlag,                    false, "Indicate that each picture shall contain only one tile")
-  ("PicHeaderInSliceHeaderConstraintFlag",            m_picHeaderInSliceHeaderConstraintFlag,           false, "Indicate that picture header is present in slice header")
-  ("OneSlicePerPicConstraintFlag",                    m_oneSlicePerPicConstraintFlag,                   false, "Indicate that each picture shall contain only one slice")
-  ("NoIdrRplConstraintFlag",                          m_noIdrRplConstraintFlag,                         false, "Indicate that RPL is not present in SH of IDR slices")
-  ("NoRectSliceConstraintFlag",                       m_noRectSliceConstraintFlag,                      false, "Indicate that rectagular slice is deactivated")
-  ("OneSlicePerSubpicConstraintFlag",                 m_oneSlicePerSubpicConstraintFlag,                false, "Indicate that each subpicture shall contain only one slice")
-  ("NoSubpicInfoConstraintFlag",                      m_noSubpicInfoConstraintFlag,                     false, "Indicate that subpicture information is not present")
-  ("MaxLog2CtuSizeConstraintIdc",                     m_maxLog2CtuSizeConstraintIdc,                        8, "Indicate that Log2CtuSize shall be in the range of 0 to m_maxLog2CtuSizeConstraintIdc")
-  ("NoPartitionConstraintsOverrideConstraintFlag",    m_noPartitionConstraintsOverrideConstraintFlag,   false, "Indicate that Partition Override is deactivated")
-  ("MttConstraintFlag",                               m_noMttConstraintFlag,                            false, "Indicate that Mtt is deactivated")
-  ("NoQtbttDualTreeIntraConstraintFlag",              m_noQtbttDualTreeIntraConstraintFlag,            false, "Indicate that Qtbtt DualTree Intra is deactivated")
-  ("NoPaletteConstraintFlag",                         m_noPaletteConstraintFlag,                        false, "Indicate that PLT is deactivated")
-  ("NoIbcConstraintFlag",                             m_noIbcConstraintFlag,                            false, "Indicate that IBC is deactivated")
+  SMultiValueInput<uint32_t>   cfg_generativeFaceVideoSEIMatrix3DSpaceFlag  …8791 tokens truncated…   m_noIbcConstraintFlag,                            false, "Indicate that IBC is deactivated")
   ("NoIspConstraintFlag",                             m_noIspConstraintFlag,                            false, "Indicate that ISP is deactivated")
   ("NoMrlConstraintFlag",                             m_noMrlConstraintFlag,                            false, "Indicate that MRL is deactivated")
   ("NoMipConstraintFlag",                             m_noMipConstraintFlag,                            false, "Indicate that MIP is deactivated")
@@ -1118,7 +864,10 @@ bool EncAppCfg::parseCfg( int argc, char* argv[] )
   ("NoPersistentRiceAdaptationConstraintFlag",        m_noPersistentRiceAdaptationConstraintFlag,       false, "Indicate that GolombRiceParameterAdaptation is deactivated")
   ("NoReverseLastSigCoeffConstraintFlag",             m_noReverseLastSigCoeffConstraintFlag,            false, "Indicate that ReverseLastSigCoeff is deactivated")
 
-  ("CTUSize",                                         m_ct…149 tokens truncated…ures")
+  ("CTUSize",                                         m_ctuSize,                                       128u, "CTUSize (specifies the CTU size if QTBT is on) [default: 128]")
+  ("Log2MinCuSize",                                   m_log2MinCuSize,                                     2u, "Log2 min CU size")
+  ("SubPicInfoPresentFlag",                           m_subPicInfoPresentFlag,                          false, "equal to 1 specifies that subpicture parameters are present in in the SPS RBSP syntax")
+  ("NumSubPics",                                      m_numSubPics,                                        0u, "specifies the number of subpictures")
   ("SubPicSameSizeFlag",                              m_subPicSameSizeFlag,                             false, "equal to 1 specifies that all subpictures in the CLVS have the same width specified by sps_subpic_width_minus1[ 0 ] and the same height specified by sps_subpic_height_minus1[ 0 ].")
   ("SubPicCtuTopLeftX",                               cfg_subPicCtuTopLeftX,            cfg_subPicCtuTopLeftX, "specifies horizontal position of top left CTU of i-th subpicture in unit of CtbSizeY")
   ("SubPicCtuTopLeftY",                               cfg_subPicCtuTopLeftY,            cfg_subPicCtuTopLeftY, "specifies vertical position of top left CTU of i-th subpicture in unit of CtbSizeY")
@@ -1330,366 +1079,7 @@ bool EncAppCfg::parseCfg( int argc, char* argv[] )
   ("SliceCuChromaQpOffsetEnabled",                    m_cuChromaQpOffsetEnabled,                         true, "Enable local chroma QP offsets (slice level flag)")
   ("FastDeltaQP",                                     m_bFastDeltaQP,                                   false, "Fast Delta QP Algorithm")
 #if SHARP_LUMA_DELTA_QP
-  ("LumaLevelToDeltaQPMode",                          lumaLevelToDeltaQPMode,                              0u, "Luma based Delta QP 0(default): not used. 1: Based on CTU average, 2: Based on Max luma in CTU")
-#if !WCG_EXT
-  ("LumaLevelToDeltaQPMaxValWeight",                  m_lumaLevelToDeltaQPMapping.maxMethodWeight,        1.0, "Weight of block max luma val when LumaLevelToDeltaQPMode = 2")
-#endif
-  ("LumaLevelToDeltaQPMappingLuma",                   cfg_lumaLeveltoDQPMappingLuma,  cfg_lumaLeveltoDQPMappingLuma, "Luma to Delta QP Mapping - luma thresholds")
-  ("LumaLevelToDeltaQPMappingDQP",                    cfg_lumaLeveltoDQPMappingQP,  cfg_lumaLeveltoDQPMappingQP, "Luma to Delta QP Mapping - DQP values")
-#endif
-  ("SmoothQPReductionEnable",                         m_smoothQPReductionEnable,                         false, "Enable QP reduction for smooth blocks according to: Clip3(SmoothQPReductionLimit, 0, SmoothQPReductionModelScale*baseQP+SmoothQPReductionModelOffset)")
-  ("SmoothQPReductionPeriodicity",                    m_smoothQPReductionPeriodicity,                        0, "Periodicity parameter of the QP reduction model, 1: all frames, 0: only intra pictures, 2: every second frame, etc")
-  ("SmoothQPReductionThresholdIntra",                 m_smoothQPReductionThresholdIntra,                   3.0, "Threshold parameter for smoothness for intra pictures (SmoothQPReductionThresholdIntra * number of samples in block)")
-  ("SmoothQPReductionModelScaleIntra",                m_smoothQPReductionModelScaleIntra,                 -1.0, "Scale parameter of the QP reduction model for intra pictures ")
-  ("SmoothQPReductionModelOffsetIntra",               m_smoothQPReductionModelOffsetIntra,                27.0, "Offset parameter of the QP reduction model for intra pictures ")
-  ("SmoothQPReductionLimitIntra",                     m_smoothQPReductionLimitIntra,                       -16, "Threshold parameter for controlling maximum amount of QP reduction by the QP reduction model for intra pictures ")
-  ("SmoothQPReductionThresholdInter",                 m_smoothQPReductionThresholdInter,                   3.0, "Threshold parameter for smoothness for inter pictures (SmoothQPReductionThresholdInter * number of samples in block)")
-  ("SmoothQPReductionModelScaleInter",                m_smoothQPReductionModelScaleInter,                 -1.0, "Scale parameter of the QP reduction model for inter pictures")
-  ("SmoothQPReductionModelOffsetInter",               m_smoothQPReductionModelOffsetInter,                27.0, "Offset parameter of the QP reduction model for inter pictures")
-  ("SmoothQPReductionLimitInter",                     m_smoothQPReductionLimitInter,                        -4, "Threshold parameter for controlling maximum amount of QP reduction by the QP reduction model for inter pictures")
-  ("BIM",                                             m_bimEnabled,                                          0, "Block Importance Mapping QP adaptation depending on estimated propagation of reference samples. 0 = Off, 1 = On with QP and lambda adaptation, 2 = On with lambda adaptation only")
-  ("BIMUnitSize",                                     m_bimUnitSize,                                        32, "Block size for derivation of BIM offsets (applied on CTU size)")
-  ("UseIdentityTableForNon420Chroma",                 m_useIdentityTableForNon420Chroma,                  true, "True: Indicates that 422/444 chroma uses identity chroma QP mapping tables; False: explicit Qp table may be specified in config")
-  ("SameCQPTablesForAllChroma",                       m_chromaQpMappingTableParams.m_sameCQPTableForAllChromaFlag,                        true, "0: Different tables for Cb, Cr and joint Cb-Cr components, 1 (default): Same tables for all three chroma components")
-  ("QpInValCb",                                       cfg_qpInValCb,                            cfg_qpInValCb, "Input coordinates for the QP table for Cb component")
-  ("QpOutValCb",                                      cfg_qpOutValCb,                          cfg_qpOutValCb, "Output coordinates for the QP table for Cb component")
-  ("QpInValCr",                                       cfg_qpInValCr,                            cfg_qpInValCr, "Input coordinates for the QP table for Cr component")
-  ("QpOutValCr",                                      cfg_qpOutValCr,                          cfg_qpOutValCr, "Output coordinates for the QP table for Cr component")
-  ("QpInValCbCr",                                     cfg_qpInValCbCr,                        cfg_qpInValCbCr, "Input coordinates for the QP table for joint Cb-Cr component")
-  ("QpOutValCbCr",                                    cfg_qpOutValCbCr,                      cfg_qpOutValCbCr, "Output coordinates for the QP table for joint Cb-Cr component")
-  ("CbQpOffset,-cbqpofs",                             m_cbQpOffset,                                         0, "Chroma Cb QP Offset")
-  ("CrQpOffset,-crqpofs",                             m_crQpOffset,                                         0, "Chroma Cr QP Offset")
-  ("CbQpOffsetDualTree",                              m_cbQpOffsetDualTree,                                 0, "Chroma Cb QP Offset for dual tree")
-  ("CrQpOffsetDualTree",                              m_crQpOffsetDualTree,                                 0, "Chroma Cr QP Offset for dual tree")
-  ("CbCrQpOffset,-cbcrqpofs",                         m_cbCrQpOffset,                                      -1, "QP Offset for joint Cb-Cr mode")
-  ("CbCrQpOffsetDualTree",                            m_cbCrQpOffsetDualTree,                               0, "QP Offset for joint Cb-Cr mode in dual tree")
-#if ER_CHROMA_QP_WCG_PPS
-  ("WCGPPSEnable",                                    m_wcgChromaQpControl.enabled,                     false, "1: Enable the WCG PPS chroma modulation scheme. 0 (default) disabled")
-  ("WCGPPSCbQpScale",                                 m_wcgChromaQpControl.chromaCbQpScale,               1.0, "WCG PPS Chroma Cb QP Scale")
-  ("WCGPPSCrQpScale",                                 m_wcgChromaQpControl.chromaCrQpScale,               1.0, "WCG PPS Chroma Cr QP Scale")
-  ("WCGPPSChromaQpScale",                             m_wcgChromaQpControl.chromaQpScale,                 0.0, "WCG PPS Chroma QP Scale")
-  ("WCGPPSChromaQpOffset",                            m_wcgChromaQpControl.chromaQpOffset,                0.0, "WCG PPS Chroma QP Offset")
-#endif
-#if W0038_CQP_ADJ
-  ("SliceChromaQPOffsetPeriodicity",                  m_sliceChromaQpOffsetPeriodicity,                    0u, "Used in conjunction with Slice Cb/Cr QpOffsetIntraOrPeriodic. Use 0 (default) to disable periodic nature.")
-  ("SliceCbQpOffsetIntraOrPeriodic",                  m_sliceChromaQpOffsetIntraOrPeriodic[0],              0, "Chroma Cb QP Offset at slice level for I slice or for periodic inter slices as defined by SliceChromaQPOffsetPeriodicity. Replaces offset in the GOP table.")
-  ("SliceCrQpOffsetIntraOrPeriodic",                  m_sliceChromaQpOffsetIntraOrPeriodic[1],              0, "Chroma Cr QP Offset at slice level for I slice or for periodic inter slices as defined by SliceChromaQPOffsetPeriodicity. Replaces offset in the GOP table.")
-#endif
-  ("CbQpOffsetList",                                  cfg_cbQpOffsetList,                  cfg_cbQpOffsetList, "Chroma Cb QP offset list for local adjustment")
-  ("CrQpOffsetList",                                  cfg_crQpOffsetList,                  cfg_crQpOffsetList, "Chroma Cb QP offset list for local adjustment")
-  ("CbCrQpOffsetList",                                cfg_cbCrQpOffsetList,              cfg_cbCrQpOffsetList, "Chroma joint Cb-Cr QP offset list for local adjustment")
-
-  ("AdaptiveQP,-aq",                                  m_bUseAdaptiveQP,                                 false, "QP adaptation based on a psycho-visual model")
-  ("MaxQPAdaptationRange,-aqr",                       m_iQPAdaptationRange,                                 6, "QP adaptation range")
-#if ENABLE_QPA
-  ("PerceptQPA,-qpa",                                 m_bUsePerceptQPA,                                 false, "perceptually motivated input-adaptive QP modification (default: 0 = off, ignored if -aq is set)")
-  ("WPSNR,-wpsnr",                                    m_bUseWPSNR,                                      false, "output perceptually weighted peak SNR (WPSNR) instead of PSNR")
-#endif
-  ("dQPFile,m",                                       m_dQPFileName,                               std::string(""), "dQP file name")
-  ("RDOQ",                                            m_useRDOQ,                                         true)
-  ("RDOQTS",                                          m_useRDOQTS,                                       true)
-  ("SelectiveRDOQ",                                   m_useSelectiveRDOQ,                               false, "Enable selective RDOQ")
-  ("DPF",                                             m_dpfEnabled,                                     false, "Distortion Propagation Factor, CTU-Level Lagrange Multiplier and QP Adaptation")
-  ("DPFKeyLength",                                    m_dpfKeyLen,                                   8, "DPF Propagation Length for key frames")
-  ("DPFNonkeyLength",                                 m_dpfNonkeyLen,                                0, "DPF Propagation Length for non-key frames")
-
-  // Deblocking filter parameters
-  ("DeblockingFilterDisable",                         m_deblockingFilterDisable,                        false)
-  ("DeblockingFilterOffsetInPPS",                     m_deblockingFilterOffsetInPPS,                     true)
-  ("DeblockingFilterBetaOffset_div2",                 m_deblockingFilterBetaOffsetDiv2,                     0)
-  ("DeblockingFilterTcOffset_div2",                   m_deblockingFilterTcOffsetDiv2,                       0)
-  ("DeblockingFilterCbBetaOffset_div2",               m_deblockingFilterCbBetaOffsetDiv2,                   0)
-  ("DeblockingFilterCbTcOffset_div2",                 m_deblockingFilterCbTcOffsetDiv2,                     0)
-  ("DeblockingFilterCrBetaOffset_div2",               m_deblockingFilterCrBetaOffsetDiv2,                   0)
-  ("DeblockingFilterCrTcOffset_div2",                 m_deblockingFilterCrTcOffsetDiv2,                     0)
-  ("DeblockingFilterMetric",                          m_deblockingFilterMetric,                             0)
-  // Coding tools
-  ("ReconBasedCrossCPredictionEstimate",              m_reconBasedCrossCPredictionEstimate,             false, "When determining the alpha value for cross-component prediction, use the decoded residual rather than the pre-transform encoder-side residual")
-  ("TransformSkip",                                   m_useTransformSkip,                               false, "Intra transform skipping")
-  ("TransformSkipFast",                               m_useTransformSkipFast,                           false, "Fast encoder search for transform skipping, winner takes it all mode.")
-  ("TransformSkipLog2MaxSize",                        m_log2MaxTransformSkipBlockSize,                     5U, "Specify transform-skip maximum size. Minimum 2, Maximum 5. (not valid in V1 profiles)")
-  ("ChromaTS",                                        m_useChromaTS,                                    false, "Enable encoder search of chromaTS")
-  ("BDPCM",                                           m_useBDPCM,                                       false, "BDPCM (0:off, 1:luma and chroma)")
-  ("ISPFast",                                         m_useFastISP,                                     false, "Fast encoder search for ISP")
-  ("ResidualRotation",                                m_transformSkipRotationEnabledFlag,               false, "Enable rotation of transform-skipped and transquant-bypassed TUs through 180 degrees prior to entropy coding (not valid in V1 profiles)")
-  ("SingleSignificanceMapContext",                    m_transformSkipContextEnabledFlag,                false, "Enable, for transform-skipped and transquant-bypassed TUs, the selection of a single significance map context variable for all coefficients (not valid in V1 profiles)")
-  ("ExtendedRiceRRC",                                 m_rrcRiceExtensionEnableFlag,                     false, "Enable the extention of the Golomb-Rice parameter derivation for RRC")
-  ("GolombRiceParameterAdaptation",                   m_persistentRiceAdaptationEnabledFlag,            false, "Enable the adaptation of the Golomb-Rice parameter over the course of each slice")
-  ("AlignCABACBeforeBypass",                          m_cabacBypassAlignmentEnabledFlag,                false, "Align the CABAC engine to a defined fraction of a bit prior to coding bypass data. Must be 1 in high bit rate profile, 0 otherwise")
-  ("SAO",                                             m_useSao,                                         true, "Enable Sample Adaptive Offset")
-  ("SaoTrueOrg",                                      m_saoTrueOrg,                                     false, "Using true original samples for SAO optimization when MCTF is enabled\n")
-  ("TestSAODisableAtPictureLevel",                    m_bTestSAODisableAtPictureLevel,                  false, "Enables the testing of disabling SAO at the picture level after having analysed all blocks")
-  ("SaoEncodingRate",                                 m_saoEncodingRate,                                 0.75, "When >0 SAO early picture termination is enabled for luma and chroma")
-  ("SaoEncodingRateChroma",                           m_saoEncodingRateChroma,                            0.5, "The SAO early picture termination rate to use for chroma (when m_SaoEncodingRate is >0). If <=0, use results for luma")
-  ("MaxNumOffsetsPerPic",                             m_maxNumOffsetsPerPic,                             2048, "Max number of SAO offset per picture (Default: 2048)")
-  ("SAOLcuBoundary",                                  m_saoCtuBoundary,                                 false, "0: right/bottom CTU boundary areas skipped from SAO parameter estimation, 1: non-deblocked pixels are used for those areas")
-  ("SAOGreedyEnc",                                    m_saoGreedyMergeEnc,                              false, "SAO greedy merge encoding algorithm")
-  ("EnablePicPartitioning",                           m_picPartitionFlag,                               false, "Enable picture partitioning (0: single tile, single slice, 1: multiple tiles/slices can be used)")
-  ("MixedLossyLossless",                              m_mixedLossyLossless,                                  false, "Enable encoder to encode mixed lossy/lossless coding ")
-  ("SliceLosslessArray",                              cfgSliceLosslessArray, cfgSliceLosslessArray, " Lossless slice array Last lossless flag in the  list will be repeated uniformly to cover any remaining slice")
-  ("TileColumnWidthArray",                            cfgTileColumnWidth,                  cfgTileColumnWidth, "Tile column widths in units of CTUs. Last column width in list will be repeated uniformly to cover any remaining picture width")
-  ("TileRowHeightArray",                              cfgTileRowHeight,                      cfgTileRowHeight, "Tile row heights in units of CTUs. Last row height in list will be repeated uniformly to cover any remaining picture height")
-  ("RasterScanSlices",                                m_rasterSliceFlag,                                false, "Indicates if using raster-scan or rectangular slices (0: rectangular, 1: raster-scan)")
-  ("RectSlicePositions",                              cfgRectSlicePos,                        cfgRectSlicePos, "Rectangular slice positions. List containing pairs of top-left CTU RS address followed by bottom-right CTU RS address")
-  ("RectSliceFixedWidth",                             m_rectSliceFixedWidth,                                0, "Fixed rectangular slice width in units of tiles (0: disable this feature and use RectSlicePositions instead)")
-  ("RectSliceFixedHeight",                            m_rectSliceFixedHeight,                               0, "Fixed rectangular slice height in units of tiles (0: disable this feature and use RectSlicePositions instead)")
-  ("RasterSliceSizes",                                cfgRasterSliceSize,                  cfgRasterSliceSize, "Raster-scan slice sizes in units of tiles. Last size in list will be repeated uniformly to cover any remaining tiles in the picture")
-  ("DisableLoopFilterAcrossTiles",                    m_disableLFCrossTileBoundaryFlag,                 false, "Loop filtering applied across tile boundaries or not (0: filter across tile boundaries  1: do not filter across tile boundaries)")
-  ("DisableLoopFilterAcrossSlices",                   m_disableLFCrossSliceBoundaryFlag,                false, "Loop filtering applied across slice boundaries or not (0: filter across slice boundaries 1: do not filter across slice boundaries)")
-  ("FastUDIUseMPMEnabled",                            m_bFastUDIUseMPMEnabled,                           true, "If enabled, adapt intra direction search, accounting for MPM")
-  ("FastMEForGenBLowDelayEnabled",                    m_bFastMEForGenBLowDelayEnabled,                   true, "If enabled use a fast ME for generalised B Low Delay slices")
-  ("WeightedPredP,-wpP",                              m_useWeightedPred,                                false, "Use weighted prediction in P slices")
-  ("WeightedPredB,-wpB",                              m_useWeightedBiPred,                              false, "Use weighted (bidirectional) prediction in B slices")
-  ("WeightedPredMethod,-wpM",                         tmpWeightedPredictionMethod, int(WP_PER_PICTURE_WITH_SIMPLE_DC_COMBINED_COMPONENT), "Weighted prediction method")
-  ("Log2ParallelMergeLevel",                          m_log2ParallelMergeLevel,                            2u, "Parallel merge estimation region")
-  ("WaveFrontSynchro",                                m_entropyCodingSyncEnabledFlag,                   false, "0: entropy coding sync disabled; 1 entropy coding sync enabled")
-  ("EntryPointsPresent",                              m_entryPointPresentFlag,                           true, "0: entry points is not present; 1 entry points may be present in slice header")
-  ("ScalingList",                                     m_useScalingListId,                    SCALING_LIST_OFF, "0/off: no scaling list, 1/default: default scaling lists, 2/file: scaling lists specified in ScalingListFile")
-  ("ScalingListFile",                                 m_scalingListFileName,                       std::string(""), "Scaling list file name. Use an empty string to produce help.")
-  ("DisableScalingMatrixForLFNST",                    m_disableScalingMatrixForLfnstBlks,                true, "Disable scaling matrices, when enabled, for LFNST-coded blocks")
-  ("DisableScalingMatrixForAlternativeColourSpace",   m_disableScalingMatrixForAlternativeColourSpace,  false, "Disable scaling matrices when the colour space is not equal to the designated colour space of scaling matrix")
-  ("ScalingMatrixDesignatedColourSpace",              m_scalingMatrixDesignatedColourSpace,              true, "Indicates if the designated colour space of scaling matrices is equal to the original colour space")
-  ("DepQuant",                                        m_depQuantEnabledFlag,                                          true, "Enable  dependent quantization (Default: 1)" )
-  ("SignHideFlag,-SBH",                               m_signDataHidingEnabledFlag,                                    false,  "Enable sign hiding" )
-  ("MaxNumMergeCand",                                 m_maxNumMergeCand,                                   5u, "Maximum number of merge candidates")
-  ("MaxNumAffineMergeCand",                           m_maxNumAffineMergeCand,                             5u, "Maximum number of affine merge candidates")
-  ("MaxNumGeoCand",                                   m_maxNumGeoCand,                                     5u, "Maximum number of geometric partitioning mode candidates")
-  ("MaxNumIBCMergeCand",                              m_maxNumIBCMergeCand,                                6u, "Maximum number of IBC merge candidates")
-    /* Misc. */
-  ("SEIDecodedPictureHash,-dph",                      tmpDecodedPictureHashSEIMappedType,                   0, "Control generation of decode picture hash SEI messages\n"
-                                                                                                               "\t3: checksum\n"
-                                                                                                               "\t2: CRC\n"
-                                                                                                               "\t1: use MD5\n"
-                                                                                                               "\t0: disable")
-  ("SubpicDecodedPictureHash",                        tmpSubpicDecodedPictureHashMappedType,                0, "Control generation of decode picture hash SEI messages for each subpicture\n"
-                                                                                                               "\t3: checksum\n"
-                                                                                                               "\t2: CRC\n"
-                                                                                                               "\t1: use MD5\n"
-                                                                                                               "\t0: disable")
-  ("TMVPMode",                                        m_TMVPModeId,                                         1, "TMVP mode 0: TMVP disable for all slices. 1: TMVP enable for all slices (default) 2: TMVP enable for certain slices only")
-  ("SliceLevelRpl",                                   m_sliceLevelRpl,                                   true, "Code reference picture lists in slice headers rather than picture header.")
-  ("SliceLevelDblk",                                  m_sliceLevelDblk,                                  true, "Code deblocking filter parameters in slice headers rather than picture header.")
-  ("SliceLevelSao",                                   m_sliceLevelSao,                                   true, "Code SAO parameters in slice headers rather than picture header.")
-  ("SliceLevelAlf",                                   m_sliceLevelAlf,                                   true, "Code ALF parameters in slice headers rather than picture header.")
-  ("SliceLevelWeightedPrediction",                    m_sliceLevelWp,                                    true, "Code weighted prediction parameters in slice headers rather than picture header.")
-  ("SliceLevelDeltaQp",                               m_sliceLevelDeltaQp,                               true, "Code delta Qp in slice headers rather than picture header.")
-  ("FEN",                                             tmpFastInterSearchMode,   int(FASTINTERSEARCH_DISABLED), "fast encoder setting")
-  ("ECU",                                             m_bUseEarlyCU,                                    false, "Early CU setting")
-  ("FDM",                                             m_useFastDecisionForMerge,                         true, "Fast decision for Merge RD Cost")
-  ("ESD",                                             m_useEarlySkipDetection,                          false, "Early SKIP detection setting")
-  ( "RateControl",                                    m_rcEnableRateControl,                            false, "Rate control: enable rate control" )
-  ( "TargetBitrate",                                  m_rcTargetBitrate,                                    0, "Rate control: target bit-rate" )
-  ( "KeepHierarchicalBit",                            m_rcKeepHierarchicalBit,                              0, "Rate control: 0: equal bit allocation; 1: fixed ratio bit allocation; 2: adaptive ratio bit allocation" )
-  ( "LCULevelRateControl",                            m_rcCtuLevelRateControl,                                    true, "Rate control: true: CTU level RC; false: picture level RC" )
-  ( "RCLCUSeparateModel",                             m_rcUseCtuSeparateModel,                           true, "Rate control: use CTU level separate R-lambda model" )
-  ( "InitialQP",                                      m_rcInitialQp,                                        0, "Rate control: initial QP" )
-  ( "RCForceIntraQP",                                 m_rcForceIntraQp,                                 false, "Rate control: force intra QP to be equal to initial QP" )
-  ( "RCCpbSaturation",                                m_rcCpbSaturationEnabled,                         false, "Rate control: enable target bits saturation to avoid CPB overflow and underflow" )
-  ( "RCCpbSize",                                      m_rcCpbSize,                                         0u, "Rate control: CPB size" )
-  ( "RCInitialCpbFullness",                           m_rcInitialCpbFullness,                             0.9, "Rate control: initial CPB fullness" )
-  ("CostMode",                                        m_costMode,                         COST_STANDARD_LOSSY, "Use alternative cost functions: choose between 'lossy', 'sequence_level_lossless', 'lossless' (which forces QP to " MACRO_TO_STRING(LOSSLESS_AND_MIXED_LOSSLESS_RD_COST_TEST_QP) ") and 'mixed_lossless_lossy' (which used QP'=" MACRO_TO_STRING(LOSSLESS_AND_MIXED_LOSSLESS_RD_COST_TEST_QP_PRIME) " for pre-estimates of transquant-bypass blocks).")
-  ("TSRCdisableLL",                                   m_TSRCdisableLL,                                   true, "Disable TSRC for lossless coding" )
-  ("RecalculateQPAccordingToLambda",                  m_recalculateQPAccordingToLambda,                 false, "Recalculate QP values according to lambda values. Do not suggest to be enabled in all intra case")
-  ("HrdParametersPresent,-hrd",                       m_hrdParametersPresentFlag,                       false, "Enable generation of hrd_parameters()")
-  ("VuiParametersPresent,-vui",                       m_vuiParametersPresentFlag,                       false, "Enable generation of vui_parameters()")
-  ("WriteVuiHrdFromY4m",                              m_writeVuiHrdFromY4m,                              true, "Allow writing VUI and HRD information from input Y4M file")
-  ("SamePicTimingInAllOLS",                           m_samePicTimingInAllOLS,                          true, "Indicates that the same picture timing SEI message is used in all OLS")
-  ("AspectRatioInfoPresent",                          m_aspectRatioInfoPresentFlag,                     false, "Signals whether aspect_ratio_idc is present")
-  ("AspectRatioIdc",                                  m_aspectRatioIdc,                                     0, "aspect_ratio_idc")
-  ("SarWidth",                                        m_sarWidth,                                           0, "horizontal size of the sample aspect ratio")
-  ("SarHeight",                                       m_sarHeight,                                          0, "vertical size of the sample aspect ratio")
-  ("ColourDescriptionPresent",                        m_colourDescriptionPresentFlag,                   false, "Signals whether colour_primaries, transfer_characteristics and matrix_coefficients are present")
-  ("ColourPrimaries",                                 m_colourPrimaries,                                    2, "Indicates chromaticity coordinates of the source primaries")
-  ("TransferCharacteristics",                         m_transferCharacteristics,                            2, "Indicates the opto-electronic transfer characteristics of the source")
-  ("MatrixCoefficients",                              m_matrixCoefficients,                                 2, "Describes the matrix coefficients used in deriving luma and chroma from RGB primaries")
-  ("ProgressiveSource",                               m_progressiveSourceFlag,                          false, "Indicate that source is progressive")
-  ("InterlacedSource",                                m_interlacedSourceFlag,                           false, "Indicate that source is interlaced")
-  ("NonPackedSourceConstraintFlag",                   m_nonPackedConstraintFlag,                        false, "Indicate that source does not contain frame packing")
-  ("NonProjectedConstraintFlag",                      m_nonProjectedConstraintFlag,                     false, "Indicate that the bitstream contains projection SEI messages")
-  ("ChromaLocInfoPresent",                            m_chromaLocInfoPresentFlag,                       false, "Signals whether chroma_sample_loc_type_top_field and chroma_sample_loc_type_bottom_field are present")
-  ("ChromaSampleLocTypeTopField",                     chromaSampleLocTypeTopField,    static_cast<int>(Chroma420LocType::UNSPECIFIED), "Specifies the location of chroma samples for top field")
-  ("ChromaSampleLocTypeBottomField",                  chromaSampleLocTypeBottomField, static_cast<int>(Chroma420LocType::UNSPECIFIED), "Specifies the location of chroma samples for bottom field")
-  ("ChromaSampleLocType",                             chromaSampleLocType,            static_cast<int>(Chroma420LocType::UNSPECIFIED), "Specifies the location of chroma samples for progressive content")
-  ("OverscanInfoPresent",                             m_overscanInfoPresentFlag,                        false, "Indicates whether conformant decoded pictures are suitable for display using overscan\n")
-  ("OverscanAppropriate",                             m_overscanAppropriateFlag,                        false, "Indicates whether conformant decoded pictures are suitable for display using overscan\n")
-  ("VideoFullRange",                                  m_videoFullRangeFlag,                             false, "Indicates the black level and range of luma and chroma signals");
-  opts.addOptions()
-  ("SEIBufferingPeriod",                              m_bufferingPeriodSEIEnabled,                      false, "Control generation of buffering period SEI messages")
-  ("SEIPictureTiming",                                m_pictureTimingSEIEnabled,                        false, "Control generation of picture timing SEI messages")
-  ("SEIDecodingUnitInfo",                             m_decodingUnitInfoSEIEnabled,                     false, "Control generation of decoding unit information SEI message.")
-  ("SEIScalableNesting",                              m_scalableNestingSEIEnabled,                      false, "Control generation of scalable nesting SEI messages")
-  ("SEIFrameFieldInfo",                               m_frameFieldInfoSEIEnabled,                       false, "Control generation of frame field information SEI messages")
-  ("SEIFramePacking",                                 m_framePackingSEIEnabled,                         false, "Control generation of frame packing SEI messages")
-  ("SEIFramePackingType",                             m_framePackingSEIType,                                0, "Define frame packing arrangement\n"
-                                                                                                               "\t3: side by side - frames are displayed horizontally\n"
-                                                                                                               "\t4: top bottom - frames are displayed vertically\n"
-                                                                                                               "\t5: frame alternation - one frame is alternated with the other")
-  ("SEIFramePackingId",                               m_framePackingSEIId,                                  0, "Id of frame packing SEI message for a given session")
-  ("SEIFramePackingQuincunx",                         m_framePackingSEIQuincunx,                            0, "Indicate the presence of a Quincunx type video frame")
-  ("SEIFramePackingInterpretation",                   m_framePackingSEIInterpretation,                      0, "Indicate the interpretation of the frame pair\n"
-                                                                                                               "\t0: unspecified\n"
-                                                                                                               "\t1: stereo pair, frame0 represents left view\n"
-                                                                                                               "\t2: stereo pair, frame0 represents right view")
-  ("SEIDisplayOrientationEnabled",                    m_doSEIEnabled,                                   false, "Controls if display orientation packing SEI message enabled")
-  ("SEIDisplayOrientationCancelFlag",                 m_doSEICancelFlag,                                 true, "Specifies the persistence of any previous display orientation SEI message in output order.")
-  ("SEIDisplayOrientationPersistenceFlag",            m_doSEIPersistenceFlag,                           false, "Specifies the persistence of the display orientation packing SEI message for the current layer.")
-  ("SEIDisplayOrientationTransformType",              m_doSEITransformType,                                 0, "specifies the rotation and mirroring to be applied to the picture.")
-  ("SEIParameterSetsInclusionIndication",             m_parameterSetsInclusionIndicationSEIEnabled,      false, "Control generation of Parameter sets inclusion indication SEI messages")
-  ("SEISelfContainedClvsFlag",                        m_selfContainedClvsFlag,                               0, "Self contained CLVS indication flag value")
-  ("SEIMasteringDisplayColourVolume",                 m_masteringDisplay.colourVolumeSEIEnabled,         false, "Control generation of mastering display colour volume SEI messages")
-  ("SEIMasteringDisplayMaxLuminance",                 m_masteringDisplay.maxLuminance,                  10000u, "Specifies the mastering display maximum luminance value in units of 1/10000 candela per square metre (32-bit code value)")
-  ("SEIMasteringDisplayMinLuminance",                 m_masteringDisplay.minLuminance,                      0u, "Specifies the mastering display minimum luminance value in units of 1/10000 candela per square metre (32-bit code value)")
-  ("SEIMasteringDisplayPrimaries",                    cfg_DisplayPrimariesCode,       cfg_DisplayPrimariesCode, "Mastering display primaries for all three colour planes in CIE xy coordinates in increments of 1/50000 (results in the ranges 0 to 50000 inclusive)")
-  ("SEIMasteringDisplayWhitePoint",                   cfg_DisplayWhitePointCode,     cfg_DisplayWhitePointCode, "Mastering display white point CIE xy coordinates in normalised increments of 1/50000 (e.g. 0.333 = 16667)")
-  ("SEIPreferredTransferCharacteristics",              m_preferredTransferCharacteristics,                   -1, "Value for the preferred_transfer_characteristics field of the Alternative transfer characteristics SEI which will override the corresponding entry in the VUI. If negative, do not produce the respective SEI message")
-
-  ("SEIErpEnabled",                                   m_erpSEIEnabled,                                   false, "Control generation of equirectangular projection SEI messages")
-("SEIErpCancelFlag", m_erpSEICancelFlag, true, "Indicate that equirectangular projection SEI message cancels the persistence or follows")
-("SEIErpPersistenceFlag", m_erpSEIPersistenceFlag, false, "Specifies the persistence of the equirectangular projection SEI messages")
-("SEIErpGuardBandFlag", m_erpSEIGuardBandFlag, false, "Indicate the existence of guard band areas in the constituent picture")
-("SEIErpGuardBandType", m_erpSEIGuardBandType, 0u, "Indicate the type of the guard band")
-("SEIErpLeftGuardBandWidth", m_erpSEILeftGuardBandWidth, 0u, "Indicate the width of the guard band on the left side of the constituent picture")
-("SEIErpRightGuardBandWidth", m_erpSEIRightGuardBandWidth, 0u, "Indicate the width of the guard band on the right side of the constituent picture")
-("SEISphereRotationEnabled", m_sphereRotationSEIEnabled, false, "Control generation of sphere rotation SEI messages")
-("SEISphereRotationCancelFlag", m_sphereRotationSEICancelFlag, true, "Indicate that sphere rotation SEI message cancels the persistence or follows")
-("SEISphereRotationPersistenceFlag", m_sphereRotationSEIPersistenceFlag, false, "Specifies the persistence of the sphere rotation SEI messages")
-("SEISphereRotationYaw", m_sphereRotationSEIYaw, 0, "Specifies the value of the yaw rotation angle")
-("SEISphereRotationPitch", m_sphereRotationSEIPitch, 0, "Specifies the value of the pitch rotation angle")
-("SEISphereRotationRoll", m_sphereRotationSEIRoll, 0, "Specifies the value of the roll rotation angle")
-("SEIOmniViewportEnabled", m_omniViewportSEIEnabled, false, "Control generation of omni viewport SEI messages")
-("SEIOmniViewportId", m_omniViewportSEIId, 0u, "An identifying number that may be used to identify the purpose of the one or more recommended viewport regions")
-("SEIOmniViewportCancelFlag", m_omniViewportSEICancelFlag, true, "Indicate that omni viewport SEI message cancels the persistence or follows")
-("SEIOmniViewportPersistenceFlag", m_omniViewportSEIPersistenceFlag, false, "Specifies the persistence of the omni viewport SEI messages")
-("SEIOmniViewportCntMinus1", m_omniViewportSEICntMinus1, 0u, "specifies the number of recommended viewport regions minus 1")
-("SEIOmniViewportAzimuthCentre", cfg_omniViewportSEIAzimuthCentre, cfg_omniViewportSEIAzimuthCentre, "Indicate the centre of the i-th recommended viewport region")
-("SEIOmniViewportElevationCentre", cfg_omniViewportSEIElevationCentre, cfg_omniViewportSEIElevationCentre, "Indicate the centre of the i-th recommended viewport region")
-("SEIOmniViewportTiltCentre", cfg_omniViewportSEITiltCentre, cfg_omniViewportSEITiltCentre, "Indicates the tilt angle of the i-th recommended viewport region")
-("SEIOmniViewportHorRange", cfg_omniViewportSEIHorRange, cfg_omniViewportSEIHorRange, "Indicates the azimuth range of the i-th recommended viewport region")
-("SEIOmniViewportVerRange", cfg_omniViewportSEIVerRange, cfg_omniViewportSEIVerRange, "Indicates the elevation range of the i-th recommended viewport region")
-("SEIRwpEnabled", m_rwpSEIEnabled, false, "Controls if region-wise packing SEI message enabled")
-("SEIRwpCancelFlag", m_rwpSEIRwpCancelFlag, true, "Specifies the persistence of any previous region-wise packing SEI message in output order.")
-("SEIRwpPersistenceFlag", m_rwpSEIRwpPersistenceFlag, false, "Specifies the persistence of the region-wise packing SEI message for the current layer.")
-("SEIRwpConstituentPictureMatchingFlag", m_rwpSEIConstituentPictureMatchingFlag, false, "Specifies the information in the SEI message apply individually to each constituent picture or to the projected picture.")
-("SEIRwpNumPackedRegions", m_rwpSEINumPackedRegions, 0, "specifies the number of packed regions when constituent picture matching flag is equal to 0.")
-("SEIRwpProjPictureWidth", m_rwpSEIProjPictureWidth, 0, "Specifies the width of the projected picture.")
-("SEIRwpProjPictureHeight", m_rwpSEIProjPictureHeight, 0, "Specifies the height of the projected picture.")
-("SEIRwpPackedPictureWidth", m_rwpSEIPackedPictureWidth, 0, "specifies the width of the packed picture.")
-("SEIRwpPackedPictureHeight", m_rwpSEIPackedPictureHeight, 0, "Specifies the height of the packed picture.")
-("SEIRwpTransformType", cfg_rwpSEIRwpTransformType, cfg_rwpSEIRwpTransformType, "specifies the rotation and mirroring to be applied to the i-th packed region.")
-("SEIRwpGuardBandFlag", cfg_rwpSEIRwpGuardBandFlag, cfg_rwpSEIRwpGuardBandFlag, "specifies the existence of guard band in the i-th packed region.")
-("SEIRwpProjRegionWidth", cfg_rwpSEIProjRegionWidth, cfg_rwpSEIProjRegionWidth, "specifies the width of the i-th projected region.")
-("SEIRwpProjRegionHeight", cfg_rwpSEIProjRegionHeight, cfg_rwpSEIProjRegionHeight, "specifies the height of the i-th projected region.")
-("SEIRwpProjRegionTop", cfg_rwpSEIRwpSEIProjRegionTop, cfg_rwpSEIRwpSEIProjRegionTop, "specifies the top sample row of the i-th projected region.")
-("SEIRwpProjRegionLeft", cfg_rwpSEIProjRegionLeft, cfg_rwpSEIProjRegionLeft, "specifies the left-most sample column of the i-th projected region.")
-("SEIRwpPackedRegionWidth", cfg_rwpSEIPackedRegionWidth, cfg_rwpSEIPackedRegionWidth, "specifies the width of the i-th packed region.")
-("SEIRwpPackedRegionHeight", cfg_rwpSEIPackedRegionHeight, cfg_rwpSEIPackedRegionHeight, "specifies the height of the i-th packed region.")
-("SEIRwpPackedRegionTop", cfg_rwpSEIPackedRegionTop, cfg_rwpSEIPackedRegionTop, "specifies the top luma sample row of the i-th packed region.")
-("SEIRwpPackedRegionLeft", cfg_rwpSEIPackedRegionLeft, cfg_rwpSEIPackedRegionLeft, "specifies the left-most luma sample column of the i-th packed region.")
-("SEIRwpLeftGuardBandWidth", cfg_rwpSEIRwpLeftGuardBandWidth, cfg_rwpSEIRwpLeftGuardBandWidth, "specifies the width of the guard band on the left side of the i-th packed region.")
-("SEIRwpRightGuardBandWidth", cfg_rwpSEIRwpRightGuardBandWidth, cfg_rwpSEIRwpRightGuardBandWidth, "specifies the width of the guard band on the right side of the i-th packed region.")
-("SEIRwpTopGuardBandHeight", cfg_rwpSEIRwpTopGuardBandHeight, cfg_rwpSEIRwpTopGuardBandHeight, "specifies the height of the guard band above the i-th packed region.")
-("SEIRwpBottomGuardBandHeight", cfg_rwpSEIRwpBottomGuardBandHeight, cfg_rwpSEIRwpBottomGuardBandHeight, "specifies the height of the guard band below the i-th packed region.")
-("SEIRwpGuardBandNotUsedForPredFlag", cfg_rwpSEIRwpGuardBandNotUsedForPredFlag, cfg_rwpSEIRwpGuardBandNotUsedForPredFlag, "Specifies if the guard bands is used in the inter prediction process.")
-("SEIRwpGuardBandType", cfg_rwpSEIRwpGuardBandType, cfg_rwpSEIRwpGuardBandType, "Specifies the type of the guard bands for the i-th packed region.")
-("SEIGcmpEnabled", m_gcmpSEIEnabled, false, "Control generation of generalized cubemap projection SEI messages")
-("SEIGcmpCancelFlag", m_gcmpSEICancelFlag, true, "Indicate that generalized cubemap projection SEI message cancels the persistence or follows")
-("SEIGcmpPersistenceFlag", m_gcmpSEIPersistenceFlag, false, "Specifies the persistence of the generalized cubemap projection SEI messages")
-("SEIGcmpPackingType", m_gcmpSEIPackingType, 0u, "Specifies the packing type")
-("SEIGcmpMappingFunctionType", m_gcmpSEIMappingFunctionType, 0u, "Specifies the mapping function used to adjust the sample locations of the cubemap projection")
-("SEIGcmpFaceIndex", cfg_gcmpSEIFaceIndex, cfg_gcmpSEIFaceIndex, "Specifies the face index for the i-th face")
-("SEIGcmpFaceRotation", cfg_gcmpSEIFaceRotation, cfg_gcmpSEIFaceRotation, "Specifies the rotation to be applied to the i-th face")
-("SEIGcmpFunctionCoeffU", cfg_gcmpSEIFunctionCoeffU, cfg_gcmpSEIFunctionCoeffU, "Specifies the coefficient used in the cubemap mapping function of the u-axis of the i-th face")
-("SEIGcmpFunctionUAffectedByVFlag", cfg_gcmpSEIFunctionUAffectedByVFlag, cfg_gcmpSEIFunctionUAffectedByVFlag, "Specifies whether the cubemap mapping function of the u-axis refers to the v position of the sample location")
-("SEIGcmpFunctionCoeffV", cfg_gcmpSEIFunctionCoeffV, cfg_gcmpSEIFunctionCoeffV, "Specifies the coefficient used in the cubemap mapping function of the v-axis of the i-th face")
-("SEIGcmpFunctionVAffectedByUFlag", cfg_gcmpSEIFunctionVAffectedByUFlag, cfg_gcmpSEIFunctionVAffectedByUFlag, "Specifies whether the cubemap mapping function of the v-axis refers to the u position of the sample location")
-("SEIGcmpGuardBandFlag", m_gcmpSEIGuardBandFlag, false, "Indicate the existence of guard band areas in the picture")
-("SEIGcmpGuardBandType", m_gcmpSEIGuardBandType, 0u, "Indicate the type of the guard bands")
-("SEIGcmpGuardBandBoundaryExteriorFlag", m_gcmpSEIGuardBandBoundaryExteriorFlag, false, "Indicate whether face boundaries contain guard bands")
-("SEIGcmpGuardBandSamplesMinus1", m_gcmpSEIGuardBandSamplesMinus1, 0u, "Specifies the number of guard band samples minus1 used in the cubemap projected picture")
-("SEISubpicLevelInfoEnabled", m_cfgSubpictureLevelInfoSEI.m_enabled, false, "Control generation of Subpicture Level Information SEI messages")
-("SEISubpicLevelInfoRefLevels", cfg_sliRefLevels, cfg_sliRefLevels, "List of reference levels for Subpicture Level Information SEI messages")
-("SEISubpicLevelInfoExplicitFraction", m_cfgSubpictureLevelInfoSEI.m_explicitFraction, false, "Enable sending of explicit fractions in Subpicture Level Information SEI messages")
-("SEISubpicLevelInfoNumSubpics", m_cfgSubpictureLevelInfoSEI.m_numSubpictures, 1, "Number of subpictures for Subpicture Level Information SEI messages")
-("SEIAnnotatedRegionsFileRoot,-ar", m_arSEIFileRoot, std::string(""), "Annotated region SEI parameters root file name (wo num ext); only the file name base is to be added. Underscore and POC would be automatically addded to . E.g. \"-ar ar\" will search for files ar_0.txt, ar_1.txt, ...")
-("SEIObjectMaskFileRoot,-omi", m_omiSEIFileRoot, std::string(""), "Object mask information SEI parameters root file name (wo num ext); only the file name base is to be added. Underscore and POC would be automatically added to . E.g. \"-omi omi\" will search for files omi_0.txt, omi_1.txt, ...")
-("SEISubpicLevelInfoMaxSublayers", m_cfgSubpictureLevelInfoSEI.m_sliMaxSublayers, 1, "Number of sublayers for Subpicture Level Information SEI messages")
-("SEISubpicLevelInfoSublayerInfoPresentFlag", m_cfgSubpictureLevelInfoSEI.hasSublayerInfo, false, "Enable sending of level information for all sublayers in Subpicture Level Information SEI messages")
-("SEISubpicLevelInfoRefLevelFractions", cfg_sliFractions, cfg_sliFractions, "List of subpicture level fractions for Subpicture Level Information SEI messages")
-("SEISubpicLevelInfoNonSubpicLayersFractions", cfg_sliNonSubpicLayersFractions, cfg_sliNonSubpicLayersFractions, "List of level fractions for non-subpicture layers in Subpicture Level Information SEI messages")
-("SEISampleAspectRatioInfo", m_sampleAspectRatioInfoSEIEnabled, false, "Control generation of Sample Aspect Ratio Information SEI messages")
-("SEISARICancelFlag", m_sariCancelFlag, false, "Indicates that Sample Aspect Ratio Information SEI message cancels the persistence or follows")
-("SEISARIPersistenceFlag", m_sariPersistenceFlag, true, "Specifies the persistence of the Sample Aspect Ratio Information SEI message")
-("SEISARIAspectRatioIdc", m_sariAspectRatioIdc, 0, "Specifies the Sample Aspect Ratio IDC of Sample Aspect Ratio Information SEI messages")
-("SEISARISarWidth", m_sariSarWidth, 0, "Specifies the Sample Aspect Ratio Width of Sample Aspect Ratio Information SEI messages, if extended SAR is chosen.")
-("SEISARISarHeight", m_sariSarHeight, 0, "Specifies the Sample Aspect Ratio Height of Sample Aspect Ratio Information SEI messages, if extended SAR is chosen.")
-("SEIPhaseIndicationFullResolution", m_phaseIndicationSEIEnabledFullResolution, false, "Control generation of Phase Indication SEI messages for full resolution pictures.")
-("SEIPIHorPhaseNumFullResolution", m_piHorPhaseNumFullResolution, 0, "Specifies the Horizontal Phase Numerator of Phase Indication SEI messages for full resolution pictures.")
-("SEIPIHorPhaseDenMinus1FullResolution", m_piHorPhaseDenMinus1FullResolution, 0, "Specifies the Horizontal Phase Denominator minus 1 of Phase Indication SEI messages for full resolution pictures.")
-("SEIPIVerPhaseNumFullResolution", m_piVerPhaseNumFullResolution, 0, "Specifies the Vertical Phase Numerator of Phase Indication SEI messages for full resolution pictures.")
-("SEIPIVerPhaseDenMinus1FullResolution", m_piVerPhaseDenMinus1FullResolution, 0, "Specifies the Vertical Phase Denominator minus 1 of Phase Indication SEI messages for full resolution pictures.")
-("SEIPhaseIndicationReducedResolution", m_phaseIndicationSEIEnabledReducedResolution, false, "Control generation of Phase Indication SEI messages for reduced resolution pictures.")
-("SEIPIHorPhaseNumReducedResolution", m_piHorPhaseNumReducedResolution, 0, "Specifies the Horizontal Phase Numerator of Phase Indication SEI messages for reduced resolution pictures.")
-("SEIPIHorPhaseDenMinus1ReducedResolution", m_piHorPhaseDenMinus1ReducedResolution, 0, "Specifies the Horizontal Phase Denominator minus 1 of Phase Indication SEI messages for reduced resolution pictures.")
-("SEIPIVerPhaseNumReducedResolution", m_piVerPhaseNumReducedResolution, 0, "Specifies the Vertical Phase Numerator of Phase Indication SEI messages for reduced resolution pictures.")
-("SEIPIVerPhaseDenMinus1ReducedResolution", m_piVerPhaseDenMinus1ReducedResolution, 0, "Specifies the Vertical Phase Denominator minus 1 of Phase Indication SEI messages for reduced resolution pictures.")
-("MCTSEncConstraint", m_MCTSEncConstraint, false, "For MCTS, constrain motion vectors at tile boundaries")
-("SEIShutterIntervalEnabled", m_siiSEIEnabled, false, "Controls if shutter interval information SEI message is enabled")
-("SEISiiTimeScale", m_siiSEITimeScale, 27000000u, "Specifies sii_time_scale")
-("SEISiiInputNumUnitsInShutterInterval", cfg_siiSEIInputNumUnitsInSI, cfg_siiSEIInputNumUnitsInSI, "Specifies sub_layer_num_units_in_shutter_interval")
-
-("SEISourcePictureTimingInfo", m_sptiSEIEnabled, false, "Controls if source picture timing information SEI message is enabled")
-("SEISPTISourceTimingEqualsOutputTimingFlag", m_sptiSourceTimingEqualsOutputTimingFlag, true, "Indicates the timing of source pictures is the same as the timing of corresponding decoded output pictures")
-("SEISPTISourceType", m_sptiSourceType, 0u, "Indicates the timing relationship between source pictures and corresponding decoded output pictures.")
-("SEISPTITimeScale", m_sptiTimeScale, 27000000u, "Specifies the number of time units that pass in one second.")
-("SEISPTINumUnitsInElementalInterval", m_sptiNumUnitsInElementalInterval, 1080000u, "Specifies the number of time units of a clock operating at the frequency spti_time_scale Hz that corresponds to the indicated elemental source picture interval of consecutive pictures in output order in the CLVS.")
-("SEISPTIDirectionFlag", m_sptiDirectionFlag, false, "Indicates the direction of the signalled source picture intervals.")
-#if JVET_AJ0151_DSC_SEI
-("SEIDSCEnabled", m_cfgDigitallySignedContentSEI.enabled, false, "Control generation of Digitally Signed Content SEI messages")
-("SEIDSCId", m_cfgDigitallySignedContentSEI.dscId, 0, "Identifying number of Digitally Signed Content SEI messages")
-("SEIDSCHashMethod", m_cfgDigitallySignedContentSEI.hashMethod, 0 , "Hash type to be used:\n"
-                                                                     "\t0: SHA-1 (default)\n"
-                                                                     "\t1: SHA-224\n"
-                                                                     "\t2: SHA-256\n"
-                                                                     "\t3: SHA-384\n"
-                                                                     "\t4: SHA-512\n"
-                                                                     "\t5: SHA-512/224\n"
-                                                                     "\t6: SHA-512/256")
-("SEIDSCSigningKeyFile", m_cfgDigitallySignedContentSEI.privateKeyFile, std::string("") , "(Private) signing key location for Digitally Signed Content SEI messages")
-("SEIDSCVerificationKeyURI", m_cfgDigitallySignedContentSEI.publicKeyUri, std::string("") , "(Public) verification key URI for Digitally Signed Content SEI messages")
-("SEIDSCImplicitAssociationModeFlag", m_cfgDigitallySignedContentSEI.implicitAssociationModeFlag, false , "Used to infer the verification substream ID")
-("SEIDSCKeyIDEnabled", m_cfgDigitallySignedContentSEI.keyIdEnabled, false, "Enable using a key ID addition to URI of public key of Digitally Signed Content SEI messages")
-("SEIDSCKeyID", m_cfgDigitallySignedContentSEI.keyId, 0 , "Public Key ID for Digitally Signed Content SEI messages (if enabled)")
-("SEIDSCSignAURSEI", m_cfgDigitallySignedContentSEI.signAURSEI, false, "Enable signing of AUR SEI for Digitally Signed Content SEI messages")
-("SEIDSCSignGFVSEI", m_cfgDigitallySignedContentSEI.signGFVSEI, false, "Enable signing of GFV SEI for Digitally Signed Content SEI messages")
-("SEIDSCSignGFVESEI", m_cfgDigitallySignedContentSEI.signGFVESEI, false, "Enable signing of GFVE SEI for Digitally Signed Content SEI messages")
-("SEIDSCSignNNPFCSEI", m_cfgDigitallySignedContentSEI.signNNPFCSEI, false, "Enable signing of NNPFC SEI for Digitally Signed Content SEI messages")
-("SEIDSCSignNNPFASEI", m_cfgDigitallySignedContentSEI.signNNPFASEI, false, "Enable signing of NNPFA SEI for Digitally Signed Content SEI messages")
-#endif
-#if ENABLE_TRACING
-("TraceChannelsList", bTracingChannelsList, false, "List all available tracing channels")
-("TraceRule", sTracingRule, std::string(""), "Tracing rule (ex: \"D_CABAC:poc==8\" or \"D_REC_CB_LUMA:poc==8\")")
-("TraceFile", sTracingFile, std::string(""), "Tracing file")
-#endif
-
-("SEIEOIEnabled", m_eoiSEIEnabled, false, "Control use of the Encoder Optimization Information SEI")
-("SEIEOICancelFlag", m_eoiSEICancelFlag, false, "Specifies that the persistence of the previous applied optimization")
-("SEIEOIPersistenceFlag", m_eoiSEIPersistenceFlag, false, "Specifies the persistence of the optimization the current layer")
-("SEIEOIForHumanViewingIdc", m_eoiSEIForHumanViewingIdc, 0u, "Indicates the level of optimization for human viewing")
-("SEIEOIForMachineAnalysisIdc", m_eoiSEIForMachineAnalysisIdc, 0u, "Indicates the level of optimization for  machine analsysis")
-("SEIEOIType", m_eoiSEIType, 0u, "Indicates the types of optimization method")
-("SEIEOIObjectBasedIdc", m_eoiSEIObjectBasedIdc, 0u, "Indicates the type of object-based optimization")
-("SEIEOIQuantThresholdDelta", m_eoiSEIQuantThresholdDelta, 0u, "Indicates the quantization parameter threshold determining areas classified to be outside the detected objects or to include one or more detected objects (0 = unknown or unspecified)")
-("SEIEOIPicQuantObjectFlag", m_eoiSEIPicQuantObjectFlag, false, "Value of 1 indicates that areas with QP >= PicQuant + SEIEOIQuantThresholdDelta represent areas outside the detected objects. Value of 0 indicates that areas with QP <= PicQuant - SEIEOIQuantThresholdDelta represent areas that include objects")
-("SEIEOITemporalResamplingTypeFlag", m_eoiSEITemporalResamplingTypeFlag, false, "specifies the type of the temporal resampling optimization.")
-("SEIEOINumIntPics", m_eoiSEINumIntPics, 0u, "indicates that the count of pictures that the encoding system excluded or added between each pair of coded pictures in output order within the persistence of this SEI message is constant")
-("SEIEOISrcPicFlag", m_eoiSEISrcPicFlag, false, "Value of 1 specifies that the picture in the same access unit that contains the EOI SEI message is a source picture. Value of 0 provides no such indication.")
-("SEIEOIOrigPicDimensionsFlag",m_eoiSEIOrigPicDimensionsFlag, false, "specifies if original source picture dimensions are present.")
-("SEIEOIOrigPicWidthMinus1", m_eoiSEIOrigPicWidthMinus1, 0u, "indicates the width of the original source picture minus 1.")
-("SEIEOIOrigPicHeightMinus1", m_eoiSEIOrigPicHeightMinus1, 0u, "indicates the height of the original source picture minus 1.")
-("SEIEOISpatialHorResamplingTypeIdc", m_eoiSEISpatialHorResamplingTypeIdc, 0u, "specifies the type of the spatial horizontal resampling optimization.")
-("SEIEOISpatialVerResamplingTypeIdc", m_eoiSEISpatialVerResamplingTypeIdc, 0u, "specifies the type of the spatial vertical resampling optimization.")
-("SEIEOIPrivacyProtectionTypeIdc", m_eoiSEIPrivacyProtectionTypeIdc, 0u, "indicates the type of privacy protection optimization")
-("SEIEOIPrivacyProtectedInfoType", m_eoiSEIPrivacyProtectedInfoType, 0u, "indicates the types of protected information")
+  ("LumaLevelToDeltaQPMode",                          lumaLevelToDeltaQPMode,                              0u, "Luma based D…14111 tokens truncated… "indicates the types of protected information")
 
 // Modality Information SEI 
   ("SEIModalityInfoEnabled",                          m_miSEIEnabled,                                    false, "Control generation of Modality Information SEI messages")
@@ -1838,7 +1228,49 @@ bool EncAppCfg::parseCfg( int argc, char* argv[] )
   ("SEIDRIZFarFlag",                                  m_driSEIZFarFlag,                                  false, "Specifies the presence of the farthest depth value in the depth representation information SEI message")
   ("SEIDRIDMinFlag",                                  m_driSEIDMinFlag,                                  false, "Specifies the presence of the minimum disparity value in the depth representation information SEI message")
   ("SEIDRIDMaxFlag",                                  m_driSEIDMaxFlag,                                  false, "Specifies the presence of the maximum disparity value in the depth representation information SEI message")
-  ("SEIDRIZNear",                                     m_driSEIZNear,                                       0.0, "Specifies the nearest de…1906 tokens truncated…       m_priSEIRegionSizeLenMinus1,                         12u, "Specifies the number of bits minus 1 used to signal region top left offsets and region dimensions")
+  ("SEIDRIZNear",                                     m_driSEIZNear,                                       0.0, "Specifies the nearest depth value in the depth representation information SEI message")
+  ("SEIDRIZFar",                                      m_driSEIZFar,                                        0.0, "Specifies the farest depth value in the depth representation information SEI message")
+  ("SEIDRIDMin",                                      m_driSEIDMin,                                        0.0, "Specifies the minimum disparity value in the depth representation information SEI message")
+  ("SEIDRIDMax",                                      m_driSEIDMax,                                        0.0, "Specifies the maximum disparity value in the depth representation information SEI message")
+  ("SEIDRIDepthRepresentationType",                   m_driSEIDepthRepresentationType,                       0, "Specifies the the representation definition of decoded luma samples of auxiliary pictures in the depth representation information SEI message")
+  ("SEIDRIDisparityRefViewId",                        m_driSEIDisparityRefViewId,                            0, "Specifies the ViewId value against which the disparity values are derived in the depth representation information SEI message")
+  ("SEIDRINonlinearNumMinus1",                        m_driSEINonlinearNumMinus1,                            0, "Specifies the number of piece-wise linear segments minus 2 for mapping of depth values to a scale that is uniformly quantized in terms of disparity  in the depth representation information SEI message")
+  ("SEIDRINonlinearModel",                            cfg_driSEINonlinearModel,       cfg_driSEINonlinearModel, "List of the piece-wise linear segments for mapping of decoded luma sample values of an auxiliary picture to a scale that is uniformly quantized in terms of disparity in the depth representation information SEI message")
+  ("SEIConstrainedRASL",                              m_constrainedRaslEncoding,                         false, "Control generation of constrained RASL encoding SEI message")
+  
+  //Processing order of SEI (pos)
+  ("SEIPOEnabled",                                    m_poSEIEnabled,                                    false, "Specifies whether SEI processing order is applied or not")
+  ("SEIPOId",                                         m_poSEIId,                                            0u, "Specifies the id of the SEI processing order SEI message")
+  ("SEIPOForHumanViewingIdc",                         m_poSEIForHumanViewingIdc,                            0u, "Specifies the user viewing usage level of video resulting from processing chain specified by SPO SEI: optimal for human viewing (3), suitable (2), unsuitable (1), unknown (0, default)")
+  ("SEIPOForMachineAnalysisIdc",                      m_poSEIForMachineAnalysisIdc,                         0u, "Specifies the machine analysis usage level of video resulting from processing chain specified by SPO SEI: optimal for machine analysis (3), suitable (2), unsuitable (1), unknown (0, default)")
+  ("SEIPONumMinus1",                                  m_poSEINumMinus1,                                     0u, "Specifies the number of SEIs minus 1 in the SEI processing order SEI message")
+  ("SEIPOBreadthFirstFlag",                           m_poSEIBreadthFirstFlag,                           false, "Specifies that breadth-first handling of processing chain is applied (1), or that either breadth-first or depth-first can be applied (0, default)")
+  ("SEIPOWrappingFlag",                               cfg_poSEIWrappingFlag,             cfg_poSEIWrappingFlag, "Specifies whether a correspoding processing-order-nested SEI message exists or not")
+  ("SEIPOImportanceIdc",                              cfg_poSEIImportanceIdc,           cfg_poSEIImportanceIdc, "Specifies degree of importance (0..3) for the SEI messages")
+  ("SEIPOPrefixFlag",                                 cfg_poSEIPrefixFlag,                 cfg_poSEIPrefixFlag, "Specifies whether SEI message prefix is present or not")
+  ("SEIPOPayLoadType",                                cfg_poSEIPayloadType,               cfg_poSEIPayloadType, "List of payloadType for processing")
+  ("SEIPOProcessingOrder",                            cfg_poSEIProcessingOrder,       cfg_poSEIProcessingOrder, "List of payloadType processing order")
+  ("SEIPONumofPrefixBits",                            cfg_poSEINumofPrefixBits,       cfg_poSEINumofPrefixBits, "List of number of prefix bits")
+  ("SEIPOPrefixByte",                                 cfg_poSEIPrefixByte,                 cfg_poSEIPrefixByte, "List of prefix bytes")
+  ("SEIPOComplexityInfoPresentFlag",                  m_poSEIComplexityInfoPresentFlag,                  false, "Specifies whether complexity info is present (1) or not (0). (0, default)")
+  ("SEIPOParameterTypeIdc",                           m_poSEIParameterTypeIdc         ,                     0u, "Specifies type of parameters of the NNPFs (0) only integer, (1) integer or floating point, (2) binary only, (3) reserved. (0, default)")
+  ("SEIPOLog2ParameterBitLengthMinus3",               m_poSEILog2ParameterBitLengthMinus3,                  0u, "0, 1, 2, and 3 means the NNPFs do not use parameters of bit length greater than 8, 16, 32, and 64, respectively. (0, default)")
+  ("SEIPONumParametersIdc",                           m_poSEINumParametersIdc,                              0u, "Specifies max number of parameters needed by NNPFs in the processing chain. (0, default)")
+  ("SEIPONumKmacOperationIdcg",                       m_poSEINumKmacOperationIdc,                           0u, "When greater than 0 specifies that the max number of multiply-accumulate operations per sample of the NNPFs is less than or equal to po_num_kmac_operations_idc * 1000. ) means unknown. (0, default)")
+  ("SEIPOTotalKilobyteSize",                          m_poSEITotalKilobyteSize,                             0u, "When greater than 0 specifies a total size in kilobytes required to store the uncompressed parameters for NNPFs. 0 means unknown. (0, default)")
+
+  //SEI manifest
+  ("SEISEIManifestEnabled",                           m_SEIManifestSEIEnabled,                           false, "Controls if SEI Manifest SEI messages enabled")
+  //SEI prefix indication
+  ("SEISEIPrefixIndicationEnabled",                   m_SEIPrefixIndicationSEIEnabled,                   false, "Controls if SEI Prefix Indications SEI messages enabled")
+
+  ("SEIPRIEnabled",                                   m_priSEIEnabled,                                   false, "Specifies whether packet regions info SEI is enabled")
+  ("SEIPRICancelFlag",                                m_priSEICancelFlag,                                false, "Specifies the persistence of any previous packed regions info SEI message in output order")
+  ("SEIPRIPersistenceFlag",                           m_priSEIPersistenceFlag,                            true, "Specifies the persistence of the packed regions info SEI message for the current layer")
+  ("SEIPRINumRegionsMinus1",                          m_priSEINumRegionsMinus1,                             0u, "Specifies the number of regions minus 1 for which information is signalled")
+  ("SEIPRIUseMaxDimensionsFlag",                      m_priSEIUseMaxDimensionsFlag,                      false, "Specifies that max pic dimensions are used in variable calculations")
+  ("SEIPRILog2UnitSize",                              m_priSEILog2UnitSize,                                 0u, "Specifies a unit size used in variable calculations for the region parameters")
+  ("SEIPRIRegionSizeLenMinus1",                       m_priSEIRegionSizeLenMinus1,                         12u, "Specifies the number of bits minus 1 used to signal region top left offsets and region dimensions")
   ("SEIPRIRegionIdPresentFlag",                       m_priSEIRegionIdPresentFlag,                       false, "Specifies whether region IDs are signalled")
   ("SEIPRITargetPicParamsPresentFlag",                m_priSEITargetPicParamsPresentFlag,                false, "Specifies whether pri_target_region_top_left_x[ i ], pri_target_region_top_left_y[ i ], pri_target_pic_width_minus1, and pri_target_pic_height_minus1 are signalled")
   ("SEIPRITargetPicWidthMinus1",                      m_priSEITargetPicWidthMinus1,                         0u, "Target output picture width minus 1")
@@ -1850,298 +1282,7 @@ bool EncAppCfg::parseCfg( int argc, char* argv[] )
   ("SEIPRIResamplingHeightDenomMinus1",               cfg_priSEIResamplingHeightDenomMinus1, cfg_priSEIResamplingHeightDenomMinus1, "Specifies a list of denominators minus 1 values for height resampling of the resampling ratio")
   ("SEIPRIRegionId",                                  cfg_priSEIRegionId, cfg_priSEIRegionId,                   "Specifies a list of IDs for the regions")
   ("SEIPRIRegionTopLeftInUnitsX",                     cfg_priSEIRegionTopLeftInUnitsX, cfg_priSEIRegionTopLeftInUnitsX, "Specifies a list of horizontal top left positions for the regions")
-  ("SEIPRIRegionTopLeftInUnitsY",                     cfg_priSEIRegionTopLeftInUnitsY, cfg_priSEIRegionTopLeftInUnitsY, "Specifies a list of vertical top left positions for the regions")
-  ("SEIPRIRegionWidthInUnitsMinus1",                  cfg_priSEIRegionWidthInUnitsMinus1, cfg_priSEIRegionWidthInUnitsMinus1, "Specifies a list of widths minus 1 in units for the regions")
-  ("SEIPRIRegionHeightInUnitsMinus1",                 cfg_priSEIRegionHeightInUnitsMinus1, cfg_priSEIRegionHeightInUnitsMinus1, "Specifies a list of heights minus 1 in units for the regions")
-  ("SEIPRIResamplingRatioIdx",                        cfg_priSEIResamplingRatioIdx, cfg_priSEIResamplingRatioIdx, "Specifies a list of resampling ration indices for the regions")
-  ("SEIPRITargetRegionTopLeftInUnitsX",               cfg_priSEITargetRegionTopLeftInUnitsX, cfg_priSEITargetRegionTopLeftInUnitsX, "Specifies a list of horizontal top left postions in units of priUnitSize luma samples for the regions in reconstructed target picture")
-  ("SEIPRITargetRegionTopLeftInUnitsY",               cfg_priSEITargetRegionTopLeftInUnitsY, cfg_priSEITargetRegionTopLeftInUnitsY, "Specifies a list of vertical top left postions in units of priUnitSize luma samples for the regions in reconstructed target picture")
-  ("SEIPRIMultilayerFlag",                            m_priSEIMultilayerFlag,                            false, "Specifies whether layer IDs are signalled")
-  ("SEIPRIRegionLayerId",                             cfg_priSEIRegionLayerId,         cfg_priSEIRegionLayerId, "Specifies a list of the layer ids of the picture that the region information relate to")
-  ("SEIPRIRegionIsALayerFlag",                        cfg_priSEIRegionIsALayerFlag, cfg_priSEIRegionIsALayerFlag, "Specifies a list of flags indicating for each region if the picture width and height in the layer are the same as the region's")
-
-  ("DebugBitstream",                                  m_decodeBitstreams[0],             std::string( "" ), "Assume the frames up to POC DebugPOC will be the same as in this bitstream. Load those frames from the bitstream instead of encoding them." )
-  ("DebugPOC",                                        m_switchPOC,                                 -1, "If DebugBitstream is present, load frames up to this POC from this bitstream. Starting with DebugPOC, return to normal encoding." )
-  ("DecodeBitstream1",                                m_decodeBitstreams[0],             std::string( "" ), "Assume the frames up to POC DebugPOC will be the same as in this bitstream. Load those frames from the bitstream instead of encoding them." )
-  ("DecodeBitstream2",                                m_decodeBitstreams[1],             std::string( "" ), "Assume the frames up to POC DebugPOC will be the same as in this bitstream. Load those frames from the bitstream instead of encoding them." )
-  ("SwitchPOC",                                       m_switchPOC,                                 -1, "If DebugBitstream is present, load frames up to this POC from this bitstream. Starting with DebugPOC, return to normal encoding." )
-  ("SwitchDQP",                                       m_switchDQP,                                  0, "delta QP applied to picture with switchPOC and subsequent pictures." )
-  ("FastForwardToPOC",                                m_fastForwardToPOC,                          -1, "Get to encoding the specified POC as soon as possible by skipping temporal layers irrelevant for the specified POC." )
-  ("StopAfterFFtoPOC",                                m_stopAfterFFtoPOC,                       false, "If using fast forward to POC, after the POC of interest has been hit, stop further encoding.")
-  ("ForceDecodeBitstream1",                           m_forceDecodeBitstream1,                  false, "force decoding of bitstream 1 - use this only if you are realy sure about what you are doing ")
-  ("DecodeBitstream2ModPOCAndType",                   m_bs2ModPOCAndType,                       false, "Modify POC and NALU-type of second input bitstream, to use second BS as closing I-slice")
-
-  ("DebugCTU",                                        m_debugCTU,                                  -1, "If DebugBitstream is present, load frames up to this POC from this bitstream. Starting with DebugPOC-frame at CTUline containin debug CTU.")
-  ("AlfTrueOrg",                                      m_alfTrueOrg,                              true, "Using true original samples for ALF optimization when MCTF is enabled\n")
-  ( "ALF",                                             m_alf,                                    true, "Adaptive Loop Filter\n" )
-  ("MaxNumALFAPS",                                    m_maxNumAlfAps,             ALF_CTB_MAX_NUM_APS, "Maximum number of ALF APSs" )
-  ("AlfapsIDShift",                                   m_alfapsIDShift,                              0, "shift for ALF APSs" )
-  ("ConstantJointCbCrSignFlag",                       m_constantJointCbCrSignFlag,              0, "Constant JointCbCr sign flag" )
-  ("ALFStrengthLuma",                                  m_alfStrengthLuma,                         1.0, "Adaptive Loop Filter strength for luma. The parameter scales the magnitudes of the ALF filter coefficients for luma. Valid range is 0.0 <= ALFStrengthLuma <= 1.0")
-  ("ALFAllowPredefinedFilters",                        m_alfAllowPredefinedFilters,              true, "Allow use of predefined filters for ALF")
-  ("CCALFStrength",                                    m_ccalfStrength,                           1.0, "Cross-component Adaptive Loop Filter strength. The parameter scales the magnitudes of the CCALF filter coefficients. Valid range is 0.0 <= CCALFStrength <= 1.0")
-  ("ALFStrengthChroma",                                m_alfStrengthChroma,                       1.0, "Adaptive Loop Filter strength for chroma. The parameter scales the magnitudes of the ALF filter coefficients for chroma. Valid range is 0.0 <= ALFStrengthChroma <= 1.0")
-  ("ALFStrengthTargetLuma",                            m_alfStrengthTargetLuma,                   1.0, "Adaptive Loop Filter strength target for ALF luma filter optimization. The parameter scales the auto-correlation matrix E and the cross-correlation vector y for luma. Valid range is 0.0 <= ALFStrengthTargetLuma <= 1.0")
-  ("ALFStrengthTargetChroma",                          m_alfStrengthTargetChroma,                 1.0, "Adaptive Loop Filter strength target for ALF chroma filter optimization. The parameter scales the auto-correlation matrix E and the cross-correlation vector y for chroma. Valid range is 0.0 <= ALFStrengthTargetChroma <= 1.0")
-  ("CCALFStrengthTarget",                              m_ccalfStrengthTarget,                     1.0, "Cross-component Adaptive Loop Filter strength target for filter optimization. The parameter scales the auto-correlation matrix E and the cross-correlation vector y. Valid range is 0.0 <= CCALFStrengthTarget <= 1.0")
-  ( "CCALF",                                           m_ccalf,                                  true, "Cross-component Adaptive Loop Filter" )
-  ( "CCALFQpTh",                                       m_ccalfQpThreshold,                         37, "QP threshold above which encoder reduces CCALF usage")
-  ( "RPR",                                            m_rprEnabledFlag,                          true, "Reference Sample Resolution" )
-  ("ScalingRatioHor",                                 m_scalingRatioHor,                          1.0, "Scaling ratio in hor direction")
-  ("ScalingRatioVer",                                 m_scalingRatioVer,                          1.0, "Scaling ratio in ver direction")
-  ("GOPBasedRPR",                                     m_gopBasedRPREnabledFlag,                 false, "Enables decision to encode pictures in GOP in full resolution or one of three downscaled resolutions(default is 1/2, 2/3 and 4/5 in both dimensions)")
-  ("GOPBasedRPRQPTh",                                 m_gopBasedRPRQPThreshold,                    32, "QP threshold parameter that determines which QP GOP-based RPR is invoked for given by QP >= GOPBasedRPRQPTh")
-  ("ScalingRatioHor2",                                m_scalingRatioHor2,                         1.5, "Scaling ratio in hor direction for GOP based RPR (2/3)")
-  ("ScalingRatioVer2",                                m_scalingRatioVer2,                         1.5, "Scaling ratio in ver direction for GOP based RPR (2/3)")
-  ("ScalingRatioHor3",                                m_scalingRatioHor3,                        1.25, "Scaling ratio in hor direction for GOP based RPR (4/5)")
-  ("ScalingRatioVer3",                                m_scalingRatioVer3,                        1.25, "Scaling ratio in ver direction for GOP based RPR (4/5)")
-  ("PsnrThresholdRPR",                                m_psnrThresholdRPR,                        47.0, "PSNR threshold for GOP based RPR (1/2)")
-  ("PsnrThresholdRPR2",                               m_psnrThresholdRPR2,                       44.0, "PSNR threshold for GOP based RPR (2/3)")
-  ("PsnrThresholdRPR3",                               m_psnrThresholdRPR3,                       41.0, "PSNR threshold for GOP based RPR (4/5)")
-  ("QpOffsetRPR",                                     m_qpOffsetRPR,                               -6, "QP offset for RPR (-6 for 1/2)")
-  ("QpOffsetRPR2",                                    m_qpOffsetRPR2,                              -4, "QP offset for RPR2 (-4 for 2/3)")
-  ("QpOffsetRPR3",                                    m_qpOffsetRPR3,                              -2, "QP offset for RPR3 (-2 for 4/5)")
-  ("QpOffsetChromaRPR",                               m_qpOffsetChromaRPR,                         -6, "QP offset for RPR (-6 for 0.5x)")
-  ("QpOffsetChromaRPR2",                              m_qpOffsetChromaRPR2,                        -4, "QP offset for RPR2 (-4 for 2/3x)")
-  ("QpOffsetChromaRPR3",                              m_qpOffsetChromaRPR3,                        -2, "QP offset for RPR3 (-2 for 4/5x)")
-  ("RPRFunctionalityTesting",                         m_rprFunctionalityTestingEnabledFlag,      false, "Enables RPR functionality testing")
-  ("RPRSwitchingResolutionOrderList", cfg_rprSwitchingResolutionOrderList, cfg_rprSwitchingResolutionOrderList, "Order of resolutions for each segment in RPR functionality testing where 0,1,2,3 corresponds to full resolution,4/5,2/3 and 1/2")
-  ("RPRSwitchingQPOffsetOrderList", cfg_rprSwitchingQPOffsetOrderList, cfg_rprSwitchingQPOffsetOrderList, "Order of QP offset for each segment in RPR functionality testing, where the QP is modified according to the given offset")
-  ("RPRSwitchingSegmentSize",                         m_rprSwitchingSegmentSize,                    32, "Segment size with same resolution")
-  ("RPRSwitchingTime",                                m_rprSwitchingTime,                          0.0, "Segment switching time in seconds, when non-zero it defines the segment size according to frame rate (a multiple of 8)")
-  ("RPRPopulatePPSatIntra",                           m_rprPopulatePPSatIntraFlag,               false, "Populate all PPS which can be used in the sequence at the Intra, e.g. full-res, 4/5, 2/3 and 1/2")
-  ( "FractionNumFrames",                              m_fractionOfFrames,                         1.0, "Encode a fraction of the specified in FramesToBeEncoded frames" )
-  ( "SwitchPocPeriod",                                m_switchPocPeriod,                            0, "Switch POC period for RPR" )
-  ( "UpscaledOutput",                                 m_upscaledOutput,                             0, "Output upscaled (2), decoded but in full resolution buffer (1) or decoded cropped (0, default) picture for RPR" )
-  ("UpscaledOutputWidth",                             m_upscaledOutputWidth,                        0, "Forced upscaled output width (override SPS)" )
-  ("UpscaledOutputHeight",                            m_upscaledOutputHeight,                       0, "Forced upscaled output height (override SPS)" )
-  ("UpscaleFilterForDisplay",                         m_upscaleFilterForDisplay,                    1, "Filters used for upscaling reconstruction to full resolution (2: ECM 12-tap luma and 6-tap chroma MC filters, 1: Alternative 12-tap luma and 6-tap chroma filters, 0: VVC 8-tap luma and 4-tap chroma MC filters)")
-  ( "MaxLayers",                                      m_maxLayers,                                  1, "Max number of layers" )
-  ( "EnableOperatingPointInformation",                m_OPIEnabled,                             false, "Enables writing of Operating Point Information (OPI)" )
-  ( "MaxTemporalLayer",                               m_maxTemporalLayer,                         500, "Maximum temporal layer to be signalled in OPI" )
-  ( "TargetOutputLayerSet",                           m_targetOlsIdx,                             500, "Target output layer set index to be signalled in OPI" )
-  ( "PrintRefLayerMetrics",                           m_refMetricsEnabled,                      false, "0 (default) do not print ref layer metrics, 1 = print ref layer metrics based on current layer source")
-  ;
-  opts.addOptions()
-  ( "MaxSublayers",                                   m_maxSublayers,                               7, "Max number of Sublayers")
-  ( "DefaultPtlDpbHrdMaxTidFlag",                     m_defaultPtlDpbHrdMaxTidFlag,              true, "specifies that the syntax elements vps_ptl_max_tid[ i ], vps_dpb_max_tid[ i ], and vps_hrd_max_tid[ i ] are not present and are inferred to be equal to the default value vps_max_sublayers_minus1")
-  ( "AllIndependentLayersFlag",                       m_allIndependentLayersFlag,                true, "All layers are independent layer")
-  ("AllowablePredDirection",                          m_predDirectionArray, std::string(""),                "prediction directions allowed for i-th temporal layer")
-  ( "LayerId%d",                                      m_layerId,                    0, MAX_VPS_LAYERS, "Layer ID")
-  ( "NumRefLayers%d",                                 m_numRefLayers,               0, MAX_VPS_LAYERS, "Number of direct reference layer index of i-th layer")
-  ( "RefLayerIdx%d",                                  m_refLayerIdxStr,    std::string(""), MAX_VPS_LAYERS, "Reference layer index(es)")
-  ( "EachLayerIsAnOlsFlag",                           m_eachLayerIsAnOlsFlag,                    true, "Each layer is an OLS layer flag")
-  ( "OlsModeIdc",                                     m_olsModeIdc,                                 0, "Output layer set mode")
-  ( "NumOutputLayerSets",                             m_numOutputLayerSets,                         1, "Number of output layer sets")
-  ( "OlsOutputLayer%d",                               m_olsOutputLayerStr, std::string(""), MAX_VPS_LAYERS, "Output layer index of i-th OLS")
-  ( "NumPTLsInVPS",                                   m_numPtlsInVps,                               1, "Number of profile_tier_level structures in VPS" )
-  ( "PtPresentInPTL%d",                               m_ptPresentInPtl,               0, MAX_NUM_OLSS, "Profile/Tier present in i-th PTL")
-  ( "AvoidIntraInDepLayers",                          m_avoidIntraInDepLayer,                    true, "Replaces I pictures in dependent layers with B pictures" )
-  ( "MaxTidILRefPicsPlusOneLayerId%d",                m_maxTidILRefPicsPlus1Str, std::string(""), MAX_VPS_LAYERS, "Maximum temporal ID for inter-layer reference pictures plus 1 of i-th layer, 0 for IRAP only")
-  ( "RPLofDepLayerInSH",                              m_rplOfDepLayerInSh,                      false, "define Reference picture lists in slice header instead of SPS for dependant layers")
-  ( "ExplicitILRP",                                   m_explicitILRP,                           false, "Explicitly define Inter-Layer Reference pictures in GOP entry")
-  ( "EncInterLayerOpt",                               m_encILOpt,                               false, "Enable encoder optimization to favor inter-layer predictions")
-  ( "EncInterLayerOptLambdaModifier",                 m_encILOptLambdaModifier,         ( double )0.1, "lambda modifier for modified RD cost in Inter-Layer criterion")
-    ;
-
-  opts.addOptions()
-    ("TemporalFilter",               m_gopBasedTemporalFilterEnabled,                     false, "Enable GOP based temporal filter. Disabled per default")
-    ("TemporalFilterUnitSize",       m_gopBasedTemporalFilterUnitSize,                       16, "Block size for GOP based temporal filtering operation")
-    ("TemporalFilterPastRefs",       m_gopBasedTemporalFilterPastRefs,          TF_DEFAULT_REFS, "Number of past references for temporal prefilter")
-    ("TemporalFilterFutureRefs",     m_gopBasedTemporalFilterFutureRefs,        TF_DEFAULT_REFS, "Number of future references for temporal prefilter")
-    ("FirstValidFrame",              m_firstValidFrame,                                       0, "First valid frame")
-    ("LastValidFrame",               m_lastValidFrame,                                  MAX_INT, "Last valid frame")
-    ("TemporalFilterStrengthFrame*", m_gopBasedTemporalFilterStrengths, std::map<int, double>(), "Strength for every * frame in GOP based temporal filter, where * is an integer."
-                                                                                                                  " E.g. --TemporalFilterStrengthFrame8 0.95 will enable GOP based temporal filter at every 8th frame with strength 0.95");
-  
-  opts.addOptions()
-    ("SEIGenerativeFaceVideoEnabled",                         m_generativeFaceVideoEnabled,                             false,                                                         "Control use of the Generative Face Video SEI on current picture")
-    ("SEIGenerativeFaceVideoNumber",                          m_generativeFaceVideoSEINumber,                           0u,                                                            "Total number of Generative Face Video SEI to be carried")
-    ("SEIGenerativeFaceVideoBasePicFlag",                     m_generativeFaceVideoSEIBasePicFlag,                      false,                                                         "Specifies whether to indicates the current decoded output picture corresponds to a base picture")
-    ("SEIGenerativeFaceVideoNNPresentFlag",                   m_generativeFaceVideoSEINNPresentFlag,                    false,                                                         "indicates a neural network that may be used as a TranslatorNN( ) ")
-    ("SEIGenerativeFaceVideoNNModeIdc",                       m_generativeFaceVideoSEINNModeIdc,                        0u,                                                            "specify a neural network that may be used as a TranslatorNN( )")
-    ("SEIGenerativeFaceVideoNNTagURI",                        m_generativeFaceVideoSEINNTagURI,                         std::string(""),                                               "specify path to gfv_uri_tag")
-    ("SEIGenerativeFaceVideoNNURI",                           m_generativeFaceVideoSEINNURI,                            std::string(""),                                               "specify path to gfv_uri")
-    ("SEIGenerativeFaceVideoId",                              cfg_generativeFaceVideoSEIId,                             cfg_generativeFaceVideoSEIId,                                  "Target id of Generative Face Video SEI on current picture")
-    ("SEIGenerativeFaceVideoCnt",                             cfg_generativeFaceVideoSEICnt,                            cfg_generativeFaceVideoSEICnt,                                 "Target cnt of Generative Face Video SEI on current picture")
-    ("SEIGenerativeFaceVideoCoordinatePresentFlag",           cfg_generativeFaceVideoSEICoordinatePresentFlag,          cfg_generativeFaceVideoSEICoordinatePresentFlag,               "Specifies whether to carry coorinate parameter")
-    ("SEIGenerativeFaceVideoLowConfidenceFaceParameterFlag",  cfg_generativeFaceVideoSEILowConfidenceFaceParameterFlag, cfg_generativeFaceVideoSEILowConfidenceFaceParameterFlag,      "Indicates the facial parameters have been derived with low confidence ")
-    ("SEIGenerativeFaceVideoFusionPicFlag",                   cfg_generativeFaceVideoSEIFusionPicFlag,                  cfg_generativeFaceVideoSEIFusionPicFlag,                       "Specifies whether to use DrivePicFusion function")
-    ("SEIGenerativeFaceVideoCoordinateQuantizationFactor",    cfg_generativeFaceVideoSEICoordinateQuantizationFactor,   cfg_generativeFaceVideoSEICoordinateQuantizationFactor,        "Specifies the quantization factor to process the facial coordinate paramters")
-    ("SEIGenerativeFaceVideoCoordinatePredFlag",              cfg_generativeFaceVideoSEICoordinatePredFlag,             cfg_generativeFaceVideoSEICoordinatePredFlag,                  "Specifies whether to use the difference operation to process data")
-    ("SEIGenerativeFaceVideo3DCoordinateFlag",                cfg_generativeFaceVideoSEI3DCoordinateFlag,               cfg_generativeFaceVideoSEI3DCoordinateFlag,                    "Specifies whether to carry 3D coordinate-type paramters")
-    ("SEIGenerativeFaceVideoCoordinatePointNum",              cfg_generativeFaceVideoSEICoordinatePointNum,             cfg_generativeFaceVideoSEICoordinatePointNum,                  "the number of facial coordinate parameter set")
-    ("SEIGenerativeFaceVideoXCoordinate",                     cfg_generativeFaceVideoSEICoordinateXTesonr,              cfg_generativeFaceVideoSEICoordinateXTesonr,                   "the x-axis value for i_th coordinate")
-    ("SEIGenerativeFaceVideoYCoordinate",                     cfg_generativeFaceVideoSEICoordinateYTesonr,              cfg_generativeFaceVideoSEICoordinateYTesonr,                   "the y-axis value for i_th coordinate")
-    ("SEIGenerativeFaceVideoZCoordinateMaxValue",             cfg_generativeFaceVideoSEIZCoordinateMaxValue,            cfg_generativeFaceVideoSEIZCoordinateMaxValue,                 "the max value of z-axis coordinate parameter")
-    ("SEIGenerativeFaceVideoZCoordinate",                     cfg_generativeFaceVideoSEICoordinateZTesonr,              cfg_generativeFaceVideoSEICoordinateZTesonr,                   "the z-axis value for i_th coordinate")
-    ("SEIGenerativeFaceVideoMatrixPresentFlag",               cfg_generativeFaceVideoSEIMatrixPresentFlag,              cfg_generativeFaceVideoSEIMatrixPresentFlag,                   "Specifies whether to carry matrix parameter")
-    ("SEIGenerativeFaceVideoMatrixElementPrecisionFactor",    cfg_generativeFaceVideoSEIMatrixElementPrecisionFactor,   cfg_generativeFaceVideoSEIMatrixElementPrecisionFactor,        "Specifies the precision factor to process the facial matrix paramters (decimal part)")
-    ("SEIGenerativeFaceVideoNumMatrixType",                   cfg_generativeFaceVideoSEINumMatrixType,                  cfg_generativeFaceVideoSEINumMatrixType,                       "Specifies the number of used facial matrix type")
-    ("SEIGenerativeFaceVideoMatrixTypeIdx",                   cfg_generativeFaceVideoSEIMatrixTypeIdx,                  cfg_generativeFaceVideoSEIMatrixTypeIdx,                       "an identifying number vector regarding which facial matrix may be used")
-    ("SEIGenerativeFaceVideoMatrix3DSpaceFlag",               cfg_generativeFaceVideoSEIMatrix3DSpaceFlag,              cfg_generativeFaceVideoSEIMatrix3DSpaceFlag,                   "an identifying number vector regarding which facial matrix may be in 3d space")
-    ("SEIGenerativeFaceVideoNumMatrices",                     cfg_generativeFaceVideoSEINumMatrices,                    cfg_generativeFaceVideoSEINumMatrices,                         "the number of matrices of the i-th matrix type")
-    ("SEIGenerativeFaceVideoMatrixWidth",                     cfg_generativeFaceVideoSEIMatrixWidth,                    cfg_generativeFaceVideoSEIMatrixWidth,                         "the width of matrices of the i-th matrix type")
-    ("SEIGenerativeFaceVideoMatrixHeight",                    cfg_generativeFaceVideoSEIMatrixHeight,                   cfg_generativeFaceVideoSEIMatrixHeight,                        "the height of matrices of the i-th matrix type")
-    ("SEIGenerativeFaceVideoMatrixElement",                   cfg_generativeFaceVideoSEIMatrixElement,                  cfg_generativeFaceVideoSEIMatrixElement,                       "the value of the matrix element at position (k, l) of the j-th matrix of the i-th matrix type. ")
-    ("SEIGenerativeFaceVideoMatrixPredFlag",                  cfg_generativeFaceVideoSEIMatrixPredFlag,                 cfg_generativeFaceVideoSEIMatrixPredFlag,                      "indicates whether to use difference operation for GFV matrix ")
-    ("SEIGenerativeFaceVideoNumMatricestoNumKpsFlag",         cfg_generativeFaceVideoSEINumMatricestoNumKpsFlag,        cfg_generativeFaceVideoSEINumMatricestoNumKpsFlag,             "indicates whether  the number of matrices of the i-th matrix type is equal to gfv_num_kps_minus1 + 1")
-    ("SEIGenerativeFaceVideoNumMatricesInfo",                 cfg_generativeFaceVideoSEINumMatricesInfo,                cfg_generativeFaceVideoSEINumMatricesInfo,                     "provides information to derive the number of the matrices of the i-th matrix type.")
-    ("SEIGenerativeFaceVideoPayloadFilename",                 m_generativeFaceVideoSEIPayloadFilename,                  std::string(""),                                               "specify path to payloadfile")
-    ("SEIGenerativeFaceVideoChromaKeyInfoPresentFlag",        m_generativeFaceVideoSEIChromaKeyInfoPresentFlag,         false,                                                         "Specifies the syntax elements gfv_chroma_key information")
-    ("SEIGenerativeFaceVideoChromaKeyPurposeIdc",             m_generativeFaceVideoSEIChromaKeyPurposeIdc,              0u,                                                            "specifies the chroma key purpose")
-    ("SEIGenerativeFaceVideoChromaKeyValuePresentFlag",       cfg_generativeFaceVideoSEIChromaKeyValuePresentFlag,      cfg_generativeFaceVideoSEIChromaKeyValuePresentFlag,           "indicates that the syntax element gfv_chroma_key_value[ c ] is present.")
-    ("SEIGenerativeFaceVideoChromaKeyValue",                  cfg_generativeFaceVideoSEIChromaKeyValue,                 cfg_generativeFaceVideoSEIChromaKeyValue,                      "specifies the chroma key value corresponding to the c-th colour component")
-    ("SEIGenerativeFaceVideoChromaKeyThrPresentFlag",         m_generativeFaceVideoSEIChromaKeyThrPresentFlag,          false,                                                         "indicates that the chroma key threshold syntax elements are present")
-    ("SEIGenerativeFaceVideoChromaKeyThrLower",               m_generativeFaceVideoSEIChromaKeyThrLower,                0u,                                                             "specifies the chroma key threshold lower value")
-    ("SEIGenerativeFaceVideoChromaKeyThrUpperDeltaMinus1",    m_generativeFaceVideoSEIChromaKeyThrUpperDeltaMinus1,     0u,                                                             "specifies the chroma key threshold upper value");
-  opts.addOptions()
-    ("SEIGenerativeFaceVideoEnhancementEnabled",                         m_generativeFaceVideoEnhancementEnabled,                             false,                                                               "Control use of the Generative Face Video Enhancement SEI on current picture")
-    ("SEIGenerativeFaceVideoEnhancementNumber",                          m_generativeFaceVideoEnhancementSEINumber,                           0u,                                                                  "Total number of Generative Face Video Enhancement SEI to be carried")  
-    ("SEIGenerativeFaceVideoEnhancementBasePicFlag",                     m_generativeFaceVideoEnhancementSEIBasePicFlag,                      false,                                                               "Specifies whether to indicates the current decoded output picture corresponds to a base picture")
-    ("SEIGenerativeFaceVideoEnhancementNNPresentFlag",                   m_generativeFaceVideoEnhancementSEINNPresentFlag,                    false,                                                               "indicates a neural network that may be used as a EnhancerNN( ) ")
-    ("SEIGenerativeFaceVideoEnhancementNNModeIdc",                       m_generativeFaceVideoEnhancementSEINNModeIdc,                        0u,                                                                  "specify a neural network that may be used as a EnhancerNN( )")
-    ("SEIGenerativeFaceVideoEnhancementNNTagURI",                        m_generativeFaceVideoEnhancementSEINNTagURI,                         std::string(""),                                                     "specify path to gfv_uri_tag")
-    ("SEIGenerativeFaceVideoEnhancementNNURI",                           m_generativeFaceVideoEnhancementSEINNURI,                            std::string(""),                                                     "specify path to gfv_uri")    
-    ("SEIGenerativeFaceVideoEnhancementId",                              cfg_generativeFaceVideoEnhancementSEIId,                             cfg_generativeFaceVideoEnhancementSEIId,                             "Target id of Generative Face Video Enhancement SEI on current picture")
-    ("SEIGenerativeFaceVideoEnhancementGFVCnt",                          cfg_generativeFaceVideoEnhancementSEIGFVCnt,                         cfg_generativeFaceVideoEnhancementSEIGFVCnt,                         "Target cnt of Generative Face Video Enhancement SEI on current picture")
-    ("SEIGenerativeFaceVideoEnhancementGFVId",                           cfg_generativeFaceVideoEnhancementSEIGFVId,                          cfg_generativeFaceVideoEnhancementSEIGFVId,                          "Target id of Generative Face Video Enhancement SEI on current picture")	  
-    ("SEIGenerativeFaceVideoEnhancementMatrixPredFlag",                  cfg_generativeFaceVideoEnhancementSEIMatrixPredFlag,                 cfg_generativeFaceVideoEnhancementSEIMatrixPredFlag,                 "indicates whether to use difference operation for GFVE matrix ")
-    ("SEIGenerativeFaceVideoEnhancementMatrixPresentFlag",               cfg_generativeFaceVideoEnhancementSEIMatrixPresentFlag,              cfg_generativeFaceVideoEnhancementSEIMatrixPresentFlag,              "Specifies whether to carry gfve matrix parameter ")  
-    ("SEIGenerativeFaceVideoEnhancementMatrixElementPrecisionFactor",    cfg_generativeFaceVideoEnhancementSEIMatrixElementPrecisionFactor,   cfg_generativeFaceVideoEnhancementSEIMatrixElementPrecisionFactor,   "Specifies the precision factor to process the facial matrix paramters (decimal part)")
-    ("SEIGenerativeFaceVideoEnhancementNumMatrices",                     cfg_generativeFaceVideoEnhancementSEINumMatrices,                    cfg_generativeFaceVideoEnhancementSEINumMatrices,                    "the number of matrices of the i-th matrix type")
-    ("SEIGenerativeFaceVideoEnhancementMatrixWidth",                     cfg_generativeFaceVideoEnhancementSEIMatrixWidth,                    cfg_generativeFaceVideoEnhancementSEIMatrixWidth,                    "the width of matrices of the i-th matrix type")
-    ("SEIGenerativeFaceVideoEnhancementMatrixHeight",                    cfg_generativeFaceVideoEnhancementSEIMatrixHeight,                   cfg_generativeFaceVideoEnhancementSEIMatrixHeight,                   "the height of matrices of the i-th matrix type")
-    ("SEIGenerativeFaceVideoEnhancementMatrixElement",                   cfg_generativeFaceVideoEnhancementSEIMatrixElement,                  cfg_generativeFaceVideoEnhancementSEIMatrixElement,                  "the value of the matrix element at position (k, l) of the j-th matrix of the i-th matrix type. ")
-    ("SEIGenerativeFaceVideoEnhancementPupilPresentIdx",                 cfg_generativeFaceVideoEnhancementSEIPupilPresentIdx,                cfg_generativeFaceVideoEnhancementSEIPupilPresentIdx,                "Indicate the pupil information for transmission")
-    ("SEIGenerativeFaceVideoEnhancementPupilCoordinatePrecisionFactor",  cfg_generativeFaceVideoEnhancementSEIPupilCoordinatePrecisionFactor, cfg_generativeFaceVideoEnhancementSEIPupilCoordinatePrecisionFactor, "the quantization precision factor of pupil coordinates")
-    ("SEIGenerativeFaceVideoEnhancementPupilLeftEyeCoordinateX",         cfg_generativeFaceVideoEnhancementSEIPupilLeftEyeCoordinateX,        cfg_generativeFaceVideoEnhancementSEIPupilLeftEyeCoordinateX,        "the X coordinate of the left eye pupil")
-    ("SEIGenerativeFaceVideoEnhancementPupilLeftEyeCoordinateY",         cfg_generativeFaceVideoEnhancementSEIPupilLeftEyeCoordinateY,        cfg_generativeFaceVideoEnhancementSEIPupilLeftEyeCoordinateY,        "the Y coordinate of the left eye pupil")
-    ("SEIGenerativeFaceVideoEnhancementPupilRightEyeCoordinateX",        cfg_generativeFaceVideoEnhancementSEIPupilRightEyeCoordinateX,       cfg_generativeFaceVideoEnhancementSEIPupilRightEyeCoordinateX,       "the X coordinate of the right eye pupil")
-    ("SEIGenerativeFaceVideoEnhancementPupilRightEyeCoordinateY",        cfg_generativeFaceVideoEnhancementSEIPupilRightEyeCoordinateY,       cfg_generativeFaceVideoEnhancementSEIPupilRightEyeCoordinateY,       "the Y coordinate of the right eye pupil")
-    ("SEIGenerativeFaceVideoEnhancementPayloadFilename",                 m_generativeFaceVideoEnhancementSEIPayloadFilename,                  std::string(""),                                                     "specify path to payloadfile") ;
-  
-  opts.addOptions()
-    ("SEIAUREnabled",                                         m_aurSEIEnabled,                                          false,                                                         "Control use of the AI usage restrictions SEI")
-    ("SEIAURCancelFlag",                                      m_aurSEICancelFlag,                                       false,                                                         "Specifies the persistence of any previous AI usage restrictions SEI message in output order")
-    ("SEIAURPersistenceFlag",                                 m_aurSEIPersistenceFlag,                                  false,                                                         "Specifies the persistence of the AI usage restrictions SEI message for the current layer.")
-    ("SEIAURNumRestrictionsMinus1",                           m_aurSEINumRestrictionsMinus1,                            0u,                                                            "plus one specifies the number of restriction")
-    ("SEIAURRestrictions",                                    cfg_aurSEIRestrictions,                                   cfg_aurSEIRestrictions,                                        "List of restrictions")
-    ("SEIAURContextPresentFlag",                              cfg_aurSEIContextPresentFlag,                             cfg_aurSEIContextPresentFlag,                                  "List of flags indicating whether aur_context syntax elements are present")
-    ("SEIAURContext",                                         cfg_aurSEIContext,                                        cfg_aurSEIContext,                                             "List of context")
-    ("SEIAURExclusionFlag",                                   cfg_aurSEIExclusionFlag,                                  cfg_aurSEIExclusionFlag,                                       "List of flags indicating whether NNPFC, NNPFA, GFV and GFVE SEI messages are excluded from AI usage restrictions");
-  // clang-format on
-
-#if EXTENSION_360_VIDEO
-  TExt360AppEncCfg::TExt360AppEncCfgContext ext360CfgContext;
-  m_ext360.addOptions(opts, ext360CfgContext);
-#endif
-
-  for(int i=1; i<MAX_GOP+1; i++)
-  {
-    std::ostringstream cOSS;
-    cOSS<<"Frame"<<i;
-    opts.addOptions()(cOSS.str(), m_GOPList[i-1], GOPEntry());
-  }
-
-  for(int i = 0; i < MAX_NUM_OLSS; i++)
-  {
-    std::ostringstream cOSS1;
-    cOSS1<<"LevelPTL"<<i;
-    opts.addOptions()(cOSS1.str(), m_levelPtl[i], Level::NONE);
-
-    std::ostringstream cOSS2;
-    cOSS2<<"OlsPTLIdx"<<i;
-    opts.addOptions()(cOSS2.str(), m_olsPtlIdx[i], 0);
-  }
-
-  opts.addOptions()("SEINNPFCEnabled",  m_nnPostFilterSEICharacteristicsEnabled, false, "Control generation of the Neural Network Post Filter Characteristics SEI messages");
-  opts.addOptions()("SEINNPFCUseSuffixSEI",  m_nnPostFilterSEICharacteristicsUseSuffixSEI, false, "Code NNPFC SEI either as suffix (1) or prefix (0) SEI message");
-  opts.addOptions()( "SEINNPFCNumFilters",                                      m_nnPostFilterSEICharacteristicsNumFilters,                                  0, "Specifies the number of Neural Network Post Filter Characteristics SEI messages" );
-  for (int i = 0; i < MAX_NUM_NN_POST_FILTERS; i++)
-  {
-    std::ostringstream id;
-    id << "SEINNPFCId" << i;
-    opts.addOptions()(id.str(), m_nnPostFilterSEICharacteristicsId[i], 0u, "Specifies the identifying number in the Neural Network Post Filter Characteristics SEI message");
-
-    std::ostringstream modeIdc;
-    modeIdc << "SEINNPFCModeIdc" << i;
-    opts.addOptions()(modeIdc.str(), m_nnPostFilterSEICharacteristicsModeIdc[i], 0u, "Specifies the Neural Network Post Filter IDC in the Neural Network Post Filter Characteristics SEI message");
-
-    std::ostringstream propertyPresentFlag;
-    propertyPresentFlag << "SEINNPFCPropertyPresentFlag" << i;
-    opts.addOptions()(propertyPresentFlag.str(), m_nnPostFilterSEICharacteristicsPropertyPresentFlag[i], false, "Specifies whether the filter purpose, input formatting, output formatting and complexity are present in the Neural Network Post Filter Characteristics SEI message");
-
-    std::ostringstream nnpfcBaseFlag;
-    nnpfcBaseFlag << "SEINNPFCBaseFlag" << i;
-    opts.addOptions()(nnpfcBaseFlag.str(), m_nnPostFilterSEICharacteristicsBaseFlag[i], false, "Specifies whether the filter is a base filter or not");
-
-    std::ostringstream purpose;
-    purpose << "SEINNPFCPurpose" << i;
-    opts.addOptions()(purpose.str(), m_nnPostFilterSEICharacteristicsPurpose[i], 0u, "Specifies the purpose in the Neural Network Post Filter Characteristics SEI message");
-
-    std::ostringstream outSubWidthCFlag;
-    outSubWidthCFlag << "SEINNPFCOutSubCFlag" << i;
-    opts.addOptions()(outSubWidthCFlag.str(), m_nnPostFilterSEICharacteristicsOutSubCFlag[i], false, "Specifies output chroma format when upsampling");
-
-    std::ostringstream outColourFormatIdc;
-    outColourFormatIdc << "SEINNPFCOutColourFormatIdc" << i;
-    opts.addOptions()(outColourFormatIdc.str(), m_nnPostFilterSEICharacteristicsOutColourFormatIdc[i], 1u, "Specifies output chroma format for colourization purpose");
-
-    std::ostringstream picWidthNum;
-    picWidthNum << "SEINNPFCPicWidthNumerator" << i;
-    opts.addOptions()(picWidthNum.str(), m_nnPostFilterSEICharacteristicsPicWidthNumerator[i], 1u,
-                      "Specifies the numerator of output picture width resulting from applying the Neural Network Post "
-                      "Filter Characteristics SEI message");
-
-    std::ostringstream picWidthDenom;
-    picWidthDenom << "SEINNPFCPicWidthDenominator" << i;
-    opts.addOptions()(picWidthDenom.str(), m_nnPostFilterSEICharacteristicsPicWidthDenominator[i], 1u,
-                      "Specifies the denominator of output picture width resulting from applying the Neural Network "
-                      "Post Filter Characteristics SEI message");
-
-    std::ostringstream picHeightNum;
-    picHeightNum << "SEINNPFCPicHeightNumerator" << i;
-    opts.addOptions()(picHeightNum.str(), m_nnPostFilterSEICharacteristicsPicHeightNumerator[i], 1u,
-                      "Specifies the numerator of output picture height resulting from applying the Neural Network "
-                      "Post Filter Characteristics SEI message");
-
-    std::ostringstream picHeightDenom;
-    picHeightDenom << "SEINNPFCPicWidthDenominator" << i;
-    opts.addOptions()(picHeightDenom.str(), m_nnPostFilterSEICharacteristicsPicHeightDenominator[i], 1u,
-                      "Specifies the denominator of output picture height resulting from applying the Neural Network "
-                      "Post Filter Characteristics SEI message");
-
-    std::ostringstream inpTensorBitDepthLumaMinus8;
-    inpTensorBitDepthLumaMinus8 << "SEINNPFCInpTensorBitDepthLumaMinusEight" << i;
-    opts.addOptions()(inpTensorBitDepthLumaMinus8.str(), m_nnPostFilterSEICharacteristicsInpTensorBitDepthLumaMinus8[i], 0u, "Specifies the bit depth of the input tensor luma minus 8 in the Neural Network Post Filter Characteristics SEI message");
-
-    std::ostringstream inpTensorBitDepthChromaMinus8;
-    inpTensorBitDepthChromaMinus8 << "SEINNPFCInpTensorBitDepthChromaMinusEight" << i;
-    opts.addOptions()(inpTensorBitDepthChromaMinus8.str(), m_nnPostFilterSEICharacteristicsInpTensorBitDepthChromaMinus8[i], 0u, "Specifies the bit depth of the input tensor chroma minus 8 in the Neural Network Post Filter Characteristics SEI message");
-
-    std::ostringstream outTensorBitDepthLumaMinus8;
-    outTensorBitDepthLumaMinus8 << "SEINNPFCOutTensorBitDepthLumaMinusEight" << i;
-    opts.addOptions()(outTensorBitDepthLumaMinus8.str(), m_nnPostFilterSEICharacteristicsOutTensorBitDepthLumaMinus8[i], 0u, "Specifies the bit depth of the output tensor luma minus 8 in the Neural Network Post Filter Characteristics SEI message");
-
-    std::ostringstream outTensorBitDepthChromaMinus8;
-    outTensorBitDepthChromaMinus8 << "SEINNPFCOutTensorBitDepthChromaMinusEight" << i;
-    opts.addOptions()(outTensorBitDepthChromaMinus8.str(), m_nnPostFilterSEICharacteristicsOutTensorBitDepthChromaMinus8[i], 0u, "Specifies the bit depth of the output tensor chroma minus 8 in the Neural Network Post Filter Characteristics SEI message");
-
-    std::ostringstream componentLastFlag;
-    componentLastFlag << "SEINNPFCComponentLastFlag" << i;
-    opts.addOptions()(componentLastFlag.str(), m_nnPostFilterSEICharacteristicsComponentLastFlag[i], false, "Specifies the channel component is located in the last dimension for the Neural Network Post Filter Characteristics SEI message");
-
-
-    std::ostringstream inpFormatIdc;
-    inpFormatIdc << "SEINNPFCInpFormatIdc" << i;
-    opts.addOptions()(inpFormatIdc.str(), m_nnPostFilterSEICharacteristicsInpFormatIdc[i], 0u, "Specifies the method of converting an input sample in the the Neural Network Post Filter Characteristics SEI message");
-    std::ostringstream auxInpIdc;
-    auxInpIdc << "SEINNPFCAuxInpIdc" << i;
-    opts.addOptions()(auxInpIdc.str(), m_nnPostFilterSEICharacteristicsAuxInpIdc[i], 0u, "Specifies the auxillary input index in the Nueral Network Post Filter Characteristics SEI message");
-
-    std::ostringstream sepColDescriptionFlag;
-    sepColDescriptionFlag << "SEINNPFCSepColDescriptionFlag" << i;
+  ("SEIPRIRegionTopLeftInUnitsY",       …10830 tokens truncated…NNPFCSepColDescriptionFlag" << i;
     opts.addOptions()(sepColDescriptionFlag.str(), m_nnPostFilterSEICharacteristicsSepColDescriptionFlag[i], false, "Specifies the presence of seperate color descriptions in the Nueral Network Post Filter Characteristics SEI message");
 
     std::ostringstream fullRangeFlag;
@@ -6703,3 +5844,221 @@ void EncAppCfg::xPrintParameter()
       const int   m = m_mtsMode + 4 * m_mtsImplicitIntra;
       if (m != 0)
       {
+        s = "(";
+        s += (m & 1) != 0 ? "explicit intra" : "implicit intra";
+        if (m & 2)
+        {
+          s += ", explicit inter";
+        }
+        s += ")";
+      }
+      msg(VERBOSE, "MTS:%d%s ", m != 0, s.c_str());
+    }
+    msg( VERBOSE, "SBT:%d ", m_SBT );
+    msg( VERBOSE, "ISP:%d ", m_ISP );
+    msg( VERBOSE, "SMVD:%d ", m_SMVD );
+    msg( VERBOSE, "CompositeLTReference:%d ", m_compositeRefEnabled);
+    msg( VERBOSE, "Bcw:%d ", m_bcw );
+    msg( VERBOSE, "BcwFast:%d ", m_BcwFast );
+    msg( VERBOSE, "LADF:%d ", m_LadfEnabed );
+    msg(VERBOSE, "CIIP:%d ", m_ciip);
+    msg( VERBOSE, "Geo:%d ", m_Geo );
+    m_allowDisFracMMVD = m_MMVD ? m_allowDisFracMMVD : false;
+    if ( m_MMVD )
+      msg(VERBOSE, "AllowDisFracMMVD:%d ", m_allowDisFracMMVD);
+    msg( VERBOSE, "AffineAmvr:%d ", m_AffineAmvr );
+    m_AffineAmvrEncOpt = m_AffineAmvr ? m_AffineAmvrEncOpt : false;
+    msg( VERBOSE, "AffineAmvrEncOpt:%d ", m_AffineAmvrEncOpt );
+    msg(VERBOSE, "AffineAmvp:%d ", m_AffineAmvp);
+    msg(VERBOSE, "DMVR:%d ", m_DMVR);
+    msg(VERBOSE, "MmvdDisNum:%d ", m_MmvdDisNum);
+    msg(VERBOSE, "JointCbCr:%d ", m_jointCbCrMode);
+  }
+  m_useColorTrans = m_chromaFormatIdc == ChromaFormat::_444 ? m_useColorTrans : false;
+  msg(VERBOSE, "ACT:%d ", m_useColorTrans ? 1 : 0);
+  msg(VERBOSE, "PLT:%d ", m_PLTMode);
+  msg(VERBOSE, "IBC:%d ", m_IBCMode);
+  msg( VERBOSE, "HashME:%d ", m_HashME );
+  msg( VERBOSE, "WrapAround:%d ", m_wrapAround);
+  if( m_wrapAround )
+  {
+    msg( VERBOSE, "WrapAroundOffset:%d ", m_wrapAroundOffset );
+  }
+  // ADD_NEW_TOOL (add some output indicating the usage of tools)
+  msg( VERBOSE, "VirtualBoundariesEnabledFlag:%d ", m_virtualBoundariesEnabledFlag );
+  msg( VERBOSE, "VirtualBoundariesPresentInSPSFlag:%d ", m_virtualBoundariesPresentFlag );
+  if( m_virtualBoundariesPresentFlag )
+  {
+    msg(VERBOSE, "vertical virtual boundaries:[");
+    for (unsigned i = 0; i < m_numVerVirtualBoundaries; i++)
+    {
+      msg(VERBOSE, " %d", m_virtualBoundariesPosX[i]);
+    }
+    msg(VERBOSE, " ] horizontal virtual boundaries:[");
+    for (unsigned i = 0; i < m_numHorVirtualBoundaries; i++)
+    {
+      msg(VERBOSE, " %d", m_virtualBoundariesPosY[i]);
+    }
+    msg(VERBOSE, " ] ");
+  }
+    msg(VERBOSE, "Reshape:%d ", m_lmcsEnabled);
+    if (m_lmcsEnabled)
+    {
+      msg(VERBOSE, "(Signal:%s ", m_reshapeSignalType == 0 ? "SDR" : (m_reshapeSignalType == 2 ? "HDR-HLG" : "HDR-PQ"));
+      msg(VERBOSE, "Opt:%d", m_adpOption);
+      if (m_adpOption > 0) { msg(VERBOSE, " CW:%d", m_initialCW); }
+      msg(VERBOSE, " CSoffset:%d", m_CSoffset);
+      msg(VERBOSE, ") ");
+    }
+    msg(VERBOSE, "MRL:%d ", m_MRL);
+    msg(VERBOSE, "MIP:%d ", m_MIP);
+    msg(VERBOSE, "EncDbOpt:%d ", m_encDbOpt);
+    msg(VERBOSE, "AlfLambdaOpt:%d ", m_encALFOpt);
+  msg( VERBOSE, "\nFAST TOOL CFG: " );
+  msg( VERBOSE, "LCTUFast:%d ", m_useFastLCTU );
+  msg( VERBOSE, "FastMrg:%d ", m_useFastMrg );
+  msg( VERBOSE, "MaxMergeRdCandNumTotal:%d MergeRdCandQuotaRegular:%d MergeRdCandQuotaRegularSmallBlk:%d ", 
+    m_maxMergeRdCandNumTotal, m_mergeRdCandQuotaRegular, m_mergeRdCandQuotaRegularSmallBlk);
+  msg( VERBOSE, "MergeRdCandQuotaSubBlk:%d MergeRdCandQuotaCiip:%d MergeRdCandQuotaGpm:%d ",
+    m_mergeRdCandQuotaSubBlk, m_mergeRdCandQuotaCiip, m_mergeRdCandQuotaGpm);
+  msg( VERBOSE, "PBIntraFast:%d ", m_usePbIntraFast );
+  if( m_ImvMode ) msg( VERBOSE, "IMV4PelFast:%d ", m_Imv4PelFast );
+  if (m_mtsMode)
+  {
+    msg(VERBOSE, "MTSMaxCand: %1d(intra) %1d(inter) ", m_MTSIntraMaxCand, m_MTSInterMaxCand);
+  }
+  if( m_ISP ) msg( VERBOSE, "ISPFast:%d ", m_useFastISP );
+  if( m_LFNST ) msg( VERBOSE, "FastLFNST:%d ", m_useFastLFNST );
+  msg( VERBOSE, "AMaxBT:%d ", m_useAMaxBT );
+  msg( VERBOSE, "E0023FastEnc:%d ", m_e0023FastEnc );
+  msg( VERBOSE, "ContentBasedFastQtbt:%d ", m_contentBasedFastQtbt );
+  msg( VERBOSE, "UseNonLinearAlfLuma:%d ", m_useNonLinearAlfLuma );
+  msg( VERBOSE, "UseNonLinearAlfChroma:%d ", m_useNonLinearAlfChroma );
+  msg( VERBOSE, "MaxNumAlfAlternativesChroma:%d ", m_maxNumAlfAlternativesChroma );
+  if( m_MIP ) msg(VERBOSE, "FastMIP:%d ", m_useFastMIP);
+  msg( VERBOSE, "TTFastSkip:%d ", m_ttFastSkip);
+  msg( VERBOSE, "TTFastSkipThr:%.3f ", m_ttFastSkipThr);
+  msg( VERBOSE, "FastLocalDualTree:%d ", m_fastLocalDualTreeMode );
+
+  if (m_resChangeInClvsEnabled)
+  {
+    if (m_gopBasedRPREnabledFlag || m_rprFunctionalityTestingEnabledFlag)
+    {
+      msg(VERBOSE, "RPR:(%1.2lfx, %1.2lfx)|%d ", m_scalingRatioHor, m_scalingRatioVer, m_rprFunctionalityTestingEnabledFlag ? m_rprSwitchingSegmentSize : m_gopSize);
+      msg(VERBOSE, "RPR2:(%1.2lfx, %1.2lfx)|%d ", m_scalingRatioHor2, m_scalingRatioVer2, m_rprFunctionalityTestingEnabledFlag ? m_rprSwitchingSegmentSize : m_gopSize);
+      msg(VERBOSE, "RPR3:(%1.2lfx, %1.2lfx)|%d ", m_scalingRatioHor3, m_scalingRatioVer3, m_rprFunctionalityTestingEnabledFlag ? m_rprSwitchingSegmentSize : m_gopSize);
+    }
+    else
+    {
+      msg(VERBOSE, "RPR:(%1.2lfx, %1.2lfx)|%d ", m_scalingRatioHor, m_scalingRatioVer, m_switchPocPeriod);
+    }
+  }
+  else
+  {
+    msg( VERBOSE, "RPR:%d ", 0 );
+  }
+  if (m_rplOfDepLayerInSh)
+  {
+    msg(VERBOSE, "RPLofDepLayerInSH:%d ", m_rplOfDepLayerInSh);
+  }
+  if (m_gopBasedTemporalFilterEnabled)
+  {
+    msg(VERBOSE, "TemporalFilter:%d/%d ", m_gopBasedTemporalFilterPastRefs, m_gopBasedTemporalFilterFutureRefs);
+  }
+  else
+  {
+    msg(VERBOSE, "TemporalFilter:disabled ");
+  }
+  msg(VERBOSE, "SEI CTI:%d ", m_ctiSEIEnabled);
+  msg(VERBOSE, "BIM:%d ", m_bimEnabled);
+  msg(VERBOSE, "SEI FGC:%d ", m_fgcSEIEnabled);
+
+  msg(VERBOSE, "SEI processing Order:%d ", m_poSEIEnabled);
+
+  msg(VERBOSE, "DPF:%d ", m_dpfEnabled);
+  if (m_dpfEnabled)
+  {
+    msg(VERBOSE, "DPFKeyLength:%d ", m_dpfKeyLen);
+    msg(VERBOSE, "DPFNonkeyLength:%d ", m_dpfNonkeyLen);
+  }
+
+#if EXTENSION_360_VIDEO
+  m_ext360.outputConfigurationSummary();
+#endif
+
+  if( m_constrainedRaslEncoding )
+  {
+    msg(VERBOSE, "\n\nWarning: with SEIConstrainedRASL enabled, LMChroma estimation is skipped in RASL frames" );
+    if( m_wrapAround )
+    {
+      msg(VERBOSE,   "\n         and wrap-around motion compensation is disabled in RASL frames" );
+    }
+  }
+
+  msg( VERBOSE, "\n\n");
+
+  msg( NOTICE, "\n");
+
+  fflush( stdout );
+}
+
+bool EncAppCfg::xHasNonZeroTemporalID ()
+{
+  for (unsigned int i = 0; i < m_gopSize; i++)
+  {
+    if ( m_GOPList[i].m_temporalId != 0 )
+    {
+      return true;
+    }
+  }
+  return false;
+}
+
+#if GREEN_METADATA_SEI_ENABLED
+bool EncAppCfg::getGMFAUsage() {
+  return m_GMFA;
+}
+
+std::string EncAppCfg::getGMFAFile (){
+  return m_GMFAFile;
+}
+
+#endif
+
+bool EncAppCfg::xHasLeadingPicture ()
+{
+  for (unsigned int i = 0; i < m_gopSize; i++)
+  {
+    for ( unsigned int j = 0; j < m_GOPList[i].m_numRefPics0; j++)
+    {
+      if ( m_GOPList[i].m_deltaRefPics0[j] < 0 )
+      {
+        return true;
+      }
+    }
+    for ( unsigned int j = 0; j < m_GOPList[i].m_numRefPics1; j++)
+    {
+      if ( m_GOPList[i].m_deltaRefPics1[j] < 0 )
+      {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+
+bool confirmPara(bool bflag, const char* message)
+{
+  if (!bflag)
+  {
+    return false;
+  }
+
+  msg( ERROR, "Error: %s\n",message);
+  return true;
+}
+
+
+
+//! \}

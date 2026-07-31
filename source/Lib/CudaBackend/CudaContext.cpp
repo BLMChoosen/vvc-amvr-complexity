@@ -1248,3 +1248,67 @@ bool CudaContext::computeDistortionBatch(const CudaDistortionBatchDesc &batch, s
 }
 
 std::uint64_t CudaContext::distortionBatchDispatchCount() const
+{
+#if VTM_ENABLE_CUDA
+  requireRuntime(m_impl.get());
+  return cuda_backend::distortionBatchDispatchCount(m_impl->runtime);
+#else
+  return 0;
+#endif
+}
+
+std::uint64_t CudaContext::distortionBatchFailureCount() const noexcept
+{
+#if VTM_ENABLE_CUDA
+  return m_impl->distortionFailures;
+#else
+  return 0;
+#endif
+}
+
+#if VTM_CUDA_TESTING
+void CudaContext::injectReleaseFailuresForTesting(const unsigned asyncFailures, const unsigned immediateFailures)
+{
+#if VTM_ENABLE_CUDA
+  requireRuntime(m_impl.get());
+  cuda_backend::injectReleaseFailures(m_impl->runtime, asyncFailures, immediateFailures);
+#else
+  (void) asyncFailures;
+  (void) immediateFailures;
+  throw std::runtime_error("CUDA release failure injection requires ENABLE_CUDA=ON");
+#endif
+}
+
+
+void CudaContext::injectDistortionFailuresForTesting(const unsigned allocationFailureStep,
+                                                      const unsigned executionFailures)
+{
+#if VTM_ENABLE_CUDA
+  requireRuntime(m_impl.get());
+  cuda_backend::injectDistortionFailures(m_impl->runtime, allocationFailureStep, executionFailures);
+#else
+  (void) allocationFailureStep;
+  (void) executionFailures;
+#endif
+}
+#endif
+
+bool CudaContext::isCreated() const noexcept
+{
+#if VTM_ENABLE_CUDA
+  return m_impl->runtime != nullptr;
+#else
+  return false;
+#endif
+}
+
+bool CudaContext::isCompiled() noexcept
+{
+#if VTM_ENABLE_CUDA
+  return true;
+#else
+  return false;
+#endif
+}
+
+}   // namespace vtm
