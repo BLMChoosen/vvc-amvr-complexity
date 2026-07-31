@@ -248,3 +248,41 @@ public:
   EncType                getEncType()          const { return m_encType; }
   void                   setEncType(EncType enctype) { m_encType = enctype; }
 #if JVET_O0756_CALCULATE_HDRMETRICS
+  std::chrono::duration<long long, std::ratio<1, 1000000000>> getMetricTime() const { return m_metricTime; };
+#endif
+  // -------------------------------------------------------------------------------------------------------------------
+  // encoder function
+  // -------------------------------------------------------------------------------------------------------------------
+
+  // encode several number of pictures until end-of-sequence
+  // snrCSC used for SNR calculations. Picture in original colour space.
+  bool encodePrep(bool flush, PelStorage *pcPicYuvOrg, const InputColourSpaceConversion snrCSC,
+                  std::list<PelUnitBuf *> &rcListPicYuvRecOut, int &numEncoded, PelStorage** ppcPicYuvRPR);
+
+  bool encode(const InputColourSpaceConversion snrCSC, std::list<PelUnitBuf *> &rcListPicYuvRecOut, int &numEncoded);
+
+  bool encodePrep(bool flush, PelStorage *pcPicYuvOrg, const InputColourSpaceConversion snrCSC, 
+    std::list<PelUnitBuf *> &rcListPicYuvRecOut, int &numEncoded,
+                  bool isTff);
+
+  bool encode(const InputColourSpaceConversion snrCSC, std::list<PelUnitBuf *> &rcListPicYuvRecOut, int &numEncoded,
+              bool isTff);
+
+  void applyNnPostFilter();
+
+  void printSummary(bool isField)
+  {
+    m_cGOPEncoder.printOutSummary(m_codedPicCount, isField, m_printMSEBasedSequencePSNR, m_printSequenceMSE,
+                                  m_printMSSSIM, m_printHexPsnr, (m_resChangeInClvsEnabled || m_refLayerRescaledAvailable),
+                                  m_spsMap.getFirstPS()->getBitDepths(), m_layerId);
+
+  }
+
+  int getLayerId() const { return m_layerId; }
+  VPS* getVPS()          { return m_vps;     }
+};
+
+//! \}
+
+#endif // __ENCTOP__
+
