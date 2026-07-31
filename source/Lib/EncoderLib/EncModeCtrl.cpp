@@ -1273,20 +1273,66 @@ void EncModeCtrlMTnoRQT::create( const EncCfg& cfg )
 #if GDR_ENABLED
   m_encCfg = cfg;
 #endif
+  try
+  {
   CacheBlkInfoCtrl::create(cfg.getCTUSize());
 #if REUSE_CU_RESULTS
   BestEncInfoCache::create( cfg.getChromaFormatIdc(), cfg.getCTUSize());
 #endif
   SaveLoadEncInfoSbt::create(cfg.getCTUSize());
+  }
+  catch (...)
+  {
+    try
+    {
+      destroy();
+    }
+    catch (...)
+    {
+    }
+    throw;
+  }
 }
 
 void EncModeCtrlMTnoRQT::destroy()
 {
-  CacheBlkInfoCtrl::destroy();
+  std::exception_ptr firstError;
+  try
+  {
+    CacheBlkInfoCtrl::destroy();
+  }
+  catch (...)
+  {
+    firstError = std::current_exception();
+  }
 #if REUSE_CU_RESULTS
-  BestEncInfoCache::destroy();
+  try
+  {
+    BestEncInfoCache::destroy();
+  }
+  catch (...)
+  {
+    if (!firstError)
+    {
+      firstError = std::current_exception();
+    }
+  }
 #endif
-  SaveLoadEncInfoSbt::destroy();
+  try
+  {
+    SaveLoadEncInfoSbt::destroy();
+  }
+  catch (...)
+  {
+    if (!firstError)
+    {
+      firstError = std::current_exception();
+    }
+  }
+  if (firstError)
+  {
+    std::rethrow_exception(firstError);
+  }
 }
 
 void EncModeCtrlMTnoRQT::initCTUEncoding( const Slice &slice )

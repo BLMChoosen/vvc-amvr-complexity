@@ -259,4 +259,49 @@ void releaseDevice(RuntimeContext *context, void *allocation, const CudaQueue qu
   checkCuda(cudaFreeAsync(allocation, context->streams[queueIndex(queue)]), "memory pool release");
 }
 
+void *allocatePinnedHost(const std::size_t bytes)
+{
+  if (bytes == 0)
+  {
+    throw std::runtime_error("CUDA pinned allocation size must be greater than zero");
+  }
+  void *allocation = nullptr;
+  checkCuda(cudaMallocHost(&allocation, bytes), "pinned host allocation");
+  return allocation;
+}
+
+void releasePinnedHost(void *allocation) noexcept
+{
+  if (allocation != nullptr)
+  {
+    (void) cudaFreeHost(allocation);
+  }
+}
+
+void copy2DToDeviceAsync(RuntimeContext *context, void *destination, const std::size_t destinationPitch,
+                         const void *source, const std::size_t sourcePitch, const std::size_t widthBytes,
+                         const std::size_t height, const CudaQueue queue)
+{
+  checkCuda(cudaSetDevice(context->device), "device selection");
+  checkCuda(cudaMemcpy2DAsync(destination, destinationPitch, source, sourcePitch, widthBytes, height,
+                              cudaMemcpyHostToDevice, context->streams[queueIndex(queue)]),
+            "two-dimensional upload");
+}
+
+void copy2DToHostAsync(RuntimeContext *context, void *destination, const std::size_t destinationPitch,
+                       const void *source, const std::size_t sourcePitch, const std::size_t widthBytes,
+                       const std::size_t height, const CudaQueue queue)
+{
+  checkCuda(cudaSetDevice(context->device), "device selection");
+  checkCuda(cudaMemcpy2DAsync(destination, destinationPitch, source, sourcePitch, widthBytes, height,
+                              cudaMemcpyDeviceToHost, context->streams[queueIndex(queue)]),
+            "two-dimensional download");
+}
+
+void synchronizeQueue(RuntimeContext *context, const CudaQueue queue)
+{
+  checkCuda(cudaSetDevice(context->device), "device selection");
+  checkCuda(cudaStreamSynchronize(context->streams[queueIndex(queue)]), "queue synchronization");
+}
+
 }   // namespace vtm::cuda_backend

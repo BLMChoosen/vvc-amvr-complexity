@@ -5,6 +5,7 @@ add_library( ${LIB_NAME} STATIC
   ComputeBackend.h
   CudaContext.cpp
   CudaContext.h
+  CudaPictureMirror.h
 )
 
 target_compile_features( ${LIB_NAME} PUBLIC cxx_std_17 )

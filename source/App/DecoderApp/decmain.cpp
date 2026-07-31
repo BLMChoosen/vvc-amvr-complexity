@@ -108,6 +108,11 @@ int main(int argc, char* argv[])
     std::cout << "Memory allocation failed: " << e.what() << std::endl;
     returnCode = EXIT_FAILURE;
   }
+  catch (const std::exception &e)
+  {
+    std::cerr << e.what() << std::endl;
+    returnCode = EXIT_FAILURE;
+  }
 #endif
 
 #ifdef __linux

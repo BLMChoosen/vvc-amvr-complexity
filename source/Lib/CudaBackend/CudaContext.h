@@ -34,6 +34,8 @@
 #ifndef VTM_CUDA_CONTEXT_H
 #define VTM_CUDA_CONTEXT_H
 
+#include "CudaPictureMirror.h"
+
 #include <memory>
 #include <cstddef>
 
@@ -52,6 +54,30 @@ enum class CudaFence
   UploadComplete,
   ComputeComplete,
   DownloadComplete
+};
+
+class CudaPinnedBuffer
+{
+public:
+  CudaPinnedBuffer();
+  explicit CudaPinnedBuffer(std::size_t bytes);
+  ~CudaPinnedBuffer() noexcept;
+
+  CudaPinnedBuffer(const CudaPinnedBuffer &) = delete;
+  CudaPinnedBuffer &operator=(const CudaPinnedBuffer &) = delete;
+  CudaPinnedBuffer(CudaPinnedBuffer &&other) noexcept;
+  CudaPinnedBuffer &operator=(CudaPinnedBuffer &&other) noexcept;
+
+  void allocate(std::size_t bytes);
+  void reset() noexcept;
+  void *data() noexcept;
+  const void *data() const noexcept;
+  std::size_t size() const noexcept;
+  explicit operator bool() const noexcept;
+
+private:
+  struct Impl;
+  std::unique_ptr<Impl> m_impl;
 };
 
 class CudaContext
@@ -76,6 +102,21 @@ public:
   void  waitFence(CudaQueue queue, CudaFence fence);
   void *allocateDevice(std::size_t bytes, CudaQueue queue = CudaQueue::Compute);
   void  releaseDevice(void *allocation, CudaQueue queue = CudaQueue::Compute);
+
+  CudaMirrorHandle registerPictureMirror(const void *owner, CudaPictureRole role,
+                                         const CudaHostPictureDesc &picture);
+  void releasePictureMirror(CudaMirrorHandle handle);
+  void releasePictureMirrors(const void *owner);
+  void releaseAllPictureMirrors();
+  bool hasPictureMirror(const void *owner, CudaPictureRole role) const;
+  CudaMirrorHandle pictureMirrorHandle(const void *owner, CudaPictureRole role) const;
+  std::size_t pictureMirrorCount() const noexcept;
+  CudaMirrorState pictureMirrorState(CudaMirrorHandle handle) const;
+  CudaDevicePictureDesc devicePicture(CudaMirrorHandle handle) const;
+  void markHostModified(CudaMirrorHandle handle);
+  void markDeviceModified(CudaMirrorHandle handle);
+  void ensureDevice(CudaMirrorHandle handle);
+  void ensureHost(CudaMirrorHandle handle);
 
   bool isCreated() const noexcept;
   static bool isCompiled() noexcept;

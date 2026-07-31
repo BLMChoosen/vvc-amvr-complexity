@@ -51,6 +51,15 @@ void recordFence(RuntimeContext *context, CudaQueue queue, CudaFence fence);
 void waitFence(RuntimeContext *context, CudaQueue queue, CudaFence fence);
 void *allocateDevice(RuntimeContext *context, std::size_t bytes, CudaQueue queue);
 void releaseDevice(RuntimeContext *context, void *allocation, CudaQueue queue);
+void *allocatePinnedHost(std::size_t bytes);
+void releasePinnedHost(void *allocation) noexcept;
+void copy2DToDeviceAsync(RuntimeContext *context, void *destination, std::size_t destinationPitch,
+                         const void *source, std::size_t sourcePitch, std::size_t widthBytes,
+                         std::size_t height, CudaQueue queue);
+void copy2DToHostAsync(RuntimeContext *context, void *destination, std::size_t destinationPitch,
+                       const void *source, std::size_t sourcePitch, std::size_t widthBytes,
+                       std::size_t height, CudaQueue queue);
+void synchronizeQueue(RuntimeContext *context, CudaQueue queue);
 
 }   // namespace vtm::cuda_backend
 
