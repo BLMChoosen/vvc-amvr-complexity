@@ -39,6 +39,7 @@
 #include "EncLibCommon.h"
 #include "CudaBackend/ComputeBackend.h"
 #include "CudaBackend/CudaContext.h"
+#include "CudaBackend/CudaDistortion.h"
 
 struct EncLibCommon::ComputeState
 {
@@ -145,4 +146,37 @@ void EncLibCommon::releasePictureMirrors(const void *owner)
   {
     m_computeState->cudaContext.releasePictureMirrors(owner);
   }
+}
+
+bool EncLibCommon::computeSadBatch(const void *sourceOwner, const void *source, const void *referenceOwner,
+                                   const vtm::CudaDistortionCandidateDesc *candidates,
+                                   const std::uint32_t candidateCount, const std::uint32_t width,
+                                   const std::uint32_t height, const std::uint8_t elementSize,
+                                   const std::uint8_t bitDepth, const std::uint8_t subShift,
+                                   std::uint64_t *results)
+{
+  if (!m_computeState->cudaContext.isCreated()
+      || !m_computeState->cudaContext.hasPictureMirror(sourceOwner, vtm::CudaPictureRole::Original)
+      || !m_computeState->cudaContext.hasPictureMirror(referenceOwner, vtm::CudaPictureRole::Reconstruction))
+  {
+    return false;
+  }
+
+  vtm::CudaDistortionBatchDesc batch{};
+  batch.sourceMirror = m_computeState->cudaContext.pictureMirrorHandle(sourceOwner, vtm::CudaPictureRole::Original);
+  batch.referenceMirror =
+    m_computeState->cudaContext.pictureMirrorHandle(referenceOwner, vtm::CudaPictureRole::Reconstruction);
+  batch.source = source;
+  batch.candidates = candidates;
+  batch.candidateCount = candidateCount;
+  batch.width = width;
+  batch.height = height;
+  batch.sourcePlane = 0;
+  batch.referencePlane = 0;
+  batch.elementSize = elementSize;
+  batch.bitDepth = bitDepth;
+  batch.subShift = subShift;
+  batch.metric = vtm::CudaDistortionMetric::Sad;
+  m_computeState->cudaContext.computeDistortionBatch(batch, results);
+  return true;
 }

@@ -49,6 +49,8 @@
 
 #include "EncModeCtrl.h"
 #include "EncLib.h"
+#include "EncLibCommon.h"
+#include "CudaBackend/CudaDistortion.h"
 
 #include <math.h>
 #include <limits>
@@ -87,6 +89,7 @@ InterSearch::InterSearch()
   , m_pSplitCS(nullptr)
   , m_pFullCS(nullptr)
   , m_pcEncCfg(nullptr)
+  , m_encLibCommon(nullptr)
   , m_pcTrQuant(nullptr)
   , m_pcReshape(nullptr)
   , m_searchRange(0)
@@ -196,11 +199,13 @@ InterSearch::~InterSearch()
 void InterSearch::init(EncCfg *pcEncCfg, TrQuant *pcTrQuant, int searchRange, int bipredSearchRange,
                        MESearchMethod motionEstimationSearchMethod, bool useCompositeRef, const uint32_t maxCUWidth,
                        const uint32_t maxCUHeight, const uint32_t maxTotalCUDepth, RdCost *pcRdCost,
-                       CABACWriter *CABACEstimator, CtxPool *ctxPool, EncReshape *pcReshape)
+                       CABACWriter *CABACEstimator, CtxPool *ctxPool, EncReshape *pcReshape,
+                       EncLibCommon *encLibCommon)
 {
   CHECK(m_isInitialized, "Already initialized");
   m_defaultCachedBvs.clear();
   m_pcEncCfg                     = pcEncCfg;
+  m_encLibCommon                 = encLibCommon;
   m_pcTrQuant                    = pcTrQuant;
   m_searchRange                  = searchRange;
   m_bipredSearchRange            = bipredSearchRange;
@@ -5078,7 +5083,7 @@ void InterSearch::xMotionEstimation(PredictionUnit &pu, PelUnitBuf &origBuf, Ref
       xSetSearchRange(pu, bestInitMv, iSrchRng, cStruct.searchRange, cStruct);
 #endif
     }
-    xPatternSearch( cStruct, rcMv, ruiCost);
+    xPatternSearch(pu, eRefPicList, refIdxPred, wrap, cStruct, rcMv, ruiCost);
   }
   else if( bQTBTMV2 )
   {
@@ -5281,9 +5286,8 @@ void InterSearch::xSetSearchRange(const PredictionUnit &pu, const Mv &cMvPred, c
 }
 
 
-void InterSearch::xPatternSearch( IntTZSearchStruct&    cStruct,
-                                  Mv&            rcMv,
-                                  Distortion&    ruiSAD )
+void InterSearch::xPatternSearch(const PredictionUnit &pu, const RefPicList refPicList, const int refIdx,
+                                 const bool wrap, IntTZSearchStruct &cStruct, Mv &rcMv, Distortion &ruiSAD)
 {
   Distortion  uiSad;
   Distortion  uiSadBest = std::numeric_limits<Distortion>::max();
@@ -5294,6 +5298,66 @@ void InterSearch::xPatternSearch( IntTZSearchStruct&    cStruct,
   m_pcRdCost->setDistParam( m_cDistParam, *cStruct.pcPatternKey, cStruct.piRefY, cStruct.iRefStride, m_lumaClpRng.bd, COMPONENT_Y, cStruct.subShiftMode );
 
   const SearchRange& sr = cStruct.searchRange;
+
+  const std::uint64_t searchWidth = static_cast<std::uint64_t>(sr.right - sr.left + 1);
+  const std::uint64_t searchHeight = static_cast<std::uint64_t>(sr.bottom - sr.top + 1);
+  const std::uint64_t candidateCount64 = searchWidth * searchHeight;
+  const std::uint64_t sampledRows = static_cast<std::uint64_t>(cStruct.pcPatternKey->height) >> m_cDistParam.subShift;
+  constexpr std::uint64_t minCudaCandidates = 64;
+  constexpr std::uint64_t minCudaSampleComparisons = 65536;
+  const bool cudaEligible = m_encLibCommon != nullptr && !wrap && !m_cDistParam.isBiPred
+                            && !m_cDistParam.applyWeight && !m_cDistParam.useMR && m_cDistParam.step == 1
+                            && m_cDistParam.subShift >= 0 && m_cDistParam.subShift <= 4
+                            && (cStruct.pcPatternKey->height % (1 << m_cDistParam.subShift)) == 0
+                            && candidateCount64 >= minCudaCandidates
+                            && candidateCount64 <= std::numeric_limits<std::uint32_t>::max()
+                            && candidateCount64 * cStruct.pcPatternKey->width * sampledRows
+                                 >= minCudaSampleComparisons;
+
+  if (cudaEligible)
+  {
+    const std::uint32_t candidateCount = static_cast<std::uint32_t>(candidateCount64);
+    std::vector<vtm::CudaDistortionCandidateDesc> candidates(candidateCount);
+    std::vector<std::uint64_t> distortions(candidateCount);
+    std::size_t index = 0;
+    const Pel *referenceRow = cStruct.piRefY + sr.top * cStruct.iRefStride;
+    for (int y = sr.top; y <= sr.bottom; ++y)
+    {
+      for (int x = sr.left; x <= sr.right; ++x)
+      {
+        candidates[index++].reference = referenceRow + x;
+      }
+      referenceRow += cStruct.iRefStride;
+    }
+
+    Picture *referencePicture = pu.cu->slice->getRefPic(refPicList, refIdx);
+    if (m_encLibCommon->computeSadBatch(pu.cs->picture, cStruct.pcPatternKey->buf, referencePicture,
+                                        candidates.data(), candidateCount, cStruct.pcPatternKey->width,
+                                        cStruct.pcPatternKey->height, sizeof(Pel), m_lumaClpRng.bd,
+                                        static_cast<std::uint8_t>(m_cDistParam.subShift), distortions.data()))
+    {
+      index = 0;
+      for (int y = sr.top; y <= sr.bottom; ++y)
+      {
+        for (int x = sr.left; x <= sr.right; ++x, ++index)
+        {
+          uiSad = distortions[index] + m_pcRdCost->getCostOfVectorWithPredictor(x, y, cStruct.imvShift);
+          // Strict comparison intentionally preserves VTM's first-candidate tie breaking.
+          if (uiSad < uiSadBest)
+          {
+            uiSadBest = uiSad;
+            iBestX = x;
+            iBestY = y;
+          }
+        }
+      }
+      m_cDistParam.maximumDistortionForEarlyExit = uiSadBest;
+      rcMv.set(iBestX, iBestY);
+      cStruct.uiBestSad = uiSadBest;
+      ruiSAD = uiSadBest - m_pcRdCost->getCostOfVectorWithPredictor(iBestX, iBestY, cStruct.imvShift);
+      return;
+    }
+  }
 
   const Pel* piRef = cStruct.piRefY + (sr.top * cStruct.iRefStride);
   for ( int y = sr.top; y <= sr.bottom; y++ )

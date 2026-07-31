@@ -70,6 +70,7 @@ struct BlkRecord
   std::unordered_map<Mv, Distortion> bvRecord;
 };
 class EncModeCtrl;
+class EncLibCommon;
 
 struct AffineMVInfo
 {
@@ -148,6 +149,7 @@ private:
 protected:
   // interface to option
   EncCfg*         m_pcEncCfg;
+  EncLibCommon*   m_encLibCommon;
 
   // interface to classes
   TrQuant*        m_pcTrQuant;
@@ -197,7 +199,7 @@ public:
   void init(EncCfg *pcEncCfg, TrQuant *pcTrQuant, int searchRange, int bipredSearchRange,
             MESearchMethod motionEstimationSearchMethod, bool useCompositeRef, const uint32_t maxCUWidth,
             const uint32_t maxCUHeight, const uint32_t maxTotalCUDepth, RdCost *pcRdCost, CABACWriter *CABACEstimator,
-            CtxPool *ctxPool, EncReshape *m_pcReshape);
+            CtxPool *ctxPool, EncReshape *m_pcReshape, EncLibCommon *encLibCommon);
 
   void destroy                      ();
 
@@ -495,10 +497,13 @@ protected:
   void xPatternSearchFast(const PredictionUnit &pu, RefPicList eRefPicList, int refIdxPred, IntTZSearchStruct &cStruct,
                           Mv &rcMv, Distortion &ruiSAD, const Mv *const pIntegerMv2Nx2NPred);
 
-  void xPatternSearch             ( IntTZSearchStruct&    cStruct,
+  void xPatternSearch             ( const PredictionUnit& pu,
+                                    RefPicList            refPicList,
+                                    int                   refIdx,
+                                    bool                  wrap,
+                                    IntTZSearchStruct&    cStruct,
                                     Mv&                   rcMv,
-                                    Distortion&           ruiSAD
-                                  );
+                                    Distortion&           ruiSAD );
 
   void xPatternSearchIntRefine(PredictionUnit &pu, IntTZSearchStruct &cStruct, Mv &rcMv, Mv &rcMvPred, int &riMVPIdx,
                                uint32_t &ruiBits, Distortion &ruiCost, const AMVPInfo &amvpInfo, double fWeight

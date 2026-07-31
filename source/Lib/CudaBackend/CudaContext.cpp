@@ -290,6 +290,49 @@ PictureMirror &findMirror(ContextImpl *impl, const CudaMirrorHandle handle)
   return *found->second;
 }
 
+const void *mapHostBlock(const PictureMirror &mirror, const std::uint8_t planeIndex, const void *hostPointer,
+                         const std::uint32_t width, const std::uint32_t height)
+{
+  if (planeIndex >= mirror.host.planeCount || hostPointer == nullptr || width == 0 || height == 0)
+  {
+    throw std::runtime_error("CUDA distortion block descriptor is invalid");
+  }
+
+  const CudaHostPlaneDesc &host = mirror.host.planes[planeIndex];
+  const auto activeAddress = reinterpret_cast<std::uintptr_t>(host.data);
+  const std::size_t activePrefix = static_cast<std::size_t>(host.marginTop) * host.strideBytes
+                                   + static_cast<std::size_t>(host.marginLeft) * host.elementSize;
+  if (activePrefix > activeAddress)
+  {
+    throw std::runtime_error("CUDA distortion mirror host address underflows");
+  }
+  const std::uintptr_t baseAddress = activeAddress - activePrefix;
+  const std::uintptr_t pointerAddress = reinterpret_cast<std::uintptr_t>(hostPointer);
+  if (pointerAddress < baseAddress)
+  {
+    throw std::runtime_error("CUDA distortion block starts before its registered mirror");
+  }
+
+  const std::size_t offset = static_cast<std::size_t>(pointerAddress - baseAddress);
+  const std::size_t row = offset / static_cast<std::size_t>(host.strideBytes);
+  const std::size_t columnBytes = offset % static_cast<std::size_t>(host.strideBytes);
+  if (columnBytes % host.elementSize != 0)
+  {
+    throw std::runtime_error("CUDA distortion block is not sample aligned");
+  }
+  const std::size_t column = columnBytes / host.elementSize;
+  const std::size_t fullWidth = static_cast<std::size_t>(host.marginLeft) + host.width + host.marginRight;
+  const std::size_t fullHeight = static_cast<std::size_t>(host.marginTop) + host.height + host.marginBottom;
+  if (row >= fullHeight || height > fullHeight - row || column >= fullWidth || width > fullWidth - column)
+  {
+    throw std::runtime_error("CUDA distortion block exceeds its registered mirror");
+  }
+
+  const CudaDevicePlaneDesc &device = mirror.device.planes[planeIndex];
+  const auto *deviceBase = static_cast<const unsigned char *>(mirror.deviceBases[planeIndex]);
+  return deviceBase + row * device.pitchBytes + column * host.elementSize;
+}
+
 unsigned char *hostBase(const CudaHostPlaneDesc &plane)
 {
   auto *active = static_cast<unsigned char *>(plane.data);
@@ -1107,6 +1150,74 @@ void CudaContext::ensureHost(const CudaMirrorHandle handle)
 #else
   (void) handle;
   throw std::runtime_error("CUDA picture mirror requested, but this binary was built with ENABLE_CUDA=OFF");
+#endif
+}
+
+void CudaContext::computeDistortionBatch(const CudaDistortionBatchDesc &batch, std::uint64_t *results)
+{
+#if VTM_ENABLE_CUDA
+  requireRuntime(m_impl.get());
+  if (results == nullptr || batch.candidates == nullptr || batch.candidateCount == 0)
+  {
+    throw std::runtime_error("CUDA distortion batch requires candidates and result storage");
+  }
+  if (batch.metric != CudaDistortionMetric::Sad)
+  {
+    throw std::runtime_error("CUDA distortion metric is not implemented");
+  }
+  if ((batch.elementSize != 2 && batch.elementSize != 4) || (batch.bitDepth != 8 && batch.bitDepth != 10))
+  {
+    throw std::runtime_error("CUDA SAD supports 16-bit or 32-bit Pel storage at 8-bit or 10-bit depth");
+  }
+  if (batch.subShift > 4 || batch.height == 0 || (batch.height % (1u << batch.subShift)) != 0)
+  {
+    throw std::runtime_error("CUDA SAD vertical subsampling is invalid for this block height");
+  }
+
+  ensureDevice(batch.sourceMirror);
+  if (batch.referenceMirror != batch.sourceMirror)
+  {
+    ensureDevice(batch.referenceMirror);
+  }
+  PictureMirror &sourceMirror = findMirror(m_impl.get(), batch.sourceMirror);
+  PictureMirror &referenceMirror = findMirror(m_impl.get(), batch.referenceMirror);
+  if (batch.sourcePlane >= sourceMirror.host.planeCount || batch.referencePlane >= referenceMirror.host.planeCount)
+  {
+    throw std::runtime_error("CUDA distortion plane index is invalid");
+  }
+  const CudaHostPlaneDesc &sourcePlane = sourceMirror.host.planes[batch.sourcePlane];
+  const CudaHostPlaneDesc &referencePlane = referenceMirror.host.planes[batch.referencePlane];
+  if (sourcePlane.elementSize != batch.elementSize || referencePlane.elementSize != batch.elementSize
+      || sourcePlane.bitDepth != batch.bitDepth || referencePlane.bitDepth != batch.bitDepth)
+  {
+    throw std::runtime_error("CUDA distortion batch does not match its picture mirror sample format");
+  }
+
+  const void *sourceDevice = mapHostBlock(sourceMirror, batch.sourcePlane, batch.source, batch.width, batch.height);
+  std::vector<const void *> referenceDevices(batch.candidateCount);
+  for (std::size_t index = 0; index < referenceDevices.size(); ++index)
+  {
+    referenceDevices[index] = mapHostBlock(referenceMirror, batch.referencePlane,
+                                           batch.candidates[index].reference, batch.width, batch.height);
+  }
+  cuda_backend::computeDistortionBatch(m_impl->runtime, batch, sourceDevice,
+                                       sourceMirror.device.planes[batch.sourcePlane].pitchBytes,
+                                       referenceDevices.data(),
+                                       referenceMirror.device.planes[batch.referencePlane].pitchBytes, results);
+#else
+  (void) batch;
+  (void) results;
+  throw std::runtime_error("CUDA distortion requested, but this binary was built with ENABLE_CUDA=OFF");
+#endif
+}
+
+std::uint64_t CudaContext::distortionBatchDispatchCount() const
+{
+#if VTM_ENABLE_CUDA
+  requireRuntime(m_impl.get());
+  return cuda_backend::distortionBatchDispatchCount(m_impl->runtime);
+#else
+  return 0;
 #endif
 }
 

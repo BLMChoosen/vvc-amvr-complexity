@@ -35,6 +35,7 @@
 #define VTM_CUDA_CONTEXT_H
 
 #include "CudaPictureMirror.h"
+#include "CudaDistortion.h"
 
 #include <memory>
 #include <cstddef>
@@ -120,6 +121,8 @@ public:
   void ensureDevice(CudaMirrorHandle handle);
   // Future GPU writers must call ensureHost before any CPU-side hash, YUV writer, or other host consumer.
   void ensureHost(CudaMirrorHandle handle);
+  void computeDistortionBatch(const CudaDistortionBatchDesc &batch, std::uint64_t *results);
+  std::uint64_t distortionBatchDispatchCount() const;
 #if VTM_CUDA_TESTING
   void injectReleaseFailuresForTesting(unsigned asyncFailures, unsigned immediateFailures);
 #endif

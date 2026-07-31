@@ -617,7 +617,7 @@ void EncLib::init(AUWriterIf *auWriterIf)
                       floorLog2(m_maxCUWidth) - m_log2MinCUSize, &m_cReshaper, sps0.getBitDepth(ChannelType::LUMA));
   m_cInterSearch.init(this, &m_cTrQuant, m_searchRange, m_bipredSearchRange, m_motionEstimationSearchMethod,
                       getUseCompositeRef(), m_maxCUWidth, m_maxCUHeight, floorLog2(m_maxCUWidth) - m_log2MinCUSize,
-                      &m_cRdCost, cabacEstimator, getCtxCache(), &m_cReshaper);
+                      &m_cRdCost, cabacEstimator, getCtxCache(), &m_cReshaper, m_encLibCommon);
 
   // link temporary buffets from intra search with inter search to avoid unneccessary memory overhead
   m_cInterSearch.setTempBuffers( m_cIntraSearch.getSplitCSBuf(), m_cIntraSearch.getFullCSBuf(), m_cIntraSearch.getSaveCSBuf() );
