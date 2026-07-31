@@ -511,7 +511,8 @@ void computeDistortionBatch(RuntimeContext *context, const CudaDistortionBatchDe
             "distortion candidate upload");
 
   constexpr unsigned threads = 256;
-  const std::uint8_t distortionShift = batch.bitDepth > 8 ? static_cast<std::uint8_t>(batch.bitDepth - 8) : 0;
+  // VTM 24 builds use FULL_NBIT=1 for both Pel configurations, so SAD retains all source precision.
+  constexpr std::uint8_t distortionShift = 0;
   if (batch.elementSize == 2)
   {
     sadBatchKernel<std::int16_t><<<batch.candidateCount, threads, 0, stream>>>(

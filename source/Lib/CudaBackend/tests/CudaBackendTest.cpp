@@ -36,6 +36,7 @@
 
 #include <cstdlib>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <functional>
@@ -66,6 +67,52 @@ bool throws(const std::function<void()> &operation)
     return true;
   }
   return false;
+}
+
+std::int32_t readSample(const void *address, const std::uint8_t elementSize)
+{
+  if (elementSize == 2)
+  {
+    std::int16_t value = 0;
+    std::memcpy(&value, address, sizeof(value));
+    return value;
+  }
+  std::int32_t value = 0;
+  std::memcpy(&value, address, sizeof(value));
+  return value;
+}
+
+void writeSample(void *address, const std::uint8_t elementSize, const std::int32_t value)
+{
+  if (elementSize == 2)
+  {
+    const std::int16_t stored = static_cast<std::int16_t>(value);
+    std::memcpy(address, &stored, sizeof(stored));
+    return;
+  }
+  std::memcpy(address, &value, sizeof(value));
+}
+
+std::uint64_t referenceSad(const void *source, const std::ptrdiff_t sourceStrideBytes, const void *reference,
+                           const std::ptrdiff_t referenceStrideBytes, const std::uint32_t width,
+                           const std::uint32_t height, const std::uint8_t elementSize,
+                           const std::uint8_t bitDepth, const std::uint8_t subShift)
+{
+  std::uint64_t sum = 0;
+  const std::uint32_t step = 1u << subShift;
+  for (std::uint32_t y = 0; y < height; y += step)
+  {
+    const auto *sourceRow = static_cast<const std::uint8_t *>(source) + y * sourceStrideBytes;
+    const auto *referenceRow = static_cast<const std::uint8_t *>(reference) + y * referenceStrideBytes;
+    for (std::uint32_t x = 0; x < width; ++x)
+    {
+      const std::int32_t difference = readSample(sourceRow + x * elementSize, elementSize)
+                                      - readSample(referenceRow + x * elementSize, elementSize);
+      sum += static_cast<std::uint64_t>(difference < 0 ? -difference : difference);
+    }
+  }
+  (void) bitDepth;
+  return sum << subShift;
 }
 
 struct TestPicture
@@ -143,7 +190,233 @@ struct TestPicture
     }
     return true;
   }
+
+
+  void fillSamples(const std::uint8_t salt)
+  {
+    for (std::size_t planeIndex = 0; planeIndex < planes.size(); ++planeIndex)
+    {
+      Plane &plane = planes[planeIndex];
+      const vtm::CudaHostPlaneDesc &description = descriptor.planes[planeIndex];
+      const std::uint32_t maximum = (1u << description.bitDepth) - 1;
+      const std::size_t sampleCount = plane.rowBytes / description.elementSize;
+      for (std::size_t row = 0; row < plane.fullHeight; ++row)
+      {
+        for (std::size_t column = 0; column < sampleCount; ++column)
+        {
+          std::uint32_t value = static_cast<std::uint32_t>(row * 131 + column * 47 + planeIndex * 29 + salt);
+          value &= maximum;
+          if ((row + column) % 19 == 0)
+          {
+            value = 0;
+          }
+          else if ((row * 3 + column) % 23 == 0)
+          {
+            value = maximum;
+          }
+          writeSample(plane.storage.data() + row * plane.stride + column * description.elementSize,
+                      description.elementSize, static_cast<std::int32_t>(value));
+        }
+      }
+      plane.expected = plane.storage;
+    }
+  }
 };
+
+bool runSadBatchCase(vtm::CudaContext &context, const std::uint8_t elementSize, const std::uint8_t bitDepth,
+                     const std::uint32_t blockWidth, const std::uint32_t blockHeight,
+                     const std::uint8_t subShift)
+{
+  TestPicture source(96, 80, elementSize, bitDepth, 3);
+  TestPicture reference(96, 80, elementSize, bitDepth, 71);
+  source.fillSamples(3);
+  reference.fillSamples(71);
+  int sourceOwner = 0;
+  int referenceOwner = 0;
+  const vtm::CudaMirrorHandle sourceMirror = context.registerPictureMirror(
+    &sourceOwner, vtm::CudaPictureRole::Original, source.descriptor);
+  const vtm::CudaMirrorHandle referenceMirror = context.registerPictureMirror(
+    &referenceOwner, vtm::CudaPictureRole::Reconstruction, reference.descriptor);
+
+  const auto &sourcePlane = source.descriptor.planes[0];
+  const auto &referencePlane = reference.descriptor.planes[0];
+  const auto *sourceBlock = static_cast<const std::uint8_t *>(sourcePlane.data)
+                            + 5 * sourcePlane.strideBytes + 7 * elementSize;
+  std::vector<vtm::CudaDistortionCandidateDesc> candidates(66);
+  std::size_t index = 0;
+  for (std::uint32_t y = 0; y < 8; ++y)
+  {
+    for (std::uint32_t x = 0; x < 8; ++x)
+    {
+      candidates[index++].reference = static_cast<const std::uint8_t *>(referencePlane.data)
+                                      + y * referencePlane.strideBytes + x * elementSize;
+    }
+  }
+  candidates[63].reference = static_cast<const std::uint8_t *>(referencePlane.data)
+                             - referencePlane.marginTop * referencePlane.strideBytes
+                             - referencePlane.marginLeft * elementSize;
+  // Duplicate candidates prove stable result ordering and first-candidate tie behavior independently of the kernel.
+  candidates[64] = candidates[0];
+  candidates[65] = candidates[0];
+
+  vtm::CudaDistortionBatchDesc batch{};
+  batch.sourceMirror = sourceMirror;
+  batch.referenceMirror = referenceMirror;
+  batch.source = sourceBlock;
+  batch.candidates = candidates.data();
+  batch.candidateCount = static_cast<std::uint32_t>(candidates.size());
+  batch.width = blockWidth;
+  batch.height = blockHeight;
+  batch.sourcePlane = 0;
+  batch.referencePlane = 0;
+  batch.elementSize = elementSize;
+  batch.bitDepth = bitDepth;
+  batch.subShift = subShift;
+  batch.metric = vtm::CudaDistortionMetric::Sad;
+
+  const std::uint64_t dispatchesBefore = context.distortionBatchDispatchCount();
+  std::vector<std::uint64_t> results(candidates.size());
+  context.computeDistortionBatch(batch, results.data());
+  if (context.distortionBatchDispatchCount() != dispatchesBefore + 1)
+  {
+    return false;
+  }
+  for (std::size_t candidate = 0; candidate < candidates.size(); ++candidate)
+  {
+    const std::uint64_t expected = referenceSad(sourceBlock, sourcePlane.strideBytes,
+                                                candidates[candidate].reference, referencePlane.strideBytes,
+                                                blockWidth, blockHeight, elementSize, bitDepth, subShift);
+    if (results[candidate] != expected)
+    {
+      return false;
+    }
+  }
+  if (results[0] != results[64] || results[64] != results[65])
+  {
+    return false;
+  }
+  std::size_t best = 0;
+  for (std::size_t candidate = 1; candidate < results.size(); ++candidate)
+  {
+    if (results[candidate] < results[best])
+    {
+      best = candidate;
+    }
+  }
+  std::vector<std::uint64_t> repeated = results;
+  std::size_t repeatedBest = 0;
+  for (std::size_t candidate = 1; candidate < repeated.size(); ++candidate)
+  {
+    if (repeated[candidate] < repeated[repeatedBest])
+    {
+      repeatedBest = candidate;
+    }
+  }
+  if (best != repeatedBest)
+  {
+    return false;
+  }
+
+  const std::uint64_t dispatchesAfterValidBatch = context.distortionBatchDispatchCount();
+  vtm::CudaDistortionBatchDesc invalidFormat = batch;
+  invalidFormat.elementSize = 1;
+  if (!throws([&context, &invalidFormat, &results]() {
+        context.computeDistortionBatch(invalidFormat, results.data());
+      })
+      || context.distortionBatchDispatchCount() != dispatchesAfterValidBatch)
+  {
+    return false;
+  }
+  vtm::CudaDistortionCandidateDesc outsideCandidate{};
+  outsideCandidate.reference = static_cast<const std::uint8_t *>(referencePlane.data)
+                               + (referencePlane.height + referencePlane.marginBottom)
+                                   * referencePlane.strideBytes;
+  vtm::CudaDistortionBatchDesc outsideBatch = batch;
+  outsideBatch.candidates = &outsideCandidate;
+  outsideBatch.candidateCount = 1;
+  if (!throws([&context, &outsideBatch, &results]() {
+        context.computeDistortionBatch(outsideBatch, results.data());
+      })
+      || context.distortionBatchDispatchCount() != dispatchesAfterValidBatch)
+  {
+    return false;
+  }
+
+  context.releasePictureMirrors(&sourceOwner);
+  context.releasePictureMirrors(&referenceOwner);
+  return true;
+}
+
+bool benchmarkSadBatch(vtm::CudaContext &context)
+{
+  TestPicture source(128, 128, 2, 10, 9);
+  TestPicture reference(128, 128, 2, 10, 83);
+  source.fillSamples(9);
+  reference.fillSamples(83);
+  int sourceOwner = 0;
+  int referenceOwner = 0;
+  const auto sourceMirror = context.registerPictureMirror(
+    &sourceOwner, vtm::CudaPictureRole::Original, source.descriptor);
+  const auto referenceMirror = context.registerPictureMirror(
+    &referenceOwner, vtm::CudaPictureRole::Reconstruction, reference.descriptor);
+  const auto &sourcePlane = source.descriptor.planes[0];
+  const auto &referencePlane = reference.descriptor.planes[0];
+  std::vector<vtm::CudaDistortionCandidateDesc> candidates(256);
+  for (std::uint32_t index = 0; index < candidates.size(); ++index)
+  {
+    const std::uint32_t x = index & 15;
+    const std::uint32_t y = index >> 4;
+    candidates[index].reference = static_cast<const std::uint8_t *>(referencePlane.data)
+                                  + y * referencePlane.strideBytes + x * 2;
+  }
+  vtm::CudaDistortionBatchDesc batch{};
+  batch.sourceMirror = sourceMirror;
+  batch.referenceMirror = referenceMirror;
+  batch.source = sourcePlane.data;
+  batch.candidates = candidates.data();
+  batch.candidateCount = static_cast<std::uint32_t>(candidates.size());
+  batch.width = 64;
+  batch.height = 64;
+  batch.sourcePlane = 0;
+  batch.referencePlane = 0;
+  batch.elementSize = 2;
+  batch.bitDepth = 10;
+  batch.subShift = 0;
+  batch.metric = vtm::CudaDistortionMetric::Sad;
+  std::vector<std::uint64_t> results(candidates.size());
+  context.computeDistortionBatch(batch, results.data());
+
+  constexpr unsigned gpuIterations = 200;
+  const auto gpuStart = std::chrono::steady_clock::now();
+  for (unsigned iteration = 0; iteration < gpuIterations; ++iteration)
+  {
+    context.computeDistortionBatch(batch, results.data());
+  }
+  const auto gpuEnd = std::chrono::steady_clock::now();
+
+  constexpr unsigned cpuIterations = 10;
+  std::uint64_t checksum = 0;
+  const auto cpuStart = std::chrono::steady_clock::now();
+  for (unsigned iteration = 0; iteration < cpuIterations; ++iteration)
+  {
+    for (const auto &candidate : candidates)
+    {
+      checksum += referenceSad(sourcePlane.data, sourcePlane.strideBytes, candidate.reference,
+                               referencePlane.strideBytes, 64, 64, 2, 10, 0) + iteration;
+    }
+  }
+  const auto cpuEnd = std::chrono::steady_clock::now();
+  const double gpuMilliseconds = std::chrono::duration<double, std::milli>(gpuEnd - gpuStart).count()
+                                 / gpuIterations;
+  const double cpuMilliseconds = std::chrono::duration<double, std::milli>(cpuEnd - cpuStart).count()
+                                 / cpuIterations;
+  std::cout << "SAD microbenchmark 256x64x64 Pel16/10-bit: CPU " << cpuMilliseconds
+            << " ms/batch, CUDA " << gpuMilliseconds << " ms/batch, ratio "
+            << (cpuMilliseconds / gpuMilliseconds) << "x, checksum " << checksum << '\n';
+  context.releasePictureMirrors(&sourceOwner);
+  context.releasePictureMirrors(&referenceOwner);
+  return gpuMilliseconds > 0.0;
+}
 
 }   // namespace
 
@@ -201,9 +474,10 @@ int main(const int argc, char *argv[])
     }
     return EXIT_SUCCESS;
   }
-  if (argc != 3 || std::string(argv[1]) != "--cuda")
+  const bool runBenchmark = argc == 3 && std::string(argv[1]) == "--cuda-benchmark";
+  if (argc != 3 || (std::string(argv[1]) != "--cuda" && !runBenchmark))
   {
-    return fail("Usage: CudaBackendTest [--cuda device]");
+    return fail("Usage: CudaBackendTest [--cuda device | --cuda-benchmark device]");
   }
   if (!vtm::CudaContext::isCompiled())
   {
@@ -404,6 +678,18 @@ int main(const int argc, char *argv[])
     if (context.pictureMirrorCount() != 0)
     {
       return fail("Owner-based CUDA picture mirror release left registry entries");
+    }
+
+    if (!runSadBatchCase(context, 2, 8, 4, 4, 0)
+        || !runSadBatchCase(context, 2, 10, 16, 12, 1)
+        || !runSadBatchCase(context, 4, 8, 32, 24, 2)
+        || !runSadBatchCase(context, 4, 10, 64, 32, 0))
+    {
+      return fail("CUDA SAD batch differed from the ordered scalar reference");
+    }
+    if (runBenchmark && !benchmarkSadBatch(context))
+    {
+      return fail("CUDA SAD microbenchmark failed");
     }
 
 #if VTM_CUDA_TESTING
