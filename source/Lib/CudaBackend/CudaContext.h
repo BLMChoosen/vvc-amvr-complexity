@@ -48,7 +48,8 @@ enum class CudaQueue
 {
   Upload,
   Compute,
-  Download
+  Download,
+  Qpa
 };
 
 enum class CudaFence
@@ -116,12 +117,24 @@ public:
   CudaMirrorHandle pictureMirrorHandle(const void *owner, CudaPictureRole role) const;
   std::size_t pictureMirrorCount() const;
   CudaMirrorState pictureMirrorState(CudaMirrorHandle handle) const;
+  CudaMirrorState pictureMirrorPlaneState(CudaMirrorHandle handle, std::uint8_t plane) const;
+  CudaPlaneMask pictureMirrorAllocatedPlanes(CudaMirrorHandle handle) const;
   CudaDevicePictureDesc devicePicture(CudaMirrorHandle handle) const;
+  CudaDevicePictureDesc devicePicturePlanes(CudaMirrorHandle handle, CudaPlaneMask planes) const;
   void markHostModified(CudaMirrorHandle handle);
+  void markHostPlanesModified(CudaMirrorHandle handle, CudaPlaneMask planes);
+  void markHostPlaneModified(CudaMirrorHandle handle, std::uint8_t plane);
   void markDeviceModified(CudaMirrorHandle handle);
+  void markDevicePlanesModified(CudaMirrorHandle handle, CudaPlaneMask planes);
+  void markDevicePlaneModified(CudaMirrorHandle handle, std::uint8_t plane);
   void ensureDevice(CudaMirrorHandle handle);
+  void ensureDevicePlanes(CudaMirrorHandle handle, CudaPlaneMask planes);
+  void ensureDevicePlane(CudaMirrorHandle handle, std::uint8_t plane);
   // Future GPU writers must call ensureHost before any CPU-side hash, YUV writer, or other host consumer.
   void ensureHost(CudaMirrorHandle handle);
+  void ensureHostPlanes(CudaMirrorHandle handle, CudaPlaneMask planes);
+  void ensureHostPlane(CudaMirrorHandle handle, std::uint8_t plane);
+  CudaMirrorMemoryStats pictureMirrorMemoryStats() const;
   bool isDistortionAccelerationAvailable() const noexcept;
   bool computeDistortionBatch(const CudaDistortionBatchDesc &batch, std::uint64_t *results) noexcept;
   std::uint64_t distortionBatchDispatchCount() const;
@@ -136,6 +149,8 @@ public:
   void injectReleaseFailuresForTesting(unsigned asyncFailures, unsigned immediateFailures);
   void injectDistortionFailuresForTesting(unsigned allocationFailureStep, unsigned executionFailures);
   void injectQpaFailuresForTesting(unsigned allocationFailureStep, unsigned executionFailures);
+  void injectMirrorPlaneFailuresForTesting(std::uint8_t plane, unsigned allocationFailureStep,
+                                           unsigned uploadFailures, unsigned downloadFailures);
 #endif
 
   bool isCreated() const noexcept;

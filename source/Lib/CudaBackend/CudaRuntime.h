@@ -71,6 +71,7 @@ void computeQpaBatch(RuntimeContext *context, const CudaDevicePlaneDesc &source,
 std::uint64_t qpaBatchDispatchCount(const RuntimeContext *context);
 std::uint64_t qpaTaskCount(const RuntimeContext *context);
 void recoverDistortionRuntime(RuntimeContext *context) noexcept;
+void recoverQpaRuntime(RuntimeContext *context) noexcept;
 void injectReleaseFailures(RuntimeContext *context, unsigned asyncFailures, unsigned immediateFailures);
 void injectDistortionFailures(RuntimeContext *context, unsigned allocationFailureStep, unsigned executionFailures);
 void injectQpaFailures(RuntimeContext *context, unsigned allocationFailureStep, unsigned executionFailures);

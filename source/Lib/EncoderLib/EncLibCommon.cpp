@@ -228,11 +228,30 @@ bool EncLibCommon::isCudaQpaBatchAvailable(const void *sourceOwner) const
          && m_computeState->cudaContext.hasPictureMirror(sourceOwner, vtm::CudaPictureRole::Original);
 }
 
+bool EncLibCommon::prepareQpaTasks(const void *sourceOwner)
+{
+  if (!m_computeState->config.enableExperimentalQpa)
+  {
+    return false;
+  }
+  if (!isCudaQpaBatchAvailable(sourceOwner))
+  {
+    ++m_computeState->qpaFallbacks;
+    return false;
+  }
+  return true;
+}
+
 bool EncLibCommon::computeQpaTasks(const void *sourceOwner, const vtm::CudaQpaTask *tasks,
                                    const std::size_t taskCount, std::vector<vtm::CudaQpaResult> &results)
 {
-  if (!isCudaQpaBatchAvailable(sourceOwner) || tasks == nullptr || taskCount == 0)
+  if (tasks == nullptr || taskCount == 0)
   {
+    return false;
+  }
+  if (!isCudaQpaBatchAvailable(sourceOwner))
+  {
+    ++m_computeState->qpaFallbacks;
     return false;
   }
   for (std::size_t index = 1; index < taskCount; ++index)
@@ -273,5 +292,8 @@ vtm::CudaQpaStats EncLibCommon::cudaQpaStats() const
   return { m_computeState->cudaContext.isCreated() ? m_computeState->cudaContext.qpaBatchDispatchCount() : 0,
            m_computeState->cudaContext.isCreated() ? m_computeState->cudaContext.qpaTaskCount() : 0,
            m_computeState->cudaContext.qpaBatchFailureCount(), m_computeState->qpaFallbacks,
-           m_computeState->cudaContext.isCreated() && !m_computeState->cudaContext.isQpaAccelerationAvailable() };
+           m_computeState->config.enableExperimentalQpa,
+           m_computeState->config.enableExperimentalQpa && m_computeState->cudaContext.qpaBatchFailureCount() != 0
+             && !m_computeState->cudaContext.isQpaAccelerationAvailable(),
+           !m_computeState->config.enableExperimentalQpa };
 }

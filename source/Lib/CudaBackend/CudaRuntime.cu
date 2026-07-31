@@ -48,7 +48,7 @@ namespace vtm::cuda_backend
 struct RuntimeContext
 {
   int                         device = -1;
-  std::array<cudaStream_t, 3> streams{};
+  std::array<cudaStream_t, 4> streams{};
   std::array<cudaEvent_t, 3>  fences{};
   cudaMemPool_t               memoryPool = nullptr;
   std::uint64_t              *distortionResultsDevice = nullptr;
@@ -90,6 +90,7 @@ std::size_t queueIndex(const CudaQueue queue)
   case CudaQueue::Upload: return 0;
   case CudaQueue::Compute: return 1;
   case CudaQueue::Download: return 2;
+  case CudaQueue::Qpa: return 3;
   }
   throw std::runtime_error("Invalid CUDA queue");
 }
@@ -138,7 +139,7 @@ void releaseRuntimeContext(RuntimeContext *context, const bool checked, const bo
     if (*allocation != nullptr)
     {
       rememberCudaError(firstError, firstOperation,
-                        cudaFreeAsync(*allocation, context->streams[queueIndex(CudaQueue::Compute)]),
+                        cudaFreeAsync(*allocation, context->streams[queueIndex(CudaQueue::Qpa)]),
                         "QPA scratch release");
       *allocation = nullptr;
     }
@@ -282,7 +283,7 @@ void ensureQpaCapacity(RuntimeContext *context, const std::size_t required)
   }
 
   constexpr std::size_t capacity = CUDA_MAX_QPA_TASKS;
-  cudaStream_t stream = context->streams[queueIndex(CudaQueue::Compute)];
+  cudaStream_t stream = context->streams[queueIndex(CudaQueue::Qpa)];
   checkCuda(cudaStreamSynchronize(stream), "QPA scratch synchronization");
 
   CudaQpaTask *newTasksDevice = nullptr;
@@ -713,7 +714,7 @@ void computeQpaBatch(RuntimeContext *context, const CudaDevicePlaneDesc &source,
 {
   checkCuda(cudaSetDevice(context->device), "device selection");
   ensureQpaCapacity(context, taskCount);
-  cudaStream_t stream = context->streams[queueIndex(CudaQueue::Compute)];
+  cudaStream_t stream = context->streams[queueIndex(CudaQueue::Qpa)];
 #if VTM_CUDA_TESTING
   if (context->qpaExecutionFailures > 0)
   {
@@ -778,18 +779,16 @@ void recoverDistortionRuntime(RuntimeContext *context) noexcept
   if (context->streams[computeIndex] != nullptr)
   {
     (void) cudaStreamSynchronize(context->streams[computeIndex]);
-    for (void **allocation : { reinterpret_cast<void **>(&context->distortionResultsDevice),
-                               reinterpret_cast<void **>(&context->qpaTasksDevice),
-                               reinterpret_cast<void **>(&context->qpaResultsDevice) })
+    if (context->distortionResultsDevice != nullptr)
     {
-      if (*allocation != nullptr && cudaFreeAsync(*allocation, context->streams[computeIndex]) == cudaSuccess)
+      if (cudaFreeAsync(context->distortionResultsDevice, context->streams[computeIndex]) == cudaSuccess)
       {
-        *allocation = nullptr; // ownership transferred even if later synchronization fails
+        context->distortionResultsDevice = nullptr;
         (void) cudaStreamSynchronize(context->streams[computeIndex]);
       }
-      else if (*allocation != nullptr)
+      else
       {
-        (void) cudaGetLastError(); // retain ownership so normal context teardown can retry
+        (void) cudaGetLastError();
       }
     }
     (void) cudaStreamDestroy(context->streams[computeIndex]);
@@ -802,6 +801,38 @@ void recoverDistortionRuntime(RuntimeContext *context) noexcept
       context->distortionResultsHost = nullptr;
     }
   }
+  context->distortionCapacity = 0;
+  (void) cudaGetLastError();
+  (void) cudaStreamCreateWithFlags(&context->streams[computeIndex], cudaStreamNonBlocking);
+}
+
+void recoverQpaRuntime(RuntimeContext *context) noexcept
+{
+  if (context == nullptr)
+  {
+    return;
+  }
+  (void) cudaSetDevice(context->device);
+  const std::size_t qpaIndex = queueIndex(CudaQueue::Qpa);
+  if (context->streams[qpaIndex] != nullptr)
+  {
+    (void) cudaStreamSynchronize(context->streams[qpaIndex]);
+    for (void **allocation : { reinterpret_cast<void **>(&context->qpaTasksDevice),
+                               reinterpret_cast<void **>(&context->qpaResultsDevice) })
+    {
+      if (*allocation != nullptr && cudaFreeAsync(*allocation, context->streams[qpaIndex]) == cudaSuccess)
+      {
+        *allocation = nullptr;
+        (void) cudaStreamSynchronize(context->streams[qpaIndex]);
+      }
+      else if (*allocation != nullptr)
+      {
+        (void) cudaGetLastError();
+      }
+    }
+    (void) cudaStreamDestroy(context->streams[qpaIndex]);
+    context->streams[qpaIndex] = nullptr;
+  }
   for (void **allocation : { reinterpret_cast<void **>(&context->qpaTasksHost),
                              reinterpret_cast<void **>(&context->qpaResultsHost) })
   {
@@ -810,10 +841,9 @@ void recoverDistortionRuntime(RuntimeContext *context) noexcept
       *allocation = nullptr;
     }
   }
-  context->distortionCapacity = 0;
   context->qpaCapacity = 0;
   (void) cudaGetLastError();
-  (void) cudaStreamCreateWithFlags(&context->streams[computeIndex], cudaStreamNonBlocking);
+  (void) cudaStreamCreateWithFlags(&context->streams[qpaIndex], cudaStreamNonBlocking);
 }
 
 void injectReleaseFailures(RuntimeContext *context, const unsigned asyncFailures, const unsigned immediateFailures)

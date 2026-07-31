@@ -241,6 +241,11 @@ bool EncLib::computeQpaTasks(const void *sourceOwner, const vtm::CudaQpaTask *ta
   return m_encLibCommon->computeQpaTasks(sourceOwner, tasks, taskCount, results);
 }
 
+bool EncLib::prepareQpaTasks(const void *sourceOwner)
+{
+  return m_encLibCommon->prepareQpaTasks(sourceOwner);
+}
+
 vtm::CudaQpaStats EncLib::cudaQpaStats() const
 {
   return m_encLibCommon->cudaQpaStats();

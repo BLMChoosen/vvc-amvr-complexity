@@ -1984,11 +1984,12 @@ void EncApp::destroyLib()
       msg(INFO, "\nCUDA SAD batches: %llu, failures: %llu, disabled: %d\n",
           static_cast<unsigned long long>(sadStats.dispatches),
           static_cast<unsigned long long>(sadStats.failures), sadStats.disabled ? 1 : 0);
-      msg(INFO, "CUDA QPA batches: %llu, tasks: %llu, failures: %llu, fallbacks: %llu, disabled: %d\n",
+      msg(INFO, "CUDA QPA batches: %llu, tasks: %llu, failures: %llu, fallbacks: %llu, enabled: %d, poisoned: %d, disabled-by-flag: %d\n",
           static_cast<unsigned long long>(qpaStats.batches),
           static_cast<unsigned long long>(qpaStats.tasks),
           static_cast<unsigned long long>(qpaStats.failures),
-          static_cast<unsigned long long>(qpaStats.fallbacks), qpaStats.disabled ? 1 : 0);
+          static_cast<unsigned long long>(qpaStats.fallbacks), qpaStats.enabled ? 1 : 0,
+          qpaStats.poisoned ? 1 : 0, qpaStats.disabledByFlag ? 1 : 0);
     }
     try
     {

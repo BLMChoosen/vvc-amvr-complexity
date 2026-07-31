@@ -1,5 +1,6 @@
 #include "EncLibCommon.h"
 #include "CudaBackend/ComputeBackend.h"
+#include "CudaBackend/CudaQpa.h"
 
 #include <cstdlib>
 #include <functional>
@@ -35,6 +36,31 @@ int main()
   cpuBackend.configureComputeBackend({ vtm::ComputeBackend::CPU, 0 });
   cpuBackend.acquireComputeBackend();
   cpuBackend.releaseComputeBackend();
+
+  const vtm::CudaQpaStats disabledStats = cpuBackend.cudaQpaStats();
+  if (disabledStats.enabled || disabledStats.poisoned || !disabledStats.disabledByFlag || disabledStats.fallbacks != 0)
+  {
+    return fail("QPA telemetry does not distinguish the default-off state");
+  }
+
+  EncLibCommon unavailableQpa;
+  vtm::ComputeConfig qpaConfig{};
+  qpaConfig.backend = vtm::ComputeBackend::CPU;
+  qpaConfig.enableExperimentalQpa = true;
+  unavailableQpa.configureComputeBackend(qpaConfig);
+  unavailableQpa.acquireComputeBackend();
+  int qpaOwner = 0;
+  if (unavailableQpa.prepareQpaTasks(&qpaOwner) || unavailableQpa.prepareQpaTasks(&qpaOwner))
+  {
+    return fail("Unavailable QPA preflight unexpectedly succeeded");
+  }
+  const vtm::CudaQpaStats unavailableStats = unavailableQpa.cudaQpaStats();
+  if (!unavailableStats.enabled || unavailableStats.poisoned || unavailableStats.disabledByFlag
+      || unavailableStats.fallbacks != 2)
+  {
+    return fail("QPA telemetry did not count repeated opt-in fallbacks");
+  }
+  unavailableQpa.releaseComputeBackend();
   cpuBackend.acquireComputeBackend();
   cpuBackend.releaseComputeBackend();
 

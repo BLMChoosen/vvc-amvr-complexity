@@ -31,63 +31,63 @@
  * THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef VTM_CUDA_QPA_H
-#define VTM_CUDA_QPA_H
+#ifndef VTM_QPA_ACTIVITY_H
+#define VTM_QPA_ACTIVITY_H
 
-#include "CommonLib/QpaActivity.h"
-
+#include <cstddef>
 #include <cstdint>
-#include <type_traits>
 
 namespace vtm
 {
 
-constexpr std::uint32_t CUDA_MAX_QPA_TASKS = 4096;
-
-using CudaQpaRect = QpaActivityArea;
-
-// POD descriptors are deliberately address-free so one queue can be copied to the device in one transfer.
-struct CudaQpaTask
+struct QpaActivityArea
 {
-  std::uint64_t ticket = 0;
-  std::uint32_t ctuAddr = 0;
-  CudaQpaRect   filterArea{};
-  CudaQpaRect   lumaArea{};
+  std::uint32_t x = 0;
+  std::uint32_t y = 0;
+  std::uint32_t width = 0;
+  std::uint32_t height = 0;
 };
 
-struct CudaQpaResult
+struct QpaActivitySums
 {
-  std::uint64_t ticket = 0;
-  std::uint32_t ctuAddr = 0;
-  std::uint32_t reserved = 0;
-  std::uint64_t highpassSum = 0;
-  std::int64_t  lumaSum = 0;
+  std::uint64_t highpass = 0;
+  std::int64_t  luma = 0;
 };
 
-struct CudaQpaStats
+template<typename Sample>
+inline QpaActivitySums computeQpaActivitySums(const Sample *luma, const std::ptrdiff_t strideSamples,
+                                              const QpaActivityArea &filterArea,
+                                              const QpaActivityArea &lumaArea)
 {
-  std::uint64_t batches = 0;
-  std::uint64_t tasks = 0;
-  std::uint64_t failures = 0;
-  std::uint64_t fallbacks = 0;
-  bool          enabled = false;
-  bool          poisoned = false;
-  bool          disabledByFlag = true;
-};
+  QpaActivitySums sums{};
+  const Sample *filterBase = luma + static_cast<std::ptrdiff_t>(filterArea.y) * strideSamples + filterArea.x;
+  for (std::uint32_t y = 1; y + 1 < filterArea.height; ++y)
+  {
+    const Sample *row = filterBase + static_cast<std::ptrdiff_t>(y) * strideSamples;
+    const Sample *previousRow = row - strideSamples;
+    const Sample *nextRow = row + strideSamples;
+    for (std::uint32_t x = 1; x + 1 < filterArea.width; ++x)
+    {
+      const int f = 12 * int(row[x])
+                    - 2 * (int(row[x - 1]) + int(row[x + 1]) + int(previousRow[x]) + int(nextRow[x]))
+                    - int(previousRow[x - 1]) - int(previousRow[x + 1])
+                    - int(nextRow[x - 1]) - int(nextRow[x + 1]);
+      sums.highpass += static_cast<std::uint64_t>(f < 0 ? -f : f);
+    }
+  }
 
-static_assert(std::is_standard_layout<CudaQpaRect>::value && std::is_trivially_copyable<CudaQpaRect>::value,
-              "CUDA QPA rectangles must remain POD");
-static_assert(std::is_standard_layout<CudaQpaTask>::value && std::is_trivially_copyable<CudaQpaTask>::value,
-              "CUDA QPA tasks must remain POD");
-static_assert(std::is_standard_layout<CudaQpaResult>::value && std::is_trivially_copyable<CudaQpaResult>::value,
-              "CUDA QPA results must remain POD");
-static_assert(CUDA_MAX_QPA_TASKS >= 2040, "One QPA chunk must cover 3840x2160 with 64x64 CTUs");
-static_assert(std::uint64_t(CUDA_MAX_QPA_TASKS) <= 2147483647ull, "QPA launch grid exceeds CUDA grid.x");
-constexpr std::size_t CUDA_QPA_PERSISTENT_SCRATCH_BYTES =
-  2 * std::size_t(CUDA_MAX_QPA_TASKS) * (sizeof(CudaQpaTask) + sizeof(CudaQpaResult));
-static_assert(CUDA_QPA_PERSISTENT_SCRATCH_BYTES <= 1024 * 1024,
-              "Bounded QPA host+device scratch unexpectedly exceeds 1 MiB");
+  const Sample *areaBase = luma + static_cast<std::ptrdiff_t>(lumaArea.y) * strideSamples + lumaArea.x;
+  for (std::uint32_t y = 0; y < lumaArea.height; ++y)
+  {
+    const Sample *row = areaBase + static_cast<std::ptrdiff_t>(y) * strideSamples;
+    for (std::uint32_t x = 0; x < lumaArea.width; ++x)
+    {
+      sums.luma += row[x];
+    }
+  }
+  return sums;
+}
 
 }   // namespace vtm
 
-#endif   // VTM_CUDA_QPA_H
+#endif   // VTM_QPA_ACTIVITY_H

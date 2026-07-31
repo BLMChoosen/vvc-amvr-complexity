@@ -196,6 +196,7 @@ public:
   vtm::CudaSadStats cudaSadStats() const;
   bool      computeQpaTasks(const void *sourceOwner, const vtm::CudaQpaTask *tasks, std::size_t taskCount,
                             std::vector<vtm::CudaQpaResult> &results);
+  bool      prepareQpaTasks(const void *sourceOwner);
   vtm::CudaQpaStats cudaQpaStats() const;
   void      deletePicBuffer ();
 

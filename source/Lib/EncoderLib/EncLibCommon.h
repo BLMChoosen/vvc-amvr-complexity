@@ -102,6 +102,7 @@ public:
                                           std::uint8_t subShift, const std::uint64_t *&results);
   vtm::CudaSadStats        cudaSadStats() const;
   bool                     isCudaQpaBatchAvailable(const void *sourceOwner) const;
+  bool                     prepareQpaTasks(const void *sourceOwner);
   bool                     computeQpaTasks(const void *sourceOwner, const vtm::CudaQpaTask *tasks,
                                            std::size_t taskCount, std::vector<vtm::CudaQpaResult> &results);
   vtm::CudaQpaStats        cudaQpaStats() const;

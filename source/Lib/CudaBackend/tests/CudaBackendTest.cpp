@@ -336,13 +336,25 @@ bool runSadBatchCase(vtm::CudaContext &context, const std::uint8_t elementSize, 
 vtm::CudaQpaResult referenceQpa(const TestPicture &picture, const vtm::CudaQpaTask &task)
 {
   const vtm::CudaHostPlaneDesc &plane = picture.descriptor.planes[0];
+  vtm::QpaActivitySums sums{};
   if (plane.elementSize == 2)
   {
-    return vtm::computeQpaResultCpu(static_cast<const std::int16_t *>(plane.data),
-                                    plane.strideBytes / sizeof(std::int16_t), task);
+    sums = vtm::computeQpaActivitySums(static_cast<const std::int16_t *>(plane.data),
+                                       plane.strideBytes / sizeof(std::int16_t),
+                                       task.filterArea, task.lumaArea);
   }
-  return vtm::computeQpaResultCpu(static_cast<const std::int32_t *>(plane.data),
-                                  plane.strideBytes / sizeof(std::int32_t), task);
+  else
+  {
+    sums = vtm::computeQpaActivitySums(static_cast<const std::int32_t *>(plane.data),
+                                       plane.strideBytes / sizeof(std::int32_t),
+                                       task.filterArea, task.lumaArea);
+  }
+  vtm::CudaQpaResult result{};
+  result.ticket = task.ticket;
+  result.ctuAddr = task.ctuAddr;
+  result.highpassSum = sums.highpass;
+  result.lumaSum = sums.luma;
+  return result;
 }
 
 std::vector<vtm::CudaQpaTask> makeQpaTasks(const std::uint32_t width, const std::uint32_t height,
@@ -515,18 +527,22 @@ bool benchmarkSadBatch(vtm::CudaContext &context)
   return gpuMilliseconds > 0.0;
 }
 
-bool benchmarkQpaBatch(vtm::CudaContext &context)
+bool benchmarkQpaBatch(const int device)
 {
+  vtm::CudaContext context;
+  context.create(device);
   TestPicture picture(512, 512, 2, 10, 73);
   picture.fillSamples(73);
   int owner = 0;
   const auto mirror = context.registerPictureMirror(&owner, vtm::CudaPictureRole::Original, picture.descriptor);
   const std::vector<vtm::CudaQpaTask> tasks = makeQpaTasks(512, 512, 64);
   std::vector<vtm::CudaQpaResult> results(tasks.size());
+  const auto coldStart = std::chrono::steady_clock::now();
   if (!context.computeQpaBatch(mirror, tasks.data(), static_cast<std::uint32_t>(tasks.size()), results.data()))
   {
     return false;
   }
+  const auto coldEnd = std::chrono::steady_clock::now();
 
   constexpr unsigned gpuIterations = 300;
   const auto gpuStart = std::chrono::steady_clock::now();
@@ -553,12 +569,15 @@ bool benchmarkQpaBatch(vtm::CudaContext &context)
   const auto cpuEnd = std::chrono::steady_clock::now();
   const double gpuMilliseconds = std::chrono::duration<double, std::milli>(gpuEnd - gpuStart).count()
                                  / gpuIterations;
+  const double coldGpuMilliseconds = std::chrono::duration<double, std::milli>(coldEnd - coldStart).count();
   const double cpuMilliseconds = std::chrono::duration<double, std::milli>(cpuEnd - cpuStart).count()
                                  / cpuIterations;
-  std::cout << "QPA microbenchmark 64 CTUs x 64x64 Pel16/10-bit: CPU " << cpuMilliseconds
-            << " ms/batch, CUDA " << gpuMilliseconds << " ms/batch, ratio "
+  std::cout << "QPA microbenchmark 64 CTUs x 64x64 Pel16/10-bit: cold CUDA " << coldGpuMilliseconds
+            << " ms (scratch + ensureDevice/upload + compute), warm CPU " << cpuMilliseconds
+            << " ms/batch, warm CUDA " << gpuMilliseconds << " ms/batch, warm-compute ratio "
             << (cpuMilliseconds / gpuMilliseconds) << "x, checksum " << checksum << '\n';
   context.releasePictureMirrors(&owner);
+  context.shutdown();
   return gpuMilliseconds > 0.0;
 }
 
@@ -627,6 +646,64 @@ bool runQpaFailureCase(const int device, const unsigned allocationFailureStep, c
   if (context.computeQpaBatch(mirror, &task, 1, &result) || context.qpaBatchFailureCount() != 1)
   {
     return false;
+  }
+  context.shutdown();
+  return true;
+}
+
+bool runRecoveryIsolationCase(const int device, const bool failQpaFirst)
+{
+  vtm::CudaContext context;
+  context.create(device);
+  TestPicture source(96, 80, 2, 10, 67);
+  TestPicture reference(96, 80, 2, 10, 79);
+  source.fillSamples(67);
+  reference.fillSamples(79);
+  const auto sourceMirror = context.registerPictureMirror(&source, vtm::CudaPictureRole::Original,
+                                                          source.descriptor);
+  const auto referenceMirror = context.registerPictureMirror(&reference, vtm::CudaPictureRole::Reconstruction,
+                                                             reference.descriptor);
+
+  vtm::CudaQpaTask qpaTask{};
+  qpaTask.ticket = 29;
+  qpaTask.ctuAddr = 7;
+  qpaTask.filterArea = { 0, 0, 65, 65 };
+  qpaTask.lumaArea = { 0, 0, 64, 64 };
+  vtm::CudaQpaResult qpaResult{};
+
+  vtm::CudaDistortionBatchDesc sadBatch{};
+  sadBatch.sourceMirror = sourceMirror;
+  sadBatch.referenceMirror = referenceMirror;
+  sadBatch.source = source.descriptor.planes[0].data;
+  sadBatch.candidateGrid = { reference.descriptor.planes[0].data, 8, 8, 1, 1 };
+  sadBatch.width = 8;
+  sadBatch.height = 8;
+  sadBatch.elementSize = 2;
+  sadBatch.bitDepth = 10;
+  sadBatch.metric = vtm::CudaDistortionMetric::Sad;
+  std::array<std::uint64_t, 64> sadResults{};
+
+  if (failQpaFirst)
+  {
+    context.injectQpaFailuresForTesting(0, 1);
+    if (context.computeQpaBatch(sourceMirror, &qpaTask, 1, &qpaResult)
+        || context.isQpaAccelerationAvailable()
+        || !context.computeDistortionBatch(sadBatch, sadResults.data())
+        || !context.isDistortionAccelerationAvailable())
+    {
+      return false;
+    }
+  }
+  else
+  {
+    context.injectDistortionFailuresForTesting(0, 1);
+    if (context.computeDistortionBatch(sadBatch, sadResults.data())
+        || context.isDistortionAccelerationAvailable()
+        || !context.computeQpaBatch(sourceMirror, &qpaTask, 1, &qpaResult)
+        || !context.isQpaAccelerationAvailable())
+    {
+      return false;
+    }
   }
   context.shutdown();
   return true;
@@ -924,8 +1001,13 @@ int main(const int argc, char *argv[])
     {
       return fail("CUDA QPA failure recovery, discard, or permanent poisoning is invalid");
     }
+    if (!runRecoveryIsolationCase(std::stoi(argv[2]), true)
+        || !runRecoveryIsolationCase(std::stoi(argv[2]), false))
+    {
+      return fail("CUDA QPA and SAD failure recovery are not isolated");
+    }
 #endif
-    if (runBenchmark && (!benchmarkSadBatch(context) || !benchmarkQpaBatch(context)))
+    if (runBenchmark && (!benchmarkSadBatch(context) || !benchmarkQpaBatch(std::stoi(argv[2]))))
     {
       return fail("CUDA SAD microbenchmark failed");
     }

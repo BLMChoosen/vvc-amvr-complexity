@@ -21,6 +21,12 @@ namespace vtm
 constexpr std::size_t CUDA_PICTURE_PLANE_COUNT = 3;
 
 using CudaMirrorHandle = std::uint64_t;
+using CudaPlaneMask = std::uint8_t;
+
+constexpr CudaPlaneMask CUDA_PLANE_Y   = CudaPlaneMask{ 1 } << 0;
+constexpr CudaPlaneMask CUDA_PLANE_CB  = CudaPlaneMask{ 1 } << 1;
+constexpr CudaPlaneMask CUDA_PLANE_CR  = CudaPlaneMask{ 1 } << 2;
+constexpr CudaPlaneMask CUDA_PLANE_ALL = CUDA_PLANE_Y | CUDA_PLANE_CB | CUDA_PLANE_CR;
 
 enum class CudaPictureRole : std::uint8_t
 {
@@ -32,7 +38,8 @@ enum class CudaMirrorState : std::uint8_t
 {
   HostValid,
   DeviceValid,
-  Synchronized
+  Synchronized,
+  Mixed
 };
 
 // Host-only description of an active plane. data points at sample (0, 0), not at the allocation base.
@@ -78,12 +85,28 @@ struct CudaDevicePictureDesc
   std::uint8_t planeCount;
 };
 
+struct CudaMirrorMemoryUsage
+{
+  std::uint64_t currentDeviceBytes;
+  std::uint64_t peakDeviceBytes;
+  std::uint64_t currentPinnedBytes;
+  std::uint64_t peakPinnedBytes;
+};
+
+struct CudaMirrorMemoryStats
+{
+  CudaMirrorMemoryUsage total;
+  std::array<std::array<CudaMirrorMemoryUsage, CUDA_PICTURE_PLANE_COUNT>, 2> byRoleAndPlane;
+};
+
 static_assert(std::is_standard_layout<CudaHostPlaneDesc>::value && std::is_trivial<CudaHostPlaneDesc>::value,
               "CUDA host plane descriptor must remain POD");
 static_assert(std::is_standard_layout<CudaDevicePlaneDesc>::value && std::is_trivial<CudaDevicePlaneDesc>::value,
               "CUDA device plane descriptor must remain POD");
 static_assert(std::is_standard_layout<CudaDevicePictureDesc>::value && std::is_trivial<CudaDevicePictureDesc>::value,
               "CUDA picture descriptor must remain POD");
+static_assert(std::is_standard_layout<CudaMirrorMemoryStats>::value && std::is_trivial<CudaMirrorMemoryStats>::value,
+              "CUDA mirror memory telemetry must remain POD");
 
 }   // namespace vtm
 

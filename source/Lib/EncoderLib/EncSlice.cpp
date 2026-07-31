@@ -40,6 +40,7 @@
 #include "EncLib.h"
 #include "CommonLib/UnitTools.h"
 #include "CommonLib/Picture.h"
+#include "CommonLib/QpaActivity.h"
 #include "CudaBackend/CudaQpa.h"
 #if K0149_BLOCK_STATISTICS
 #include "CommonLib/dtrace_blockstatistics.h"
@@ -1041,45 +1042,71 @@ static bool applyQPAdaptation (Picture* const pcPic,       Slice* const pcSlice,
   if (!useFrameWiseQPA || previouslyAdaptedLumaQP < 0)  // mean visual activity value and luma value in each CTU
 #endif
   {
+    const auto makeAreas = [pcPic, &pcv, pcSlice](const uint32_t ctuIdx, uint32_t &ctuRsAddr,
+                                                   vtm::QpaActivityArea &filterArea,
+                                                   vtm::QpaActivityArea &lumaArea) {
+      ctuRsAddr = pcSlice->getCtuAddrInSlice(ctuIdx);
+      const Position pos((ctuRsAddr % pcv.widthInCtus) * pcv.maxCUWidth,
+                         (ctuRsAddr / pcv.widthInCtus) * pcv.maxCUHeight);
+      const CompArea ctuArea = clipArea(CompArea(COMPONENT_Y, pcPic->chromaFormat,
+                                                  Area(pos.x, pos.y, pcv.maxCUWidth, pcv.maxCUHeight)),
+                                         pcPic->Y());
+      const CompArea fltArea = clipArea(CompArea(COMPONENT_Y, pcPic->chromaFormat,
+                                                  Area(pos.x > 0 ? pos.x - 1 : 0,
+                                                       pos.y > 0 ? pos.y - 1 : 0,
+                                                       pcv.maxCUWidth + (pos.x > 0 ? 2 : 1),
+                                                       pcv.maxCUHeight + (pos.y > 0 ? 2 : 1))),
+                                         pcPic->Y());
+      filterArea = { static_cast<std::uint32_t>(fltArea.x), static_cast<std::uint32_t>(fltArea.y),
+                     static_cast<std::uint32_t>(fltArea.width), static_cast<std::uint32_t>(fltArea.height) };
+      lumaArea = { static_cast<std::uint32_t>(ctuArea.x), static_cast<std::uint32_t>(ctuArea.y),
+                   static_cast<std::uint32_t>(ctuArea.width), static_cast<std::uint32_t>(ctuArea.height) };
+    };
+
+    const bool qpaPreflight = pcEncLib != nullptr && pcEncLib->prepareQpaTasks(pcPic);
     std::vector<vtm::CudaQpaTask> qpaTasks;
-    qpaTasks.reserve(pcSlice->getNumCtuInSlice());
-    for (uint32_t ctuIdx = 0; ctuIdx < pcSlice->getNumCtuInSlice(); ctuIdx++)
+    std::vector<vtm::CudaQpaResult> qpaResults;
+    if (qpaPreflight)
     {
-      uint32_t ctuRsAddr = pcSlice->getCtuAddrInSlice( ctuIdx );
-      const Position pos ((ctuRsAddr % pcv.widthInCtus) * pcv.maxCUWidth, (ctuRsAddr / pcv.widthInCtus) * pcv.maxCUHeight);
-      const CompArea ctuArea    = clipArea (CompArea (COMPONENT_Y, pcPic->chromaFormat, Area (pos.x, pos.y, pcv.maxCUWidth, pcv.maxCUHeight)), pcPic->Y());
-      const CompArea fltArea    = clipArea (CompArea (COMPONENT_Y, pcPic->chromaFormat, Area (pos.x > 0 ? pos.x - 1 : 0, pos.y > 0 ? pos.y - 1 : 0, pcv.maxCUWidth + (pos.x > 0 ? 2 : 1), pcv.maxCUHeight + (pos.y > 0 ? 2 : 1))), pcPic->Y());
-      vtm::CudaQpaTask task{};
-      task.ticket = ctuIdx;
-      task.ctuAddr = ctuRsAddr;
-      task.filterArea = { static_cast<std::uint32_t>(fltArea.x), static_cast<std::uint32_t>(fltArea.y),
-                          static_cast<std::uint32_t>(fltArea.width), static_cast<std::uint32_t>(fltArea.height) };
-      task.lumaArea = { static_cast<std::uint32_t>(ctuArea.x), static_cast<std::uint32_t>(ctuArea.y),
-                        static_cast<std::uint32_t>(ctuArea.width), static_cast<std::uint32_t>(ctuArea.height) };
-      qpaTasks.push_back(task);
+      qpaTasks.reserve(pcSlice->getNumCtuInSlice());
+      for (uint32_t ctuIdx = 0; ctuIdx < pcSlice->getNumCtuInSlice(); ++ctuIdx)
+      {
+        vtm::CudaQpaTask task{};
+        task.ticket = ctuIdx;
+        makeAreas(ctuIdx, task.ctuAddr, task.filterArea, task.lumaArea);
+        qpaTasks.push_back(task);
+      }
     }
 
-    std::vector<vtm::CudaQpaResult> qpaResults;
-    const bool cudaComplete = pcEncLib != nullptr
+    const bool cudaComplete = qpaPreflight
                               && pcEncLib->computeQpaTasks(pcPic, qpaTasks.data(), qpaTasks.size(), qpaResults);
     const CPelBuf fullOrig = pcPic->getOrigBuf().Y();
     for (uint32_t ctuIdx = 0; ctuIdx < pcSlice->getNumCtuInSlice(); ctuIdx++)
     {
-      const vtm::CudaQpaTask &task = qpaTasks[ctuIdx];
-      const uint32_t ctuRsAddr = task.ctuAddr;
-      const vtm::CudaQpaResult result = cudaComplete
-        ? qpaResults[ctuIdx]
-        : vtm::computeQpaResultCpu(fullOrig.buf, fullOrig.stride, task);
-      const int filteredSamples = int(task.filterArea.width - 2) * int(task.filterArea.height - 2);
-      double hpEner = double(result.highpassSum) / double(filteredSamples);
+      uint32_t ctuRsAddr = 0;
+      vtm::QpaActivityArea filterArea{};
+      vtm::QpaActivityArea lumaArea{};
+      makeAreas(ctuIdx, ctuRsAddr, filterArea, lumaArea);
+      vtm::QpaActivitySums sums{};
+      if (cudaComplete)
+      {
+        sums.highpass = qpaResults[ctuIdx].highpassSum;
+        sums.luma = qpaResults[ctuIdx].lumaSum;
+      }
+      else
+      {
+        sums = vtm::computeQpaActivitySums(fullOrig.buf, fullOrig.stride, filterArea, lumaArea);
+      }
+      const int filteredSamples = int(filterArea.width - 2) * int(filterArea.height - 2);
+      double hpEner = double(sums.highpass) / double(filteredSamples);
       if (hpEner < double(1 << (bitDepth - 4)))
       {
         hpEner = double(1 << (bitDepth - 4));
       }
       hpEnerAvg += hpEner;
       pcPic->m_uEnerHpCtu[ctuRsAddr] = hpEner;
-      const std::int64_t lumaSamples = static_cast<std::int64_t>(task.lumaArea.width) * task.lumaArea.height;
-      pcPic->m_iOffsetCtu[ctuRsAddr] = Pel((result.lumaSum + (lumaSamples >> 1)) / lumaSamples);
+      const std::int64_t lumaSamples = static_cast<std::int64_t>(lumaArea.width) * lumaArea.height;
+      pcPic->m_iOffsetCtu[ctuRsAddr] = Pel((sums.luma + (lumaSamples >> 1)) / lumaSamples);
     }
 
     hpEnerAvg /= double (pcSlice->getNumCtuInSlice());
