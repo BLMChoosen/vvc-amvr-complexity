@@ -28,7 +28,9 @@ endif()
 set_target_properties( ${LIB_NAME} PROPERTIES FOLDER lib )
 
 if( VTM_BUILD_CUDA_BACKEND_TESTS )
+  target_compile_definitions( ${LIB_NAME} PRIVATE VTM_CUDA_TESTING=1 )
   add_executable( CudaBackendTest tests/CudaBackendTest.cpp )
+  target_compile_definitions( CudaBackendTest PRIVATE VTM_CUDA_TESTING=1 )
   target_link_libraries( CudaBackendTest PRIVATE ${LIB_NAME} )
   set_target_properties( CudaBackendTest PROPERTIES FOLDER test )
 

@@ -105,6 +105,8 @@ public:
 
   CudaMirrorHandle registerPictureMirror(const void *owner, CudaPictureRole role,
                                          const CudaHostPictureDesc &picture);
+  void rebindHostPicture(CudaMirrorHandle handle, const CudaHostPictureDesc &picture);
+  void rebindHostPicture(const void *owner, CudaPictureRole role, const CudaHostPictureDesc &picture);
   void releasePictureMirror(CudaMirrorHandle handle);
   void releasePictureMirrors(const void *owner);
   void releaseAllPictureMirrors();
@@ -116,7 +118,11 @@ public:
   void markHostModified(CudaMirrorHandle handle);
   void markDeviceModified(CudaMirrorHandle handle);
   void ensureDevice(CudaMirrorHandle handle);
+  // Future GPU writers must call ensureHost before any CPU-side hash, YUV writer, or other host consumer.
   void ensureHost(CudaMirrorHandle handle);
+#if VTM_CUDA_TESTING
+  void injectReleaseFailuresForTesting(unsigned asyncFailures, unsigned immediateFailures);
+#endif
 
   bool isCreated() const noexcept;
   static bool isCompiled() noexcept;

@@ -49,6 +49,10 @@ struct RuntimeContext
   std::array<cudaStream_t, 3> streams{};
   std::array<cudaEvent_t, 3>  fences{};
   cudaMemPool_t               memoryPool = nullptr;
+#if VTM_CUDA_TESTING
+  unsigned                    asyncReleaseFailures = 0;
+  unsigned                    immediateReleaseFailures = 0;
+#endif
 };
 
 namespace
@@ -255,8 +259,32 @@ void releaseDevice(RuntimeContext *context, void *allocation, const CudaQueue qu
   {
     return;
   }
+#if VTM_CUDA_TESTING
+  if (context->asyncReleaseFailures > 0)
+  {
+    --context->asyncReleaseFailures;
+    throw std::runtime_error("Injected CUDA asynchronous release failure");
+  }
+#endif
   checkCuda(cudaSetDevice(context->device), "device selection");
   checkCuda(cudaFreeAsync(allocation, context->streams[queueIndex(queue)]), "memory pool release");
+}
+
+void releaseDeviceImmediate(RuntimeContext *context, void *allocation)
+{
+  if (allocation == nullptr)
+  {
+    return;
+  }
+#if VTM_CUDA_TESTING
+  if (context->immediateReleaseFailures > 0)
+  {
+    --context->immediateReleaseFailures;
+    throw std::runtime_error("Injected CUDA synchronous release failure");
+  }
+#endif
+  checkCuda(cudaSetDevice(context->device), "device selection");
+  checkCuda(cudaFree(allocation), "synchronous memory release fallback");
 }
 
 void *allocatePinnedHost(const std::size_t bytes)
@@ -303,5 +331,13 @@ void synchronizeQueue(RuntimeContext *context, const CudaQueue queue)
   checkCuda(cudaSetDevice(context->device), "device selection");
   checkCuda(cudaStreamSynchronize(context->streams[queueIndex(queue)]), "queue synchronization");
 }
+
+#if VTM_CUDA_TESTING
+void injectReleaseFailures(RuntimeContext *context, const unsigned asyncFailures, const unsigned immediateFailures)
+{
+  context->asyncReleaseFailures = asyncFailures;
+  context->immediateReleaseFailures = immediateFailures;
+}
+#endif
 
 }   // namespace vtm::cuda_backend

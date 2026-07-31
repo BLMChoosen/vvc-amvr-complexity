@@ -84,7 +84,8 @@ public:
   bool                     isCudaBackendActive() const;
   void                     registerPictureMirror(const void *owner, vtm::CudaPictureRole role,
                                                  const vtm::CudaHostPictureDesc &picture);
-  void                     markPictureHostModified(const void *owner, vtm::CudaPictureRole role);
+  void                     bindPictureMirror(const void *owner, vtm::CudaPictureRole role,
+                                             const vtm::CudaHostPictureDesc &picture);
   void                     releasePictureMirrors(const void *owner);
 #if JVET_AJ0151_DSC_SEI
   DscSubstreamManager*     getDscSubstreamManager() { return &m_dscSubstreamManager; }

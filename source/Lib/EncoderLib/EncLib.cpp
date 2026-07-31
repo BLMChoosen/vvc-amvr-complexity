@@ -49,6 +49,8 @@
 #include "CudaBackend/ComputeBackend.h"
 #include "CudaBackend/CudaPictureMirror.h"
 
+#include <exception>
+
 namespace
 {
 
@@ -730,12 +732,33 @@ void EncLib::deletePicBuffer()
   PicList::iterator iterPic = m_cListPic.begin();
   int               size    = int(m_cListPic.size());
 
+  std::exception_ptr firstError;
   for (int i = 0; i < size; i++)
   {
     Picture* pcPic = *(iterPic++);
 
-    m_encLibCommon->releasePictureMirrors(pcPic);
-    pcPic->destroy();
+    try
+    {
+      m_encLibCommon->releasePictureMirrors(pcPic);
+    }
+    catch (...)
+    {
+      if (!firstError)
+      {
+        firstError = std::current_exception();
+      }
+    }
+    try
+    {
+      pcPic->destroy();
+    }
+    catch (...)
+    {
+      if (!firstError)
+      {
+        firstError = std::current_exception();
+      }
+    }
 
     // get rid of the qpadaption layer
     while( pcPic->aqlayer.size() )
@@ -748,6 +771,10 @@ void EncLib::deletePicBuffer()
   }
 
   m_cListPic.clear();
+  if (firstError)
+  {
+    std::rethrow_exception(firstError);
+  }
 }
 
 bool EncLib::encodePrep(bool flush, PelStorage *pcPicYuvOrg, const InputColourSpaceConversion snrCSC, 
@@ -762,6 +789,9 @@ bool EncLib::encodePrep(bool flush, PelStorage *pcPicYuvOrg, const InputColourSp
     const SPS *sps = m_spsMap.getPS( pps->getSPSId() );
 
     picCurr->m_bufs[PIC_ORIGINAL].copyFrom( m_cGOPEncoder.getPicBg()->getRecoBuf() );
+    m_encLibCommon->bindPictureMirror(
+      picCurr, vtm::CudaPictureRole::Original,
+      makeCudaPictureDesc(*picCurr, PIC_ORIGINAL, sps->getBitDepths(), 0));
     picCurr->finalInit( m_vps, *sps, *pps, &m_picHeader, m_apss, m_lmcsAPS, m_scalinglistAPS );
     picCurr->poc = m_pocLast - 1;
     m_pocLast -= 2;
@@ -995,6 +1025,10 @@ bool EncLib::encodePrep(bool flush, PelStorage *pcPicYuvOrg, const InputColourSp
       }
     }
 
+    m_encLibCommon->bindPictureMirror(
+      pcPicCurr, vtm::CudaPictureRole::Original,
+      makeCudaPictureDesc(*pcPicCurr, PIC_ORIGINAL, pSPS->getBitDepths(), 0));
+
     // fill PIC_TRUE_ORIGINAL_INPUT
     pcPicCurr->m_bufs[PIC_TRUE_ORIGINAL_INPUT].swap( *pcPicYuvOrg );
 
@@ -1132,6 +1166,10 @@ bool EncLib::encodePrep(bool flush, PelStorage *pcPicYuvOrg, const InputColourSp
       int ppsID = -1; // Use default PPS ID
       const PPS *pPPS = ( ppsID < 0 ) ? m_ppsMap.getFirstPS() : m_ppsMap.getPS( ppsID );
       const SPS *pSPS = m_spsMap.getPS( pPPS->getSPSId() );
+
+      m_encLibCommon->bindPictureMirror(
+        pcField, vtm::CudaPictureRole::Original,
+        makeCudaPictureDesc(*pcField, PIC_ORIGINAL, pSPS->getBitDepths(), 0));
 
       pcField->finalInit( m_vps, *pSPS, *pPPS, &m_picHeader, m_apss, m_lmcsAPS, m_scalinglistAPS );
       pcField->poc           = m_pocLast;
@@ -1303,16 +1341,14 @@ void EncLib::xGetNewPicBuffer ( std::list<PelUnitBuf*>& rcListPicYuvRecOut, Pict
     if (createPic)
     {
       m_encLibCommon->registerPictureMirror(
-        rpcPic, vtm::CudaPictureRole::Original,
-        makeCudaPictureDesc(*rpcPic, PIC_ORIGINAL, sps.getBitDepths(), 0));
-      m_encLibCommon->registerPictureMirror(
         rpcPic, vtm::CudaPictureRole::Reconstruction,
         makeCudaPictureDesc(*rpcPic, PIC_RECONSTRUCTION, sps.getBitDepths(), rpcPic->margin));
     }
     else
     {
-      m_encLibCommon->markPictureHostModified(rpcPic, vtm::CudaPictureRole::Original);
-      m_encLibCommon->markPictureHostModified(rpcPic, vtm::CudaPictureRole::Reconstruction);
+      m_encLibCommon->bindPictureMirror(
+        rpcPic, vtm::CudaPictureRole::Reconstruction,
+        makeCudaPictureDesc(*rpcPic, PIC_RECONSTRUCTION, sps.getBitDepths(), rpcPic->margin));
     }
   }
 

@@ -83,7 +83,7 @@ struct TestPicture
   vtm::CudaHostPictureDesc descriptor{};
 
   TestPicture(const std::uint32_t width, const std::uint32_t height, const std::uint8_t elementSize,
-              const std::uint8_t bitDepth)
+              const std::uint8_t bitDepth, const std::uint8_t salt = 0)
   {
     descriptor.planeCount = vtm::CUDA_PICTURE_PLANE_COUNT;
     for (std::size_t index = 0; index < planes.size(); ++index)
@@ -102,7 +102,7 @@ struct TestPicture
         for (std::size_t column = 0; column < plane.rowBytes; ++column)
         {
           plane.storage[row * plane.stride + column] =
-            static_cast<std::uint8_t>((row * 37 + column * 13 + index * 53 + bitDepth) & 0xff);
+            static_cast<std::uint8_t>((row * 37 + column * 13 + index * 53 + bitDepth + salt) & 0xff);
         }
       }
       plane.expected = plane.storage;
@@ -269,21 +269,35 @@ int main(const int argc, char *argv[])
     {
       return fail("Pinned allocation move did not transfer ownership");
     }
+    pinned.allocate(128);
+    if (!pinned || pinned.size() != 128)
+    {
+      return fail("Moved-from pinned allocation could not be safely reused");
+    }
+    pinned.reset();
     moved.reset();
     if (moved || moved.size() != 0)
     {
       return fail("Pinned allocation reset did not release ownership");
     }
 
-    TestPicture picture8(7, 5, 1, 8);
+    TestPicture picture8(7, 5, 2, 8);
     TestPicture picture10(16, 10, 2, 10);
+    TestPicture picture8Wide(12, 8, 4, 8);
+    TestPicture picture10Wide(18, 12, 4, 10);
     int owner8 = 0;
     int owner10 = 0;
+    int owner8Wide = 0;
+    int owner10Wide = 0;
     const vtm::CudaMirrorHandle mirror8 = context.registerPictureMirror(
       &owner8, vtm::CudaPictureRole::Reconstruction, picture8.descriptor);
     const vtm::CudaMirrorHandle mirror10 = context.registerPictureMirror(
       &owner10, vtm::CudaPictureRole::Original, picture10.descriptor);
-    if (mirror8 == mirror10 || context.pictureMirrorCount() != 2
+    const vtm::CudaMirrorHandle mirror8Wide = context.registerPictureMirror(
+      &owner8Wide, vtm::CudaPictureRole::Reconstruction, picture8Wide.descriptor);
+    const vtm::CudaMirrorHandle mirror10Wide = context.registerPictureMirror(
+      &owner10Wide, vtm::CudaPictureRole::Original, picture10Wide.descriptor);
+    if (mirror8 == mirror10 || mirror8Wide == mirror10Wide || context.pictureMirrorCount() != 4
         || !context.hasPictureMirror(&owner8, vtm::CudaPictureRole::Reconstruction)
         || context.pictureMirrorHandle(&owner10, vtm::CudaPictureRole::Original) != mirror10)
     {
@@ -302,7 +316,7 @@ int main(const int argc, char *argv[])
       return fail("Duplicate CUDA picture mirror registration was accepted");
     }
 
-    for (const vtm::CudaMirrorHandle mirror : { mirror8, mirror10 })
+    for (const vtm::CudaMirrorHandle mirror : { mirror8, mirror10, mirror8Wide, mirror10Wide })
     {
       context.ensureDevice(mirror);
       if (context.pictureMirrorState(mirror) != vtm::CudaMirrorState::Synchronized)
@@ -340,17 +354,87 @@ int main(const int argc, char *argv[])
     context.markHostModified(mirror10);
     context.ensureDevice(mirror10);
 
+    for (const auto item : { std::make_pair(mirror8Wide, &picture8Wide),
+                             std::make_pair(mirror10Wide, &picture10Wide) })
+    {
+      item.second->clearTransferredBytes();
+      context.markDeviceModified(item.first);
+      context.ensureHost(item.first);
+      if (!item.second->matchesExpected())
+      {
+        return fail("Four-byte Pel 4:2:0 picture round-trip was not byte exact");
+      }
+    }
+
+    TestPicture rebound8(7, 5, 2, 8, 91);
+    context.rebindHostPicture(mirror8, rebound8.descriptor);
+    if (context.pictureMirrorState(mirror8) != vtm::CudaMirrorState::HostValid)
+    {
+      return fail("CUDA host picture rebind did not invalidate stale device data");
+    }
+    context.ensureDevice(mirror8);
+    rebound8.clearTransferredBytes();
+    context.markDeviceModified(mirror8);
+    context.ensureHost(mirror8);
+    if (!rebound8.matchesExpected())
+    {
+      return fail("CUDA host picture rebind uploaded the old host storage");
+    }
+
+    TestPicture resized8(9, 7, 2, 8, 37);
+    context.rebindHostPicture(&owner8, vtm::CudaPictureRole::Reconstruction, resized8.descriptor);
+    context.ensureDevice(mirror8);
+    resized8.clearTransferredBytes();
+    context.markDeviceModified(mirror8);
+    context.ensureHost(mirror8);
+    if (!resized8.matchesExpected() || context.devicePicture(mirror8).planes[0].width != 9)
+    {
+      return fail("CUDA host picture geometry rebind did not reallocate the mirror");
+    }
+
     context.releasePictureMirror(mirror8);
-    if (context.pictureMirrorCount() != 1 || context.hasPictureMirror(&owner8, vtm::CudaPictureRole::Reconstruction)
+    if (context.pictureMirrorCount() != 3 || context.hasPictureMirror(&owner8, vtm::CudaPictureRole::Reconstruction)
         || !throws([&context, mirror8]() { context.ensureDevice(mirror8); }))
     {
       return fail("Released CUDA picture mirror remained usable");
     }
     context.releasePictureMirrors(&owner10);
+    context.releasePictureMirrors(&owner8Wide);
+    context.releasePictureMirrors(&owner10Wide);
     if (context.pictureMirrorCount() != 0)
     {
       return fail("Owner-based CUDA picture mirror release left registry entries");
     }
+
+#if VTM_CUDA_TESTING
+    TestPicture fallbackPicture(10, 8, 2, 10, 17);
+    int fallbackOwner = 0;
+    context.registerPictureMirror(
+      &fallbackOwner, vtm::CudaPictureRole::Original, fallbackPicture.descriptor);
+    context.registerPictureMirror(
+      &fallbackOwner, vtm::CudaPictureRole::Reconstruction, fallbackPicture.descriptor);
+    context.injectReleaseFailuresForTesting(6, 0);
+    if (!throws([&context, &fallbackOwner]() { context.releasePictureMirrors(&fallbackOwner); })
+        || context.pictureMirrorCount() != 0)
+    {
+      return fail("Synchronous fallback did not release every mirror after asynchronous free failures");
+    }
+
+    const vtm::CudaMirrorHandle retryHandle = context.registerPictureMirror(
+      &fallbackOwner, vtm::CudaPictureRole::Reconstruction, fallbackPicture.descriptor);
+    context.injectReleaseFailuresForTesting(1, 1);
+    if (!throws([&context, retryHandle]() { context.releasePictureMirror(retryHandle); })
+        || context.pictureMirrorCount() != 1
+        || !context.hasPictureMirror(&fallbackOwner, vtm::CudaPictureRole::Reconstruction))
+    {
+      return fail("Mirror ownership was lost after both asynchronous and synchronous free failed");
+    }
+    context.releasePictureMirror(retryHandle);
+    if (context.pictureMirrorCount() != 0)
+    {
+      return fail("Retained CUDA allocation could not be released on retry");
+    }
+#endif
 
     void *allocation = context.allocateDevice(4096, vtm::CudaQueue::Upload);
     context.recordFence(vtm::CudaQueue::Upload, vtm::CudaFence::UploadComplete);
@@ -388,6 +472,17 @@ int main(const int argc, char *argv[])
     vtm::CudaContext second;
     first.create(std::stoi(argv[2]));
     second.create(std::stoi(argv[2]));
+    TestPicture crossContextPicture(8, 6, 2, 8);
+    int firstOwner = 0;
+    int secondOwner = 0;
+    const vtm::CudaMirrorHandle firstHandle = first.registerPictureMirror(
+      &firstOwner, vtm::CudaPictureRole::Reconstruction, crossContextPicture.descriptor);
+    const vtm::CudaMirrorHandle secondHandle = second.registerPictureMirror(
+      &secondOwner, vtm::CudaPictureRole::Reconstruction, crossContextPicture.descriptor);
+    if (firstHandle == secondHandle || !throws([&second, firstHandle]() { second.ensureDevice(firstHandle); }))
+    {
+      return fail("CUDA mirror handle was accepted by a different context generation");
+    }
     first.shutdown();
     second.shutdown();
   }

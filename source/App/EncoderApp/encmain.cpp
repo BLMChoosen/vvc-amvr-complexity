@@ -420,6 +420,11 @@ int main(int argc, char* argv[])
           std::cout << "Memory allocation failed: " << e.what() << std::endl;
           return EXIT_FAILURE;
         }
+        catch( const std::exception &e )
+        {
+          std::cerr << e.what() << std::endl;
+          return EXIT_FAILURE;
+        }
 #endif
       }
     }
@@ -445,6 +450,11 @@ int main(int argc, char* argv[])
         catch( const std::bad_alloc &e )
         {
           std::cout << "Memory allocation failed: " << e.what() << std::endl;
+          return EXIT_FAILURE;
+        }
+        catch( const std::exception &e )
+        {
+          std::cerr << e.what() << std::endl;
           return EXIT_FAILURE;
         }
 #endif

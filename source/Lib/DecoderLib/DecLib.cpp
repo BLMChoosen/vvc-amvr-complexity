@@ -48,6 +48,7 @@
 #include "CudaBackend/CudaPictureMirror.h"
 
 #include <fstream>
+#include <exception>
 #include <set>
 #include <stdio.h>
 #include <fcntl.h>
@@ -715,18 +716,40 @@ void DecLib::deletePicBuffer ( )
   PicList::iterator  iterPic   = m_cListPic.begin();
   int                size      = int(m_cListPic.size());
 
+  std::exception_ptr firstError;
   for (int i = 0; i < size; i++)
   {
     Picture* pcPic = *(iterPic++);
-    if (m_computeState->cudaContext.isCreated())
+    try
     {
-      m_computeState->cudaContext.releasePictureMirrors(pcPic);
+      if (m_computeState->cudaContext.isCreated())
+      {
+        m_computeState->cudaContext.releasePictureMirrors(pcPic);
+      }
     }
-    pcPic->destroy();
+    catch (...)
+    {
+      if (!firstError)
+      {
+        firstError = std::current_exception();
+      }
+    }
+    try
+    {
+      pcPic->destroy();
+    }
+    catch (...)
+    {
+      if (!firstError)
+      {
+        firstError = std::current_exception();
+      }
+    }
 
     delete pcPic;
     pcPic = nullptr;
   }
+  m_cListPic.clear();
   m_cALF.destroy();
   m_cSAO.destroy();
   m_deblockingFilter.destroy();
@@ -736,6 +759,10 @@ void DecLib::deletePicBuffer ( )
 #endif
   m_cCuDecoder.destoryDecCuReshaprBuf();
   m_cReshaper.destroy();
+  if (firstError)
+  {
+    std::rethrow_exception(firstError);
+  }
 }
 
 Picture* DecLib::xGetNewPicBuffer(const SPS* sps, const PPS* pps, const uint32_t temporalLayer, const int layerId)
@@ -809,9 +836,8 @@ Picture* DecLib::xGetNewPicBuffer(const SPS* sps, const PPS* pps, const uint32_t
     }
     else
     {
-      const vtm::CudaMirrorHandle handle =
-        m_computeState->cudaContext.pictureMirrorHandle(pic, vtm::CudaPictureRole::Reconstruction);
-      m_computeState->cudaContext.markHostModified(handle);
+      m_computeState->cudaContext.rebindHostPicture(
+        pic, vtm::CudaPictureRole::Reconstruction, makeCudaReconstructionDesc(*pic, sps->getBitDepths()));
     }
   }
 

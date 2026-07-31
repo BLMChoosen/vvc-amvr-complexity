@@ -123,12 +123,19 @@ void EncLibCommon::registerPictureMirror(const void *owner, const vtm::CudaPictu
   }
 }
 
-void EncLibCommon::markPictureHostModified(const void *owner, const vtm::CudaPictureRole role)
+void EncLibCommon::bindPictureMirror(const void *owner, const vtm::CudaPictureRole role,
+                                     const vtm::CudaHostPictureDesc &picture)
 {
-  if (m_computeState->cudaContext.isCreated() && m_computeState->cudaContext.hasPictureMirror(owner, role))
+  if (m_computeState->cudaContext.isCreated())
   {
-    const vtm::CudaMirrorHandle handle = m_computeState->cudaContext.pictureMirrorHandle(owner, role);
-    m_computeState->cudaContext.markHostModified(handle);
+    if (m_computeState->cudaContext.hasPictureMirror(owner, role))
+    {
+      m_computeState->cudaContext.rebindHostPicture(owner, role, picture);
+    }
+    else
+    {
+      m_computeState->cudaContext.registerPictureMirror(owner, role, picture);
+    }
   }
 }
 

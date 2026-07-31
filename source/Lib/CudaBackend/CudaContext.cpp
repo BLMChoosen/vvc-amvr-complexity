@@ -34,12 +34,14 @@
 #include "CudaContext.h"
 
 #include <array>
+#include <atomic>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <thread>
 #include <exception>
 #include <unordered_map>
+#include <vector>
 
 #if VTM_ENABLE_CUDA
 #include "CudaRuntime.h"
@@ -87,11 +89,16 @@ void CudaPinnedBuffer::allocate(const std::size_t bytes)
     throw std::runtime_error("CUDA pinned allocation size must be greater than zero");
   }
 #if VTM_ENABLE_CUDA
-  void *allocation = cuda_backend::allocatePinnedHost(bytes);
-  reset();
+  std::unique_ptr<Impl> replacement;
   if (!m_impl)
   {
-    m_impl.reset(new Impl);
+    replacement.reset(new Impl);
+  }
+  void *allocation = cuda_backend::allocatePinnedHost(bytes);
+  reset();
+  if (replacement)
+  {
+    m_impl = std::move(replacement);
   }
   m_impl->allocation = allocation;
   m_impl->bytes      = bytes;
@@ -171,7 +178,8 @@ struct CudaContext::Impl
   cuda_backend::RuntimeContext *runtime = nullptr;
   std::unordered_map<CudaMirrorHandle, std::unique_ptr<PictureMirror>> mirrors;
   std::unordered_map<const void *, std::array<CudaMirrorHandle, 2>> owners;
-  CudaMirrorHandle nextHandle = 1;
+  std::uint32_t generation = 0;
+  std::uint32_t nextHandle = 1;
 #endif
   std::thread::id ownerThread;
 };
@@ -188,6 +196,8 @@ void requireOwnerThread(const std::thread::id &ownerThread)
 }
 
 #if VTM_ENABLE_CUDA
+
+std::atomic<std::uint32_t> nextContextGeneration{ 1 };
 
 template<typename ContextImpl>
 void requireRuntime(const ContextImpl *impl)
@@ -231,9 +241,9 @@ void validatePicture(const CudaHostPictureDesc &picture)
     {
       throw std::runtime_error("CUDA picture plane has no active host storage");
     }
-    if (plane.elementSize != 1 && plane.elementSize != 2)
+    if (plane.elementSize != 1 && plane.elementSize != 2 && plane.elementSize != 4)
     {
-      throw std::runtime_error("CUDA picture plane element size must be one or two bytes");
+      throw std::runtime_error("CUDA picture plane element size must be one, two, or four bytes");
     }
     if (plane.bitDepth != 8 && plane.bitDepth != 10)
     {
@@ -318,19 +328,133 @@ void unstageHostPicture(PictureMirror &mirror)
   }
 }
 
+bool sameAllocationLayout(const CudaHostPictureDesc &first, const CudaHostPictureDesc &second)
+{
+  if (first.planeCount != second.planeCount)
+  {
+    return false;
+  }
+  for (std::size_t index = 0; index < first.planeCount; ++index)
+  {
+    const CudaHostPlaneDesc &a = first.planes[index];
+    const CudaHostPlaneDesc &b = second.planes[index];
+    if (a.width != b.width || a.height != b.height || a.marginLeft != b.marginLeft
+        || a.marginRight != b.marginRight || a.marginTop != b.marginTop || a.marginBottom != b.marginBottom
+        || a.elementSize != b.elementSize || a.bitDepth != b.bitDepth)
+    {
+      return false;
+    }
+  }
+  return true;
+}
+
+template<typename ContextImpl>
+void allocateMirrorResources(ContextImpl *impl, PictureMirror &mirror, const CudaHostPictureDesc &picture)
+{
+  mirror.host = picture;
+  mirror.device = CudaDevicePictureDesc{};
+  mirror.device.planeCount = picture.planeCount;
+  mirror.state = CudaMirrorState::HostValid;
+  mirror.uploadPending = false;
+
+  for (std::size_t index = 0; index < picture.planeCount; ++index)
+  {
+    const CudaHostPlaneDesc &host = picture.planes[index];
+    const std::size_t fullWidth = static_cast<std::size_t>(host.marginLeft) + host.width + host.marginRight;
+    const std::size_t fullHeight = static_cast<std::size_t>(host.marginTop) + host.height + host.marginBottom;
+    const std::size_t rowBytes = checkedMultiply(fullWidth, host.elementSize, "row size");
+    const std::size_t pitch = checkedAdd(rowBytes, 127, "device pitch") & ~std::size_t(127);
+    const std::size_t allocationBytes = checkedMultiply(pitch, fullHeight, "device allocation");
+    const std::size_t stagingBytes = checkedMultiply(rowBytes, fullHeight, "staging allocation");
+
+    mirror.staging[index].allocate(stagingBytes);
+    mirror.deviceBases[index] = cuda_backend::allocateDevice(impl->runtime, allocationBytes, CudaQueue::Upload);
+    mirror.fullRowBytes[index] = rowBytes;
+    mirror.fullHeights[index]  = fullHeight;
+
+    CudaDevicePlaneDesc &device = mirror.device.planes[index];
+    device.data = static_cast<unsigned char *>(mirror.deviceBases[index])
+                  + static_cast<std::size_t>(host.marginTop) * pitch
+                  + static_cast<std::size_t>(host.marginLeft) * host.elementSize;
+    device.pitchBytes   = pitch;
+    device.width        = host.width;
+    device.height       = host.height;
+    device.marginLeft   = host.marginLeft;
+    device.marginRight  = host.marginRight;
+    device.marginTop    = host.marginTop;
+    device.marginBottom = host.marginBottom;
+    device.elementSize  = host.elementSize;
+    device.bitDepth     = host.bitDepth;
+  }
+}
+
 template<typename ContextImpl>
 void releaseMirrorResources(ContextImpl *impl, PictureMirror &mirror)
 {
-  cuda_backend::synchronizeRuntimeContext(impl->runtime);
+  std::exception_ptr firstError;
+  try
+  {
+    cuda_backend::synchronizeRuntimeContext(impl->runtime);
+  }
+  catch (...)
+  {
+    firstError = std::current_exception();
+  }
   for (void *&allocation : mirror.deviceBases)
   {
     if (allocation != nullptr)
     {
-      cuda_backend::releaseDevice(impl->runtime, allocation, CudaQueue::Compute);
-      allocation = nullptr;
+      try
+      {
+        cuda_backend::releaseDevice(impl->runtime, allocation, CudaQueue::Compute);
+        allocation = nullptr;
+      }
+      catch (...)
+      {
+        if (!firstError)
+        {
+          firstError = std::current_exception();
+        }
+        // cudaFreeAsync did not accept ownership. After the synchronization attempt above, a synchronous
+        // cudaFree is the safe fallback. If it also fails, retain the pointer in the mirror so teardown can retry.
+        try
+        {
+          cuda_backend::releaseDeviceImmediate(impl->runtime, allocation);
+          allocation = nullptr;
+        }
+        catch (...)
+        {
+        }
+      }
     }
   }
-  cuda_backend::synchronizeQueue(impl->runtime, CudaQueue::Compute);
+  try
+  {
+    cuda_backend::synchronizeQueue(impl->runtime, CudaQueue::Compute);
+  }
+  catch (...)
+  {
+    if (!firstError)
+    {
+      firstError = std::current_exception();
+    }
+  }
+  if (firstError)
+  {
+    std::rethrow_exception(firstError);
+  }
+}
+
+bool hasDeviceAllocations(const PictureMirror &mirror)
+{
+  for (const void *allocation : mirror.deviceBases)
+  {
+    if (allocation != nullptr)
+    {
+      return true;
+    }
+  }
+  return false;
 }
 
 template<typename ContextImpl>
@@ -345,36 +469,43 @@ void releaseAllMirrorsNoThrow(ContextImpl *impl) noexcept
   try
   {
     cuda_backend::synchronizeRuntimeContext(impl->runtime);
-    for (auto &entry : impl->mirrors)
-    {
-      for (void *&allocation : entry.second->deviceBases)
-      {
-        if (allocation != nullptr)
-        {
-          try
-          {
-            cuda_backend::releaseDevice(impl->runtime, allocation, CudaQueue::Compute);
-          }
-          catch (...)
-          {
-          }
-          allocation = nullptr;
-        }
-      }
-    }
-    try
-    {
-      cuda_backend::synchronizeQueue(impl->runtime, CudaQueue::Compute);
-    }
-    catch (...)
-    {
-    }
   }
   catch (...)
   {
   }
-  impl->mirrors.clear();
-  impl->owners.clear();
+  for (auto &entry : impl->mirrors)
+  {
+    for (void *&allocation : entry.second->deviceBases)
+    {
+      if (allocation != nullptr)
+      {
+        try
+        {
+          cuda_backend::releaseDevice(impl->runtime, allocation, CudaQueue::Compute);
+          allocation = nullptr;
+        }
+        catch (...)
+        {
+          try
+          {
+            cuda_backend::releaseDeviceImmediate(impl->runtime, allocation);
+            allocation = nullptr;
+          }
+          catch (...)
+          {
+            // Keep ownership in the mirror until destroyRuntimeContext tears down the owning memory pool.
+          }
+        }
+      }
+    }
+  }
+  try
+  {
+    cuda_backend::synchronizeQueue(impl->runtime, CudaQueue::Compute);
+  }
+  catch (...)
+  {
+  }
 }
 
 #endif
@@ -416,6 +547,12 @@ void CudaContext::create(const int device)
 #if VTM_ENABLE_CUDA
   m_impl->runtime = cuda_backend::createRuntimeContext(device);
   m_impl->ownerThread = std::this_thread::get_id();
+  m_impl->generation = nextContextGeneration.fetch_add(1, std::memory_order_relaxed);
+  if (m_impl->generation == 0)
+  {
+    m_impl->generation = nextContextGeneration.fetch_add(1, std::memory_order_relaxed);
+  }
+  m_impl->nextHandle = 1;
 #else
   (void) device;
   throw std::runtime_error("CUDA backend requested, but this binary was built with ENABLE_CUDA=OFF");
@@ -439,11 +576,37 @@ void CudaContext::shutdown(const bool synchronize)
   if (m_impl->runtime != nullptr)
   {
     requireOwnerThread(m_impl->ownerThread);
-    releaseAllPictureMirrors();
+    std::exception_ptr firstError;
+    try
+    {
+      releaseAllPictureMirrors();
+    }
+    catch (...)
+    {
+      firstError = std::current_exception();
+    }
     cuda_backend::RuntimeContext *runtime = m_impl->runtime;
     m_impl->runtime = nullptr;
     m_impl->ownerThread = std::thread::id{};
-    cuda_backend::shutdownRuntimeContext(runtime, synchronize);
+    try
+    {
+      cuda_backend::shutdownRuntimeContext(runtime, synchronize);
+    }
+    catch (...)
+    {
+      if (!firstError)
+      {
+        firstError = std::current_exception();
+      }
+    }
+    // shutdownRuntimeContext destroys the owning memory pool even when it reports an error. Only now is it safe
+    // to discard mirrors whose async and synchronous free attempts both failed.
+    m_impl->mirrors.clear();
+    m_impl->owners.clear();
+    if (firstError)
+    {
+      std::rethrow_exception(firstError);
+    }
   }
 #endif
 }
@@ -535,49 +698,93 @@ CudaMirrorHandle CudaContext::registerPictureMirror(const void *owner, const Cud
     throw std::runtime_error("CUDA picture mirror is already registered for this owner and role");
   }
 
-  std::unique_ptr<PictureMirror> mirror(new PictureMirror);
-  mirror->owner = owner;
-  mirror->role  = role;
-  mirror->host  = picture;
-  mirror->device.planeCount = picture.planeCount;
+  CudaMirrorHandle handle = 0;
+  decltype(m_impl->mirrors)::iterator slot;
+  for (;;)
+  {
+    std::uint32_t localHandle = m_impl->nextHandle++;
+    if (localHandle == 0)
+    {
+      continue;
+    }
+    handle = (static_cast<CudaMirrorHandle>(m_impl->generation) << 32) | localHandle;
+    const auto inserted = m_impl->mirrors.emplace(handle, nullptr);
+    if (inserted.second)
+    {
+      slot = inserted.first;
+      break;
+    }
+  }
 
   try
   {
-    for (std::size_t index = 0; index < picture.planeCount; ++index)
+    // The potentially-throwing unordered_map insertion happens before any CUDA allocation. Once allocation starts,
+    // the registry owns the mirror so even a failed rollback remains reachable by shutdown for another release try.
+    slot->second.reset(new PictureMirror);
+    slot->second->owner = owner;
+    slot->second->role  = role;
+    allocateMirrorResources(m_impl.get(), *slot->second, picture);
+    m_impl->owners[owner][ownerRole] = handle;
+  }
+  catch (...)
+  {
+    const std::exception_ptr registrationError = std::current_exception();
+    if (slot->second)
     {
-      const CudaHostPlaneDesc &host = picture.planes[index];
-      const std::size_t fullWidth = static_cast<std::size_t>(host.marginLeft) + host.width + host.marginRight;
-      const std::size_t fullHeight = static_cast<std::size_t>(host.marginTop) + host.height + host.marginBottom;
-      const std::size_t rowBytes = checkedMultiply(fullWidth, host.elementSize, "row size");
-      const std::size_t pitch = checkedAdd(rowBytes, 127, "device pitch") & ~std::size_t(127);
-      const std::size_t allocationBytes = checkedMultiply(pitch, fullHeight, "device allocation");
-      const std::size_t stagingBytes = checkedMultiply(rowBytes, fullHeight, "staging allocation");
-
-      mirror->staging[index].allocate(stagingBytes);
-      mirror->deviceBases[index] = cuda_backend::allocateDevice(m_impl->runtime, allocationBytes, CudaQueue::Upload);
-      mirror->fullRowBytes[index] = rowBytes;
-      mirror->fullHeights[index]  = fullHeight;
-
-      CudaDevicePlaneDesc &device = mirror->device.planes[index];
-      device.data = static_cast<unsigned char *>(mirror->deviceBases[index])
-                    + static_cast<std::size_t>(host.marginTop) * pitch
-                    + static_cast<std::size_t>(host.marginLeft) * host.elementSize;
-      device.pitchBytes   = pitch;
-      device.width        = host.width;
-      device.height       = host.height;
-      device.marginLeft   = host.marginLeft;
-      device.marginRight  = host.marginRight;
-      device.marginTop    = host.marginTop;
-      device.marginBottom = host.marginBottom;
-      device.elementSize  = host.elementSize;
-      device.bitDepth     = host.bitDepth;
+      try
+      {
+        releaseMirrorResources(m_impl.get(), *slot->second);
+      }
+      catch (...)
+      {
+      }
     }
+    if (!slot->second || !hasDeviceAllocations(*slot->second))
+    {
+      m_impl->mirrors.erase(slot);
+    }
+    std::rethrow_exception(registrationError);
+  }
+  return handle;
+#else
+  (void) owner;
+  (void) role;
+  (void) picture;
+  throw std::runtime_error("CUDA picture mirror requested, but this binary was built with ENABLE_CUDA=OFF");
+#endif
+}
+
+void CudaContext::rebindHostPicture(const CudaMirrorHandle handle, const CudaHostPictureDesc &picture)
+{
+#if VTM_ENABLE_CUDA
+  requireRuntime(m_impl.get());
+  validatePicture(picture);
+  PictureMirror &mirror = findMirror(m_impl.get(), handle);
+
+  // A PelStorage swap can occur while an earlier upload is still queued. Complete all users of the old host
+  // and device storage before changing either pointer set.
+  cuda_backend::synchronizeRuntimeContext(m_impl->runtime);
+  mirror.uploadPending = false;
+
+  if (sameAllocationLayout(mirror.host, picture))
+  {
+    mirror.host  = picture;
+    mirror.state = CudaMirrorState::HostValid;
+    return;
+  }
+
+  PictureMirror replacement;
+  replacement.owner = mirror.owner;
+  replacement.role  = mirror.role;
+  try
+  {
+    allocateMirrorResources(m_impl.get(), replacement, picture);
   }
   catch (...)
   {
     try
     {
-      releaseMirrorResources(m_impl.get(), *mirror);
+      releaseMirrorResources(m_impl.get(), replacement);
     }
     catch (...)
     {
@@ -585,27 +792,32 @@ CudaMirrorHandle CudaContext::registerPictureMirror(const void *owner, const Cud
     throw;
   }
 
-  CudaMirrorHandle handle = m_impl->nextHandle++;
-  if (handle == 0)
-  {
-    handle = m_impl->nextHandle++;
-  }
+  std::exception_ptr releaseError;
   try
   {
-    m_impl->mirrors.emplace(handle, std::move(mirror));
-    m_impl->owners[owner][ownerRole] = handle;
+    releaseMirrorResources(m_impl.get(), mirror);
   }
   catch (...)
   {
-    const auto inserted = m_impl->mirrors.find(handle);
-    if (inserted != m_impl->mirrors.end())
-    {
-      releaseMirrorResources(m_impl.get(), *inserted->second);
-      m_impl->mirrors.erase(inserted);
-    }
-    throw;
+    releaseError = std::current_exception();
   }
-  return handle;
+  mirror = std::move(replacement);
+  if (releaseError)
+  {
+    std::rethrow_exception(releaseError);
+  }
+#else
+  (void) handle;
+  (void) picture;
+  throw std::runtime_error("CUDA picture mirror requested, but this binary was built with ENABLE_CUDA=OFF");
+#endif
+}
+
+void CudaContext::rebindHostPicture(const void *owner, const CudaPictureRole role,
+                                    const CudaHostPictureDesc &picture)
+{
+#if VTM_ENABLE_CUDA
+  rebindHostPicture(pictureMirrorHandle(owner, role), picture);
 #else
   (void) owner;
   (void) role;
@@ -618,19 +830,40 @@ void CudaContext::releasePictureMirror(const CudaMirrorHandle handle)
 {
 #if VTM_ENABLE_CUDA
   requireRuntime(m_impl.get());
-  PictureMirror &mirror = findMirror(m_impl.get(), handle);
-  const void *owner = mirror.owner;
-  const std::size_t ownerRole = roleIndex(mirror.role);
-  releaseMirrorResources(m_impl.get(), mirror);
-  m_impl->mirrors.erase(handle);
-  auto ownerFound = m_impl->owners.find(owner);
-  if (ownerFound != m_impl->owners.end())
+  const auto mirrorFound = m_impl->mirrors.find(handle);
+  if (handle == 0 || mirrorFound == m_impl->mirrors.end())
   {
-    ownerFound->second[ownerRole] = 0;
-    if (ownerFound->second[0] == 0 && ownerFound->second[1] == 0)
+    throw std::runtime_error("CUDA picture mirror handle is invalid or has been released");
+  }
+  PictureMirror &mirror = *mirrorFound->second;
+  std::exception_ptr releaseError;
+  try
+  {
+    releaseMirrorResources(m_impl.get(), mirror);
+  }
+  catch (...)
+  {
+    releaseError = std::current_exception();
+  }
+
+  if (!hasDeviceAllocations(mirror))
+  {
+    const void *owner = mirror.owner;
+    const std::size_t ownerRole = roleIndex(mirror.role);
+    m_impl->mirrors.erase(mirrorFound);
+    auto ownerFound = m_impl->owners.find(owner);
+    if (ownerFound != m_impl->owners.end())
     {
-      m_impl->owners.erase(ownerFound);
+      ownerFound->second[ownerRole] = 0;
+      if (ownerFound->second[0] == 0 && ownerFound->second[1] == 0)
+      {
+        m_impl->owners.erase(ownerFound);
+      }
     }
+  }
+  if (releaseError)
+  {
+    std::rethrow_exception(releaseError);
   }
 #else
   (void) handle;
@@ -648,12 +881,27 @@ void CudaContext::releasePictureMirrors(const void *owner)
     return;
   }
   const std::array<CudaMirrorHandle, 2> handles = found->second;
+  std::exception_ptr firstError;
   for (const CudaMirrorHandle handle : handles)
   {
     if (handle != 0)
     {
-      releasePictureMirror(handle);
+      try
+      {
+        releasePictureMirror(handle);
+      }
+      catch (...)
+      {
+        if (!firstError)
+        {
+          firstError = std::current_exception();
+        }
+      }
     }
+  }
+  if (firstError)
+  {
+    std::rethrow_exception(firstError);
   }
 #else
   (void) owner;
@@ -664,9 +912,30 @@ void CudaContext::releaseAllPictureMirrors()
 {
 #if VTM_ENABLE_CUDA
   requireRuntime(m_impl.get());
-  while (!m_impl->mirrors.empty())
+  std::exception_ptr firstError;
+  std::vector<CudaMirrorHandle> handles;
+  handles.reserve(m_impl->mirrors.size());
+  for (const auto &entry : m_impl->mirrors)
   {
-    releasePictureMirror(m_impl->mirrors.begin()->first);
+    handles.push_back(entry.first);
+  }
+  for (const CudaMirrorHandle handle : handles)
+  {
+    try
+    {
+      releasePictureMirror(handle);
+    }
+    catch (...)
+    {
+      if (!firstError)
+      {
+        firstError = std::current_exception();
+      }
+    }
+  }
+  if (firstError)
+  {
+    std::rethrow_exception(firstError);
   }
 #endif
 }
@@ -840,6 +1109,20 @@ void CudaContext::ensureHost(const CudaMirrorHandle handle)
   throw std::runtime_error("CUDA picture mirror requested, but this binary was built with ENABLE_CUDA=OFF");
 #endif
 }
+
+#if VTM_CUDA_TESTING
+void CudaContext::injectReleaseFailuresForTesting(const unsigned asyncFailures, const unsigned immediateFailures)
+{
+#if VTM_ENABLE_CUDA
+  requireRuntime(m_impl.get());
+  cuda_backend::injectReleaseFailures(m_impl->runtime, asyncFailures, immediateFailures);
+#else
+  (void) asyncFailures;
+  (void) immediateFailures;
+  throw std::runtime_error("CUDA release failure injection requires ENABLE_CUDA=ON");
+#endif
+}
+#endif
 
 bool CudaContext::isCreated() const noexcept
 {
