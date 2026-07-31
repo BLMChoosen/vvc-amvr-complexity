@@ -62,6 +62,11 @@
 #include "CommonLib/SEINeuralNetworkPostFiltering.h"
 #include "CommonLib/SEIPackedRegionsInfoProcess.h"
 
+namespace vtm
+{
+struct ComputeConfig;
+}
+
 class EncLibCommon;
 
 //! \ingroup EncoderLib
@@ -145,6 +150,8 @@ private:
   SEINeuralNetworkPostFiltering m_nnPostFiltering;
   EncType                   m_encType;
   SEIPackedRegionsInfoProcess m_priProcess;
+  struct ComputeState;
+  std::unique_ptr<ComputeState> m_computeState;
 public:
   SPS*                      getSPS( int spsId ) { return m_spsMap.getPS( spsId ); };
   APS**                     getApss() { return m_apss; }
@@ -177,6 +184,7 @@ public:
   void      create          ( const int layerId );
   void      destroy         ();
   void      init(AUWriterIf *auWriterIf);
+  void      setComputeConfig(const vtm::ComputeConfig &config);
   void      deletePicBuffer ();
 
   // -------------------------------------------------------------------------------------------------------------------

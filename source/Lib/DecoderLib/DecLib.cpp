@@ -470,8 +470,18 @@ bool tryDecodePicture(Picture *pcEncPic, const int expectedPoc, const std::strin
 //! \ingroup DecoderLib
 //! \{
 
+#include "CudaBackend/ComputeBackend.h"
+#include "CudaBackend/CudaContext.h"
+
+struct DecLib::ComputeState
+{
+  vtm::ComputeConfig config;
+  vtm::CudaContext  cudaContext;
+};
+
 DecLib::DecLib()
-  : m_isFirstGeneralHrd(true)
+  : m_computeState(new ComputeState)
+  , m_isFirstGeneralHrd(true)
   , m_prevGeneralHrdParams()
   , m_latestDRAPPOC(MAX_INT)
   , m_latestEDRAPPOC(MAX_INT)
@@ -599,6 +609,23 @@ DecLib::~DecLib()
 
 void DecLib::create()
 {
+  if (m_computeState->config.backend == vtm::ComputeBackend::CUDA)
+  {
+    try
+    {
+      m_computeState->cudaContext.create(m_computeState->config.device);
+      if (!m_computeState->cudaContext.supportsMain10())
+      {
+        m_computeState->cudaContext.destroy();
+        THROW("Selected CUDA device does not support the Main 10 compute path");
+      }
+    }
+    catch (const std::exception &error)
+    {
+      THROW(error.what());
+    }
+  }
+
   m_apcSlicePilot = new Slice;
   m_uiSliceSegmentIdx = 0;
 }
@@ -621,6 +648,13 @@ void DecLib::destroy()
   }
 
   m_cSliceDecoder.destroy();
+  m_computeState->cudaContext.destroy();
+}
+
+void DecLib::setComputeConfig(const vtm::ComputeConfig &config)
+{
+  CHECK(m_computeState->cudaContext.isCreated(), "Compute backend cannot be changed after decoder creation");
+  m_computeState->config = config;
 }
 
 void DecLib::init(

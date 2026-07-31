@@ -1,11 +1,27 @@
 # minimum required cmake version
 cmake_minimum_required( VERSION 3.10 FATAL_ERROR )
 
+option( ENABLE_CUDA "Build the optional CUDA compute backend" OFF )
+
+if( ENABLE_CUDA AND CMAKE_VERSION VERSION_LESS 3.24 )
+  message( FATAL_ERROR "ENABLE_CUDA requires CMake 3.24 or newer (found ${CMAKE_VERSION})" )
+endif()
+
 # project name
 if( EXTENSION_360_VIDEO )
   project( NextSoftware360 )
 else()
   project( NextSoftware )
+endif()
+
+if( ENABLE_CUDA )
+  set( VTM_CUDA_ARCHITECTURES "native" CACHE STRING
+       "CUDA architectures (for example native, 120, or sm_120)" )
+  set( _vtm_cuda_architectures "${VTM_CUDA_ARCHITECTURES}" )
+  string( REGEX REPLACE "sm_([0-9]+)" "\\1" _vtm_cuda_architectures "${_vtm_cuda_architectures}" )
+  set( CMAKE_CUDA_ARCHITECTURES "${_vtm_cuda_architectures}" )
+  enable_language( CUDA )
+  find_package( CUDAToolkit REQUIRED )
 endif()
 
 # use ccache
@@ -88,13 +104,13 @@ bb_enable_warnings( msvc warnings-as-errors "/wd4996" )
 
 # enable sse4.1 build for all source files for gcc and clang
 if( (UNIX OR MINGW) AND NOT (CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64") )
-  add_compile_options( "-msse4.1" )
+  add_compile_options( "$<$<COMPILE_LANGUAGE:CXX>:-msse4.1>" )
 endif()
 
 # enable parallel build for Visual Studio
 if( MSVC )
-  add_compile_options( "/MP" )
-  add_compile_options( "/EHsc" )
+  add_compile_options( "$<$<COMPILE_LANGUAGE:CXX>:/MP>" )
+  add_compile_options( "$<$<COMPILE_LANGUAGE:CXX>:/EHsc>" )
 endif()
 
 # set address sanitizer compiler arguments
@@ -102,13 +118,13 @@ if( CMAKE_CXX_COMPILER_ID STREQUAL "GNU" )
   if( CMAKE_SYSTEM_NAME STREQUAL "Linux" )
     if( USE_ADDRESS_SANITIZER )
       # add compile options
-      add_compile_options( "-fsanitize=address" )
+      add_compile_options( "$<$<COMPILE_LANGUAGE:CXX>:-fsanitize=address>" )
       add_link_options( "-fsanitize=address" )
     endif()
   endif()
 
   if( CMAKE_CXX_COMPILER_VERSION VERSION_LESS 5.0 )
-    add_compile_options( "-fabi-version=6" )
+    add_compile_options( "$<$<COMPILE_LANGUAGE:CXX>:-fabi-version=6>" )
   endif()
 endif()
 
@@ -124,6 +140,7 @@ endif()
 # add needed subdirectories
 add_subdirectory( "source/Lib/CommonLib" )
 add_subdirectory( "source/Lib/CommonAnalyserLib" )
+add_subdirectory( "source/Lib/CudaBackend" )
 if( EXTENSION_360_VIDEO )
   add_subdirectory( "source/Lib/Lib360" )
   add_subdirectory( "source/Lib/AppEncHelper360" )

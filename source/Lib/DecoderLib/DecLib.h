@@ -61,6 +61,11 @@
 #include "SEIDigitallySignedContent.h"
 #endif
 
+namespace vtm
+{
+struct ComputeConfig;
+}
+
 #if JVET_AJ0151_DSC_SEI
 struct binNalUnit
 {
@@ -85,6 +90,9 @@ bool tryDecodePicture(Picture *pcPic, const int expectedPoc, const std::string &
 class DecLib
 {
 private:
+  struct ComputeState;
+  std::unique_ptr<ComputeState> m_computeState;
+
   bool m_isFirstGeneralHrd;
   GeneralHrdParams        m_prevGeneralHrdParams;
 
@@ -270,6 +278,7 @@ public:
 
   void  create  ();
   void  destroy ();
+  void  setComputeConfig(const vtm::ComputeConfig &config);
 
   void  setDecodedPictureHashSEIEnabled(int enabled) { m_decodedPictureHashSEIEnabled=enabled; }
 

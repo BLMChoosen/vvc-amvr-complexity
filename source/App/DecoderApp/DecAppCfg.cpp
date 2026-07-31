@@ -61,6 +61,7 @@ bool DecAppCfg::parseCfg( int argc, char* argv[] )
   bool do_help = false;
   std::string cfg_TargetDecLayerIdSetFile;
   std::string outputColourSpaceConvert;
+  std::string gpuBackend;
   int warnUnknowParameter = 0;
 #if ENABLE_TRACING
   std::string sTracingRule;
@@ -77,6 +78,8 @@ bool DecAppCfg::parseCfg( int argc, char* argv[] )
   ("help",                      do_help,                               false,      "this help text")
   ("BitstreamFile,b",           m_bitstreamFileName,                   std::string(""), "bitstream input file name")
   ("ReconFile,o",               m_reconFileName,                       std::string(""), "reconstructed YUV output file name\n")
+  ("GPUBackend",                gpuBackend,                            std::string("cpu"), "compute backend (cpu or cuda)")
+  ("GPUDevice",                 m_computeConfig.device,                           0, "CUDA device index")
   ("OplFile,-opl",              m_oplFilename,                         std::string(""), "opl-file name without extension for conformance testing\n")
 
 #if ENABLE_SIMD_OPT
@@ -169,6 +172,17 @@ bool DecAppCfg::parseCfg( int argc, char* argv[] )
       /* errors have already been reported to stderr */
       return false;
     }
+  }
+
+  if (!vtm::parseComputeBackend(gpuBackend, m_computeConfig.backend))
+  {
+    msg(ERROR, "Invalid GPUBackend '%s'; expected 'cpu' or 'cuda'\n", gpuBackend.c_str());
+    return false;
+  }
+  if (m_computeConfig.device < 0)
+  {
+    msg(ERROR, "GPUDevice must be zero or greater\n");
+    return false;
   }
 
 #if ENABLE_TRACING

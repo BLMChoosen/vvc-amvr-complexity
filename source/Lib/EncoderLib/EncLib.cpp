@@ -46,6 +46,8 @@
 #include "EncLibCommon.h"
 #include "CommonLib/SEIPackedRegionsInfoProcess.h"
 #include "CommonLib/ProfileTierLevel.h"
+#include "CudaBackend/ComputeBackend.h"
+#include "CudaBackend/CudaContext.h"
 
 //! \ingroup EncoderLib
 //! \{
@@ -53,6 +55,12 @@
 // ====================================================================================================================
 // Constructor / destructor / create / destroy
 // ====================================================================================================================
+
+struct EncLib::ComputeState
+{
+  vtm::ComputeConfig config;
+  vtm::CudaContext  cudaContext;
+};
 
 EncLib::EncLib(EncLibCommon *encLibCommon)
   : m_cListPic(encLibCommon->getPictureBuffer())
@@ -71,6 +79,7 @@ EncLib::EncLib(EncLibCommon *encLibCommon)
   , m_doPlt(true)
   , m_vps(encLibCommon->getVPS())
   , m_layerDecPicBuffering(encLibCommon->getDecPicBuffering())
+  , m_computeState(new ComputeState)
 {
   m_pocLast          = -1;
   m_receivedPicCount = 0;
@@ -101,6 +110,23 @@ EncLib::~EncLib()
 
 void EncLib::create( const int layerId )
 {
+  if (m_computeState->config.backend == vtm::ComputeBackend::CUDA)
+  {
+    try
+    {
+      m_computeState->cudaContext.create(m_computeState->config.device);
+      if (!m_computeState->cudaContext.supportsMain10())
+      {
+        m_computeState->cudaContext.destroy();
+        THROW("Selected CUDA device does not support the Main 10 compute path");
+      }
+    }
+    catch (const std::exception &error)
+    {
+      THROW(error.what());
+    }
+  }
+
   m_layerId = layerId;
   m_pocLast = m_compositeRefEnabled ? -2 : -1;
   // create processing unit classes
@@ -152,6 +178,13 @@ void EncLib::destroy ()
   m_cReshaper.          destroy();
   m_cInterSearch.       destroy();
   m_cIntraSearch.       destroy();
+  m_computeState->cudaContext.destroy();
+}
+
+void EncLib::setComputeConfig(const vtm::ComputeConfig &config)
+{
+  CHECK(m_computeState->cudaContext.isCreated(), "Compute backend cannot be changed after encoder creation");
+  m_computeState->config = config;
 }
 
 void EncLib::init(AUWriterIf *auWriterIf)

@@ -1750,6 +1750,8 @@ void EncApp::xInitLibCfg( int layerIdx )
 
 void EncApp::xCreateLib( std::list<PelUnitBuf*>& recBufList, const int layerId )
 {
+  m_cEncLib.setComputeConfig(m_computeConfig);
+
   // Video I/O
   m_cVideoIOYuvInputFile.open(m_inputFileName, false, m_inputBitDepth, m_msbExtendedBitDepth,
                               m_internalBitDepth);   // read  mode

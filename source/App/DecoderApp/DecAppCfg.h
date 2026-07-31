@@ -41,6 +41,7 @@
 #pragma once
 
 #include "CommonLib/CommonDef.h"
+#include "CudaBackend/ComputeBackend.h"
 #include <vector>
 
 //! \ingroup DecoderApp
@@ -59,6 +60,7 @@ protected:
 
   std::string   m_bitstreamFileName;                    ///< input bitstream file name
   std::string   m_reconFileName;                        ///< output reconstruction file name
+  vtm::ComputeConfig m_computeConfig;                   ///< CPU/CUDA backend selection
 
   std::string   m_oplFilename;                        ///< filename to output conformance log.
 

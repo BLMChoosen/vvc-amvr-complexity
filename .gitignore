@@ -24,3 +24,5 @@ deploy
 skills-lock.json
 CLAUDE.md
 /docs
+/build-phase1-cpu
+/build-phase1-cuda

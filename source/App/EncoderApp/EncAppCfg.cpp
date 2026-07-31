@@ -900,6 +900,7 @@ bool EncAppCfg::parseCfg( int argc, char* argv[] )
   std::string ignore;
 #endif
   std::string frameRate;
+  std::string gpuBackend;
 
   int chromaSampleLocType;
   int chromaSampleLocTypeTopField;
@@ -919,6 +920,8 @@ bool EncAppCfg::parseCfg( int argc, char* argv[] )
   ("InputPathPrefix,-ipp",                            inputPathPrefix,                             std::string(""), "pathname to prepend to input filename")
   ("BitstreamFile,b",                                 m_bitstreamFileName,                         std::string(""), "Bitstream output file name")
   ("ReconFile,o",                                     m_reconFileName,                             std::string(""), "Reconstructed YUV output file name")
+  ("GPUBackend",                                      gpuBackend,                                  std::string("cpu"), "Compute backend (cpu or cuda)")
+  ("GPUDevice",                                       m_computeConfig.device,                                  0, "CUDA device index")
   ("SEIShutterIntervalPreFilename,-sii",              m_shutterIntervalPreFileName, std::string(""), "File name of Pre-Filtering video. If empty, not output video\n")
   ("SourceWidth,-wdt",                                m_sourceWidth,                                       0, "Source picture width")
   ("SourceHeight,-hgt",                               m_sourceHeight,                                      0, "Source picture height")
@@ -2664,6 +2667,17 @@ bool EncAppCfg::parseCfg( int argc, char* argv[] )
       /* error report has already been printed on stderr */
       return false;
     }
+  }
+
+  if (!vtm::parseComputeBackend(gpuBackend, m_computeConfig.backend))
+  {
+    msg(ERROR, "Invalid GPUBackend '%s'; expected 'cpu' or 'cuda'\n", gpuBackend.c_str());
+    return false;
+  }
+  if (m_computeConfig.device < 0)
+  {
+    msg(ERROR, "GPUDevice must be zero or greater\n");
+    return false;
   }
 
   g_verbosity = MsgLevel( m_verbosity );

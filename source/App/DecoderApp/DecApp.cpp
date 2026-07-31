@@ -938,6 +938,7 @@ void DecApp::xCreateDecLib()
   initROM();
 
   // create decoder class
+  m_cDecLib.setComputeConfig(m_computeConfig);
   m_cDecLib.create();
 
   // initialize decoder class

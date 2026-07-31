@@ -46,6 +46,7 @@ template <class T1, class T2>
 static inline std::istream& operator >> (std::istream &in, std::map<T1, T2> &map);
 
 #include "Utilities/program_options_lite.h"
+#include "CudaBackend/ComputeBackend.h"
 
 #include "EncoderLib/EncCfg.h"
 #if EXTENSION_360_VIDEO
@@ -79,6 +80,7 @@ protected:
   std::string m_inputFileName;                                ///< source file name
   std::string m_bitstreamFileName;                            ///< output bitstream file
   std::string m_reconFileName;                                ///< output reconstruction file
+  vtm::ComputeConfig m_computeConfig;                          ///< CPU/CUDA backend selection
 
   // Lambda modifiers
   double    m_adLambdaModifier[ MAX_TLAYER ];                 ///< Lambda modifier array for each temporal layer

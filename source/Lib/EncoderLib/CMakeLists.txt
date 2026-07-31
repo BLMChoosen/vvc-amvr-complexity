@@ -41,7 +41,7 @@ if( DEFINED ENABLE_HIGH_BITDEPTH )
 endif()
 
 target_include_directories( ${LIB_NAME} PUBLIC . )
-target_link_libraries( ${LIB_NAME} CommonLib )
+target_link_libraries( ${LIB_NAME} CommonLib CudaBackend )
 
 if( CMAKE_COMPILER_IS_GNUCC )
   # this is quite certainly a compiler problem
