@@ -65,7 +65,12 @@ void computeDistortionBatch(RuntimeContext *context, const CudaDistortionBatchDe
                             const void *sourceDevice, std::size_t sourcePitchBytes,
                             const void *referenceDevice, std::size_t referencePitchBytes,
                             std::uint64_t *results);
+void computeFractionalSadBatch(RuntimeContext *context, const CudaFractionalSadBatchDesc &batch,
+                               const void *sourceDevice, std::size_t sourcePitchBytes,
+                               const void *referenceDevice, std::size_t referencePitchBytes,
+                               std::uint64_t *results);
 std::uint64_t distortionBatchDispatchCount(const RuntimeContext *context);
+std::uint64_t fractionalBatchDispatchCount(const RuntimeContext *context);
 void recoverDistortionRuntime(RuntimeContext *context) noexcept;
 #if VTM_CUDA_TESTING
 void injectReleaseFailures(RuntimeContext *context, unsigned asyncFailures, unsigned immediateFailures);

@@ -4,6 +4,7 @@ add_library( ${LIB_NAME} STATIC
   ComputeBackend.cpp
   ComputeBackend.h
   CudaDistortion.h
+  CudaInterpolation.h
   CudaContext.cpp
   CudaContext.h
   CudaPictureMirror.h

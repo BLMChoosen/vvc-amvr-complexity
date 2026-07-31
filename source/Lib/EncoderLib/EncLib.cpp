@@ -234,6 +234,11 @@ vtm::CudaSadStats EncLib::cudaSadStats() const
   return m_encLibCommon->cudaSadStats();
 }
 
+vtm::CudaFractionalStats EncLib::cudaFractionalStats() const
+{
+  return m_encLibCommon->cudaFractionalStats();
+}
+
 void EncLib::init(AUWriterIf *auWriterIf)
 {
   m_AUWriterIf = auWriterIf;

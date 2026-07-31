@@ -55,6 +55,7 @@ struct RuntimeContext
   std::uint64_t              *distortionResultsHost = nullptr;
   std::size_t                 distortionCapacity = 0;
   std::uint64_t               distortionDispatches = 0;
+  std::uint64_t               fractionalDispatches = 0;
 #if VTM_CUDA_TESTING
   unsigned                    asyncReleaseFailures = 0;
   unsigned                    immediateReleaseFailures = 0;
@@ -286,6 +287,141 @@ __global__ void sadBatchKernel(const Sample *source, const std::size_t sourcePit
   if (threadIdx.x == 0)
   {
     results[candidate] = (partial[0] << subShift) >> distortionShift;
+  }
+}
+
+__device__ __constant__ std::int16_t fractionalLumaFilters[4][8] =
+{
+  { 0, 0, 0, 64, 0, 0, 0, 0 },
+  { -1, 4, -10, 58, 17, -5, 1, 0 },
+  { -1, 4, -11, 40, 40, -11, 4, -1 },
+  { 0, 1, -5, 17, 58, -10, 4, -1 }
+};
+
+__device__ __constant__ std::int16_t alternateHalfFilter[8] = { 0, 3, 9, 20, 20, 9, 3, 0 };
+__device__ __constant__ std::int8_t halfCandidateHor[CUDA_FRACTIONAL_CANDIDATE_COUNT] =
+  { 0, 0, 0, -1, 1, -1, 1, -1, 1 };
+__device__ __constant__ std::int8_t halfCandidateVer[CUDA_FRACTIONAL_CANDIDATE_COUNT] =
+  { 0, -1, 1, 0, 0, -1, -1, 1, 1 };
+__device__ __constant__ std::int8_t quarterCandidateHor[CUDA_FRACTIONAL_CANDIDATE_COUNT] =
+  { 0, 0, 0, -1, 1, -1, 1, -1, 1 };
+__device__ __constant__ std::int8_t quarterCandidateVer[CUDA_FRACTIONAL_CANDIDATE_COUNT] =
+  { 0, -1, 1, -1, -1, 0, 0, 1, 1 };
+
+__device__ inline int floorDivideByFour(const int value)
+{
+  return value >= 0 ? value >> 2 : -(((-value) + 3) >> 2);
+}
+
+__device__ inline const std::int16_t *fractionalFilter(const int phaseQuarter, const bool alternateHalf)
+{
+  return alternateHalf && phaseQuarter == 2 ? alternateHalfFilter : fractionalLumaFilters[phaseQuarter];
+}
+
+template<typename Sample>
+__device__ inline std::int32_t horizontalIntermediate(const Sample *reference, const std::size_t stride,
+                                                       const int x, const int y, const int phaseQuarter,
+                                                       const int headRoom, const bool alternateHalf)
+{
+  if (phaseQuarter == 0)
+  {
+    return (static_cast<std::int32_t>(reference[static_cast<std::size_t>(y) * stride + x]) << headRoom) - 8192;
+  }
+  const std::int16_t *coefficients = fractionalFilter(phaseQuarter, alternateHalf);
+  std::int32_t sum = 0;
+#pragma unroll
+  for (int tap = 0; tap < 8; ++tap)
+  {
+    sum += static_cast<std::int32_t>(reference[static_cast<std::size_t>(y) * stride + x + tap - 3])
+           * coefficients[tap];
+  }
+  const int shift = 6 - headRoom;
+  return (sum - (8192 << shift)) >> shift;
+}
+
+template<typename Sample>
+__device__ inline std::int32_t fractionalPrediction(const Sample *reference, const std::size_t stride,
+                                                     const int x, const int y, const int displacementHorQuarter,
+                                                     const int displacementVerQuarter, const int bitDepth,
+                                                     const bool alternateHalfHorizontal,
+                                                     const bool alternateHalfVertical)
+{
+  const int integerHor = floorDivideByFour(displacementHorQuarter);
+  const int integerVer = floorDivideByFour(displacementVerQuarter);
+  const int phaseHor = displacementHorQuarter - (integerHor << 2);
+  const int phaseVer = displacementVerQuarter - (integerVer << 2);
+  const int headRoom = max(2, 14 - bitDepth);
+  const int sourceX = x + integerHor;
+  const int sourceY = y + integerVer;
+  std::int32_t value;
+  if (phaseVer == 0)
+  {
+    const std::int32_t intermediate = horizontalIntermediate(reference, stride, sourceX, sourceY, phaseHor,
+                                                              headRoom, alternateHalfHorizontal);
+    value = (intermediate + 8192 + (1 << (headRoom - 1))) >> headRoom;
+  }
+  else
+  {
+    const std::int16_t *coefficients = fractionalFilter(phaseVer, alternateHalfVertical);
+    std::int32_t sum = 0;
+#pragma unroll
+    for (int tap = 0; tap < 8; ++tap)
+    {
+      sum += horizontalIntermediate(reference, stride, sourceX, sourceY + tap - 3, phaseHor,
+                                    headRoom, alternateHalfHorizontal) * coefficients[tap];
+    }
+    const int shift = 6 + headRoom;
+    value = (sum + (1 << (shift - 1)) + (8192 << 6)) >> shift;
+  }
+  const int maximum = (1 << bitDepth) - 1;
+  return max(0, min(maximum, value));
+}
+
+template<typename Sample>
+__global__ void fractionalSadBatchKernel(const Sample *source, const std::size_t sourcePitchBytes,
+                                          const Sample *reference, const std::size_t referencePitchBytes,
+                                          const std::uint32_t width, const std::uint32_t height,
+                                          const int bitDepth, const CudaFractionalStage stage,
+                                          const int centreHorQuarter, const int centreVerQuarter,
+                                          const bool alternateHalf, std::uint64_t *results)
+{
+  const std::uint32_t candidate = blockIdx.x;
+  const std::size_t sourceStride = sourcePitchBytes / sizeof(Sample);
+  const std::size_t referenceStride = referencePitchBytes / sizeof(Sample);
+  const int displacementHorQuarter = stage == CudaFractionalStage::Half
+    ? static_cast<int>(halfCandidateHor[candidate]) * 2
+    : centreHorQuarter + static_cast<int>(quarterCandidateHor[candidate]);
+  const int displacementVerQuarter = stage == CudaFractionalStage::Half
+    ? static_cast<int>(halfCandidateVer[candidate]) * 2
+    : centreVerQuarter + static_cast<int>(quarterCandidateVer[candidate]);
+  const std::uint64_t sampleCount = static_cast<std::uint64_t>(width) * height;
+  std::uint64_t sum = 0;
+  for (std::uint64_t sample = threadIdx.x; sample < sampleCount; sample += blockDim.x)
+  {
+    const int y = static_cast<int>(sample / width);
+    const int x = static_cast<int>(sample - static_cast<std::uint64_t>(y) * width);
+    const std::int32_t prediction = fractionalPrediction(reference, referenceStride, x, y,
+                                                          displacementHorQuarter, displacementVerQuarter,
+                                                          bitDepth, alternateHalf,
+                                                          alternateHalf && stage == CudaFractionalStage::Half);
+    const std::int32_t difference = static_cast<std::int32_t>(
+      source[static_cast<std::size_t>(y) * sourceStride + x]) - prediction;
+    sum += static_cast<std::uint64_t>(difference < 0 ? -difference : difference);
+  }
+  __shared__ std::uint64_t partial[256];
+  partial[threadIdx.x] = sum;
+  __syncthreads();
+  for (unsigned offset = blockDim.x / 2; offset != 0; offset >>= 1)
+  {
+    if (threadIdx.x < offset)
+    {
+      partial[threadIdx.x] += partial[threadIdx.x + offset];
+    }
+    __syncthreads();
+  }
+  if (threadIdx.x == 0)
+  {
+    results[candidate] = partial[0];
   }
 }
 
@@ -526,9 +662,51 @@ void computeDistortionBatch(RuntimeContext *context, const CudaDistortionBatchDe
   ++context->distortionDispatches;
 }
 
+void computeFractionalSadBatch(RuntimeContext *context, const CudaFractionalSadBatchDesc &batch,
+                               const void *sourceDevice, const std::size_t sourcePitchBytes,
+                               const void *referenceDevice, const std::size_t referencePitchBytes,
+                               std::uint64_t *results)
+{
+  checkCuda(cudaSetDevice(context->device), "device selection");
+  ensureDistortionCapacity(context, CUDA_FRACTIONAL_CANDIDATE_COUNT);
+  cudaStream_t stream = context->streams[queueIndex(CudaQueue::Compute)];
+  constexpr unsigned threads = 256;
+  if (batch.elementSize == 2)
+  {
+    fractionalSadBatchKernel<std::int16_t><<<CUDA_FRACTIONAL_CANDIDATE_COUNT, threads, 0, stream>>>(
+      static_cast<const std::int16_t *>(sourceDevice), sourcePitchBytes,
+      static_cast<const std::int16_t *>(referenceDevice), referencePitchBytes,
+      batch.width, batch.height, batch.bitDepth, batch.stage,
+      batch.centreHorQuarter, batch.centreVerQuarter, batch.useAltHalfFilter,
+      context->distortionResultsDevice);
+  }
+  else
+  {
+    fractionalSadBatchKernel<std::int32_t><<<CUDA_FRACTIONAL_CANDIDATE_COUNT, threads, 0, stream>>>(
+      static_cast<const std::int32_t *>(sourceDevice), sourcePitchBytes,
+      static_cast<const std::int32_t *>(referenceDevice), referencePitchBytes,
+      batch.width, batch.height, batch.bitDepth, batch.stage,
+      batch.centreHorQuarter, batch.centreVerQuarter, batch.useAltHalfFilter,
+      context->distortionResultsDevice);
+  }
+  checkCuda(cudaGetLastError(), "fractional interpolation SAD batch launch");
+  checkCuda(cudaMemcpyAsync(context->distortionResultsHost, context->distortionResultsDevice,
+                            CUDA_FRACTIONAL_CANDIDATE_COUNT * sizeof(*results), cudaMemcpyDeviceToHost, stream),
+            "fractional SAD result download");
+  checkCuda(cudaStreamSynchronize(stream), "fractional SAD batch completion");
+  std::memcpy(results, context->distortionResultsHost,
+              CUDA_FRACTIONAL_CANDIDATE_COUNT * sizeof(*results));
+  ++context->fractionalDispatches;
+}
+
 std::uint64_t distortionBatchDispatchCount(const RuntimeContext *context)
 {
   return context->distortionDispatches;
+}
+
+std::uint64_t fractionalBatchDispatchCount(const RuntimeContext *context)
+{
+  return context->fractionalDispatches;
 }
 
 void recoverDistortionRuntime(RuntimeContext *context) noexcept

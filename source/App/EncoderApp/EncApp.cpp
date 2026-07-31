@@ -1977,11 +1977,15 @@ void EncApp::destroyLib()
   if (m_encLibCreated)
   {
     const vtm::CudaSadStats sadStats = m_cEncLib.cudaSadStats();
+    const vtm::CudaFractionalStats fractionalStats = m_cEncLib.cudaFractionalStats();
     if (m_computeConfig.backend == vtm::ComputeBackend::CUDA)
     {
       msg(INFO, "\nCUDA SAD batches: %llu, failures: %llu, disabled: %d\n",
           static_cast<unsigned long long>(sadStats.dispatches),
           static_cast<unsigned long long>(sadStats.failures), sadStats.disabled ? 1 : 0);
+      msg(INFO, "CUDA fractional SAD batches: %llu, failures: %llu, disabled: %d\n",
+          static_cast<unsigned long long>(fractionalStats.dispatches),
+          static_cast<unsigned long long>(fractionalStats.failures), fractionalStats.disabled ? 1 : 0);
     }
     try
     {

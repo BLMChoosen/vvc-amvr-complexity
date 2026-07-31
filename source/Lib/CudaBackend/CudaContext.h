@@ -36,6 +36,7 @@
 
 #include "CudaPictureMirror.h"
 #include "CudaDistortion.h"
+#include "CudaInterpolation.h"
 
 #include <memory>
 #include <cstddef>
@@ -123,7 +124,10 @@ public:
   void ensureHost(CudaMirrorHandle handle);
   bool isDistortionAccelerationAvailable() const noexcept;
   bool computeDistortionBatch(const CudaDistortionBatchDesc &batch, std::uint64_t *results) noexcept;
+  bool computeFractionalSadBatch(const CudaFractionalSadBatchDesc &batch, std::uint64_t *results) noexcept;
   std::uint64_t distortionBatchDispatchCount() const;
+  std::uint64_t fractionalBatchDispatchCount() const;
+  std::uint64_t fractionalBatchFailureCount() const noexcept;
   std::uint64_t distortionBatchFailureCount() const noexcept;
 #if VTM_CUDA_TESTING
   void injectReleaseFailuresForTesting(unsigned asyncFailures, unsigned immediateFailures);

@@ -51,6 +51,7 @@
 #include "EncLib.h"
 #include "EncLibCommon.h"
 #include "CudaBackend/CudaDistortion.h"
+#include "CudaBackend/CudaInterpolation.h"
 
 #include <math.h>
 #include <limits>
@@ -721,13 +722,15 @@ inline void InterSearch::xTZ8PointDiamondSearch( IntTZSearchStruct& rcStruct,
 #if GDR_ENABLED
 Distortion InterSearch::xPatternRefinement(const PredictionUnit &pu, RefPicList eRefPicList, int refIdx,
                                            const CPelBuf *pcPatternKey, Mv baseRefMv, int iFrac, Mv &rcMvFrac,
-                                           bool bAllowUseOfHadamard, bool &rbCleanCandExist)
+                                           bool bAllowUseOfHadamard, bool &rbCleanCandExist,
+                                           const std::uint64_t *fractionalSad)
 #else
 
 Distortion InterSearch::xPatternRefinement( const CPelBuf* pcPatternKey,
                                             Mv baseRefMv,
                                             int iFrac, Mv& rcMvFrac,
-                                            bool bAllowUseOfHadamard )
+                                            bool bAllowUseOfHadamard,
+                                            const std::uint64_t *fractionalSad )
 #endif
 {
   Distortion dist;
@@ -780,7 +783,8 @@ Distortion InterSearch::xPatternRefinement( const CPelBuf* pcPatternKey,
 
 
     m_cDistParam.cur.buf   = piRefPos;
-    dist                   = m_cDistParam.distFunc(m_cDistParam);
+    dist                   = fractionalSad == nullptr ? m_cDistParam.distFunc(m_cDistParam)
+                                                      : fractionalSad[i];
     dist += m_pcRdCost->getCostOfVectorWithPredictor(cMvTest.getHor(), cMvTest.getVer(), 0);
 
 #if GDR_ENABLED
@@ -6190,22 +6194,65 @@ void InterSearch::xPatternSearchFracDIF(const PredictionUnit &pu, RefPicList eRe
 
   //  Half-pel refinement
   m_pcRdCost->setCostScale(1);
-  xExtDIFUpSamplingH(&cPatternRoi, cStruct.useAltHpelIf);
+  Picture *referencePicture = pu.cu->slice->getRefPic(eRefPicList, refIdx);
+  const std::uint64_t fractionalSamples = static_cast<std::uint64_t>(cPatternRoi.width)
+                                          * cPatternRoi.height * vtm::CUDA_FRACTIONAL_CANDIDATE_COUNT;
+  constexpr std::uint64_t minCudaFractionalSamples = 1u << 17;
+  const bool cudaFractionalEligible = m_encLibCommon != nullptr
+    && !m_pcEncCfg->getUseHADME() && !pu.cs->slice->getDisableSATDForRD()
+    && !m_cDistParam.isBiPred && !m_cDistParam.applyWeight && !m_cDistParam.useMR
+    && !pu.cu->affine && !CU::isIBC(*pu.cu) && !m_useCompositeRef
+    && !referencePicture->isRefScaled(pu.cs->sps, pu.cs->pps)
+    && !referencePicture->isWrapAroundEnabled(pu.cs->sps, pu.cs->pps)
+    && fractionalSamples >= minCudaFractionalSamples
+    && m_encLibCommon->isCudaFractionalBatchAvailable(pu.cs->picture, referencePicture);
+  const std::uint64_t *halfSad = nullptr;
+  const bool halfDispatched = cudaFractionalEligible
+    && m_encLibCommon->computeFractionalSad(pu.cs->picture, cStruct.pcPatternKey->buf,
+                                            referencePicture, cPatternRoi.buf,
+                                            cPatternRoi.width, cPatternRoi.height,
+                                            sizeof(Pel), m_lumaClpRng.bd,
+                                            vtm::CudaFractionalStage::Half, 0, 0,
+                                            cStruct.useAltHpelIf, halfSad);
+  if (!halfDispatched)
+  {
+    xExtDIFUpSamplingH(&cPatternRoi, cStruct.useAltHpelIf);
+  }
 
   rcMvHalf = rcMvInt;   rcMvHalf <<= 1;    // for mv-cost
   Mv baseRefMv(0, 0);
 #if GDR_ENABLED
   ruiCost = xPatternRefinement(pu, eRefPicList, refIdx, cStruct.pcPatternKey, baseRefMv, 2, rcMvHalf,
-                               (!pu.cs->slice->getDisableSATDForRD()), rbCleanCandExist);
+                               (!pu.cs->slice->getDisableSATDForRD()), rbCleanCandExist, halfSad);
 #else
-  ruiCost = xPatternRefinement(cStruct.pcPatternKey, baseRefMv, 2, rcMvHalf, (!pu.cs->slice->getDisableSATDForRD()));
+  ruiCost = xPatternRefinement(cStruct.pcPatternKey, baseRefMv, 2, rcMvHalf,
+                               (!pu.cs->slice->getDisableSATDForRD()), halfSad);
 #endif
 
   //  quarter-pel refinement
   if (cStruct.imvShift == IMV_OFF)
   {
     m_pcRdCost->setCostScale(0);
-    xExtDIFUpSamplingQ(&cPatternRoi, rcMvHalf);
+    const std::uint64_t *quarterSad = nullptr;
+    const bool quarterDispatched = halfDispatched
+      && m_encLibCommon->computeFractionalSad(pu.cs->picture, cStruct.pcPatternKey->buf,
+                                               referencePicture, cPatternRoi.buf,
+                                               cPatternRoi.width, cPatternRoi.height,
+                                               sizeof(Pel), m_lumaClpRng.bd,
+                                               vtm::CudaFractionalStage::Quarter,
+                                               static_cast<std::int8_t>(rcMvHalf.getHor() * 2),
+                                               static_cast<std::int8_t>(rcMvHalf.getVer() * 2),
+                                               cStruct.useAltHpelIf, quarterSad);
+    if (!quarterDispatched)
+    {
+      // Quarter-pel CPU interpolation reuses the half-pel horizontal intermediates. Recreate them when the
+      // half stage ran on CUDA but the quarter stage fell back after a recoverable runtime failure.
+      if (halfDispatched)
+      {
+        xExtDIFUpSamplingH(&cPatternRoi, cStruct.useAltHpelIf);
+      }
+      xExtDIFUpSamplingQ(&cPatternRoi, rcMvHalf);
+    }
     baseRefMv = rcMvHalf;
     baseRefMv <<= 1;
 
@@ -6215,9 +6262,10 @@ void InterSearch::xPatternSearchFracDIF(const PredictionUnit &pu, RefPicList eRe
     rcMvQter <<= 1;
 #if GDR_ENABLED
     ruiCost = xPatternRefinement(pu, eRefPicList, refIdx, cStruct.pcPatternKey, baseRefMv, 1, rcMvQter,
-                                 (!pu.cs->slice->getDisableSATDForRD()), rbCleanCandExist);
+                                 (!pu.cs->slice->getDisableSATDForRD()), rbCleanCandExist, quarterSad);
 #else
-    ruiCost = xPatternRefinement(cStruct.pcPatternKey, baseRefMv, 1, rcMvQter, (!pu.cs->slice->getDisableSATDForRD()));
+    ruiCost = xPatternRefinement(cStruct.pcPatternKey, baseRefMv, 1, rcMvQter,
+                                 (!pu.cs->slice->getDisableSATDForRD()), quarterSad);
 #endif
   }
 }

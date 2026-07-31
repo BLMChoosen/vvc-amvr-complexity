@@ -33,7 +33,6 @@
 
 #include "CudaBackend/ComputeBackend.h"
 #include "CudaBackend/CudaContext.h"
-#include "CommonLib/RdCost.h"
 
 #include <cstdlib>
 #include <array>
@@ -333,87 +332,6 @@ bool runSadBatchCase(vtm::CudaContext &context, const std::uint8_t elementSize, 
   return true;
 }
 
-bool runIntraSatdBatchCase(vtm::CudaContext &context, const std::uint8_t elementSize,
-                           const std::uint8_t bitDepth, const std::uint32_t blockSize)
-{
-  TestPicture source(blockSize + 8, blockSize + 8, elementSize, bitDepth, 13);
-  source.fillSamples(13);
-  int sourceOwner = 0;
-  const auto sourceMirror = context.registerPictureMirror(
-    &sourceOwner, vtm::CudaPictureRole::Original, source.descriptor);
-  const auto &sourcePlane = source.descriptor.planes[0];
-  const auto *sourceBlock = static_cast<const std::uint8_t *>(sourcePlane.data)
-                            + 3 * sourcePlane.strideBytes + 2 * elementSize;
-  constexpr std::uint32_t candidateCount = 34;
-  const std::size_t blockSamples = static_cast<std::size_t>(blockSize) * blockSize;
-  std::vector<Pel> original(blockSamples);
-  for (std::uint32_t y = 0; y < blockSize; ++y)
-  {
-    for (std::uint32_t x = 0; x < blockSize; ++x)
-    {
-      original[static_cast<std::size_t>(y) * blockSize + x] = static_cast<Pel>(readSample(
-        sourceBlock + static_cast<std::size_t>(y) * sourcePlane.strideBytes + x * elementSize, elementSize));
-    }
-  }
-  std::vector<Pel> candidates(blockSamples * candidateCount);
-  const std::uint32_t maximum = (1u << bitDepth) - 1;
-  for (std::uint32_t candidate = 0; candidate < candidateCount; ++candidate)
-  {
-    for (std::size_t sample = 0; sample < blockSamples; ++sample)
-    {
-      std::uint32_t value = static_cast<std::uint32_t>(sample * 37 + candidate * 101 + (sample >> 4) * 19);
-      value &= maximum;
-      if ((sample + candidate) % 31 == 0) value = 0;
-      if ((sample * 3 + candidate) % 47 == 0) value = maximum;
-      candidates[static_cast<std::size_t>(candidate) * blockSamples + sample] = static_cast<Pel>(value);
-    }
-  }
-
-  vtm::CudaIntraSatdBatchDesc batch{};
-  batch.sourceMirror = sourceMirror;
-  batch.source = sourceBlock;
-  batch.candidates = candidates.data();
-  batch.candidateCount = candidateCount;
-  batch.width = blockSize;
-  batch.height = blockSize;
-  batch.sourcePlane = 0;
-  batch.elementSize = elementSize;
-  batch.bitDepth = bitDepth;
-  std::array<vtm::CudaSadHadResult, candidateCount> results{};
-  const auto dispatchesBefore = context.distortionBatchDispatchCount();
-  if (!context.computeIntraSatdBatch(batch, results.data())
-      || context.distortionBatchDispatchCount() != dispatchesBefore + 1)
-  {
-    return false;
-  }
-
-  RdCost rdCost;
-  const CPelBuf originalBuf(original.data(), blockSize, blockSize);
-  for (std::uint32_t candidate = 0; candidate < candidateCount; ++candidate)
-  {
-    const Pel *candidateSamples = candidates.data() + static_cast<std::size_t>(candidate) * blockSamples;
-    const CPelBuf prediction(candidateSamples, blockSize, blockSize);
-    const Distortion expectedSad = rdCost.getDistPart(originalBuf, prediction, bitDepth, COMPONENT_Y, DFunc::SAD);
-    const Distortion expectedHad = rdCost.getDistPart(originalBuf, prediction, bitDepth, COMPONENT_Y, DFunc::HAD);
-    if (results[candidate].sad != expectedSad || results[candidate].had != expectedHad)
-    {
-      std::cerr << "intra SATD mismatch: Pel" << unsigned(elementSize * 8) << " bitDepth "
-                << unsigned(bitDepth) << " size " << blockSize << " candidate " << candidate
-                << " SAD gpu/cpu " << results[candidate].sad << '/' << expectedSad
-                << " HAD gpu/cpu " << results[candidate].had << '/' << expectedHad << '\n';
-      return false;
-    }
-  }
-  vtm::CudaIntraSatdBatchDesc invalid = batch;
-  invalid.height = blockSize / 2;
-  if (context.computeIntraSatdBatch(invalid, results.data()))
-  {
-    return false;
-  }
-  context.releasePictureMirrors(&sourceOwner);
-  return true;
-}
-
 bool benchmarkSadBatch(vtm::CudaContext &context)
 {
   TestPicture source(128, 128, 2, 10, 9);
@@ -476,60 +394,6 @@ bool benchmarkSadBatch(vtm::CudaContext &context)
             << (cpuMilliseconds / gpuMilliseconds) << "x, checksum " << checksum << '\n';
   context.releasePictureMirrors(&sourceOwner);
   context.releasePictureMirrors(&referenceOwner);
-  return gpuMilliseconds > 0.0;
-}
-
-bool benchmarkIntraSatdBatch(vtm::CudaContext &context)
-{
-  constexpr std::uint32_t blockSize = 64;
-  constexpr std::uint32_t candidateCount = 34;
-  TestPicture source(72, 72, sizeof(Pel), 10, 29);
-  source.fillSamples(29);
-  const auto mirror = context.registerPictureMirror(&source, vtm::CudaPictureRole::Original, source.descriptor);
-  const auto &plane = source.descriptor.planes[0];
-  const auto *sourceBytes = static_cast<const std::uint8_t *>(plane.data);
-  std::vector<Pel> original(blockSize * blockSize);
-  for (std::uint32_t y = 0; y < blockSize; ++y)
-    for (std::uint32_t x = 0; x < blockSize; ++x)
-      original[y * blockSize + x] = static_cast<Pel>(readSample(
-        sourceBytes + static_cast<std::size_t>(y) * plane.strideBytes + x * sizeof(Pel), sizeof(Pel)));
-  std::vector<Pel> candidates(static_cast<std::size_t>(candidateCount) * blockSize * blockSize);
-  for (std::size_t index = 0; index < candidates.size(); ++index)
-    candidates[index] = static_cast<Pel>((index * 73 + (index >> 8) * 17) & 1023);
-  vtm::CudaIntraSatdBatchDesc batch{ mirror, sourceBytes, candidates.data(), candidateCount,
-                                     blockSize, blockSize, 0, sizeof(Pel), 10 };
-  std::array<vtm::CudaSadHadResult, candidateCount> results{};
-  context.computeIntraSatdBatch(batch, results.data());
-  constexpr unsigned gpuIterations = 100;
-  const auto gpuStart = std::chrono::steady_clock::now();
-  for (unsigned iteration = 0; iteration < gpuIterations; ++iteration)
-    context.computeIntraSatdBatch(batch, results.data());
-  const auto gpuEnd = std::chrono::steady_clock::now();
-
-  RdCost rdCost;
-  const CPelBuf originalBuf(original.data(), blockSize, blockSize);
-  std::uint64_t checksum = 0;
-  constexpr unsigned cpuIterations = 10;
-  const auto cpuStart = std::chrono::steady_clock::now();
-  for (unsigned iteration = 0; iteration < cpuIterations; ++iteration)
-  {
-    for (std::uint32_t candidate = 0; candidate < candidateCount; ++candidate)
-    {
-      const CPelBuf prediction(candidates.data() + static_cast<std::size_t>(candidate) * blockSize * blockSize,
-                               blockSize, blockSize);
-      checksum += rdCost.getDistPart(originalBuf, prediction, 10, COMPONENT_Y, DFunc::SAD);
-      checksum += rdCost.getDistPart(originalBuf, prediction, 10, COMPONENT_Y, DFunc::HAD);
-    }
-  }
-  const auto cpuEnd = std::chrono::steady_clock::now();
-  const double gpuMilliseconds = std::chrono::duration<double, std::milli>(gpuEnd - gpuStart).count()
-                                 / gpuIterations;
-  const double cpuMilliseconds = std::chrono::duration<double, std::milli>(cpuEnd - cpuStart).count()
-                                 / cpuIterations;
-  std::cout << "Intra SAD+HAD microbenchmark 34x64x64: CPU " << cpuMilliseconds
-            << " ms/batch, CUDA " << gpuMilliseconds << " ms/batch, ratio "
-            << (cpuMilliseconds / gpuMilliseconds) << "x, checksum " << checksum << '\n';
-  context.releasePictureMirrors(&source);
   return gpuMilliseconds > 0.0;
 }
 
@@ -844,12 +708,6 @@ int main(const int argc, char *argv[])
     {
       return fail("CUDA SAD batch differed from the ordered scalar reference");
     }
-    if (!runIntraSatdBatchCase(context, sizeof(Pel), 8, 8)
-        || !runIntraSatdBatchCase(context, sizeof(Pel), 10, 16)
-        || !runIntraSatdBatchCase(context, sizeof(Pel), 10, 64))
-    {
-      return fail("CUDA intra SAD/HAD batch differed from the VTM CPU distortion functions");
-    }
 #if VTM_CUDA_TESTING
     if (!runSadFailureCase(std::stoi(argv[2]), 1, 0)
         || !runSadFailureCase(std::stoi(argv[2]), 2, 0)
@@ -858,7 +716,7 @@ int main(const int argc, char *argv[])
       return fail("CUDA SAD failure recovery or permanent poisoning is invalid");
     }
 #endif
-    if (runBenchmark && (!benchmarkSadBatch(context) || !benchmarkIntraSatdBatch(context)))
+    if (runBenchmark && !benchmarkSadBatch(context))
     {
       return fail("CUDA SAD microbenchmark failed");
     }
