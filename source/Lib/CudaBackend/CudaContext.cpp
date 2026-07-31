@@ -182,8 +182,6 @@ struct CudaContext::Impl
   std::uint32_t nextHandle = 1;
   bool distortionAccelerationEnabled = true;
   std::uint64_t distortionFailures = 0;
-  bool fractionalAccelerationEnabled = true;
-  std::uint64_t fractionalFailures = 0;
 #endif
   std::thread::id ownerThread;
 };
@@ -595,8 +593,6 @@ void CudaContext::create(const int device)
   m_impl->runtime = cuda_backend::createRuntimeContext(device);
   m_impl->distortionAccelerationEnabled = true;
   m_impl->distortionFailures = 0;
-  m_impl->fractionalAccelerationEnabled = true;
-  m_impl->fractionalFailures = 0;
   m_impl->ownerThread = std::this_thread::get_id();
   m_impl->generation = nextContextGeneration.fetch_add(1, std::memory_order_relaxed);
   if (m_impl->generation == 0)
@@ -1251,166 +1247,4 @@ bool CudaContext::computeDistortionBatch(const CudaDistortionBatchDesc &batch, s
 #endif
 }
 
-bool CudaContext::computeFractionalSadBatch(const CudaFractionalSadBatchDesc &batch,
-                                             std::uint64_t *results) noexcept
-{
-#if VTM_ENABLE_CUDA
-  if (m_impl->runtime == nullptr || !m_impl->fractionalAccelerationEnabled || results == nullptr
-      || batch.source == nullptr || batch.reference == nullptr || batch.width == 0 || batch.height == 0
-      || (batch.elementSize != 2 && batch.elementSize != 4) || (batch.bitDepth != 8 && batch.bitDepth != 10)
-      || (batch.stage != CudaFractionalStage::Half && batch.stage != CudaFractionalStage::Quarter)
-      || (batch.stage == CudaFractionalStage::Half
-          && (batch.centreHorQuarter != 0 || batch.centreVerQuarter != 0))
-      || (batch.stage == CudaFractionalStage::Quarter
-          && (batch.centreHorQuarter < -2 || batch.centreHorQuarter > 2
-              || batch.centreVerQuarter < -2 || batch.centreVerQuarter > 2
-              || (batch.centreHorQuarter & 1) != 0 || (batch.centreVerQuarter & 1) != 0)))
-  {
-    return false;
-  }
-  if (batch.width > std::numeric_limits<std::uint32_t>::max() - 8
-      || batch.height > std::numeric_limits<std::uint32_t>::max() - 8)
-  {
-    return false;
-  }
-  try
-  {
-    requireRuntime(m_impl.get());
-    PictureMirror &sourceMirror = findMirror(m_impl.get(), batch.sourceMirror);
-    PictureMirror &referenceMirror = findMirror(m_impl.get(), batch.referenceMirror);
-    const CudaHostPlaneDesc &sourcePlane = sourceMirror.host.planes[0];
-    const CudaHostPlaneDesc &referencePlane = referenceMirror.host.planes[0];
-    if (sourcePlane.elementSize != batch.elementSize || referencePlane.elementSize != batch.elementSize
-        || sourcePlane.bitDepth != batch.bitDepth || referencePlane.bitDepth != batch.bitDepth)
-    {
-      return false;
-    }
-    const void *sourceDevice = mapHostBlock(sourceMirror, 0, batch.source, batch.width, batch.height);
-    const std::uintptr_t referenceAddress = reinterpret_cast<std::uintptr_t>(batch.reference);
-    const std::size_t topBytes = static_cast<std::size_t>(4) * referencePlane.strideBytes;
-    const std::size_t leftBytes = static_cast<std::size_t>(4) * batch.elementSize;
-    if (referenceAddress < topBytes || referenceAddress - topBytes < leftBytes)
-    {
-      return false;
-    }
-    const void *envelopeHost = reinterpret_cast<const void *>(referenceAddress - topBytes - leftBytes);
-    const void *envelopeDevice = mapHostBlock(referenceMirror, 0, envelopeHost, batch.width + 8, batch.height + 8);
-    const auto *referenceDevice = static_cast<const unsigned char *>(envelopeDevice)
-                                  + static_cast<std::size_t>(4) * referenceMirror.device.planes[0].pitchBytes
-                                  + leftBytes;
-    try
-    {
-      ensureDevice(batch.sourceMirror);
-      if (batch.referenceMirror != batch.sourceMirror)
-      {
-        ensureDevice(batch.referenceMirror);
-      }
-      cuda_backend::computeFractionalSadBatch(m_impl->runtime, batch, sourceDevice,
-                                               sourceMirror.device.planes[0].pitchBytes,
-                                               referenceDevice, referenceMirror.device.planes[0].pitchBytes,
-                                               results);
-      return true;
-    }
-    catch (...)
-    {
-      ++m_impl->fractionalFailures;
-      m_impl->fractionalAccelerationEnabled = false;
-      cuda_backend::recoverDistortionRuntime(m_impl->runtime);
-      return false;
-    }
-  }
-  catch (...)
-  {
-    return false;
-  }
-#else
-  (void) batch;
-  (void) results;
-  return false;
-#endif
-}
-
 std::uint64_t CudaContext::distortionBatchDispatchCount() const
-{
-#if VTM_ENABLE_CUDA
-  requireRuntime(m_impl.get());
-  return cuda_backend::distortionBatchDispatchCount(m_impl->runtime);
-#else
-  return 0;
-#endif
-}
-
-std::uint64_t CudaContext::fractionalBatchDispatchCount() const
-{
-#if VTM_ENABLE_CUDA
-  requireRuntime(m_impl.get());
-  return cuda_backend::fractionalBatchDispatchCount(m_impl->runtime);
-#else
-  return 0;
-#endif
-}
-
-std::uint64_t CudaContext::fractionalBatchFailureCount() const noexcept
-{
-#if VTM_ENABLE_CUDA
-  return m_impl->fractionalFailures;
-#else
-  return 0;
-#endif
-}
-
-std::uint64_t CudaContext::distortionBatchFailureCount() const noexcept
-{
-#if VTM_ENABLE_CUDA
-  return m_impl->distortionFailures;
-#else
-  return 0;
-#endif
-}
-
-#if VTM_CUDA_TESTING
-void CudaContext::injectReleaseFailuresForTesting(const unsigned asyncFailures, const unsigned immediateFailures)
-{
-#if VTM_ENABLE_CUDA
-  requireRuntime(m_impl.get());
-  cuda_backend::injectReleaseFailures(m_impl->runtime, asyncFailures, immediateFailures);
-#else
-  (void) asyncFailures;
-  (void) immediateFailures;
-  throw std::runtime_error("CUDA release failure injection requires ENABLE_CUDA=ON");
-#endif
-}
-
-
-void CudaContext::injectDistortionFailuresForTesting(const unsigned allocationFailureStep,
-                                                      const unsigned executionFailures)
-{
-#if VTM_ENABLE_CUDA
-  requireRuntime(m_impl.get());
-  cuda_backend::injectDistortionFailures(m_impl->runtime, allocationFailureStep, executionFailures);
-#else
-  (void) allocationFailureStep;
-  (void) executionFailures;
-#endif
-}
-#endif
-
-bool CudaContext::isCreated() const noexcept
-{
-#if VTM_ENABLE_CUDA
-  return m_impl->runtime != nullptr;
-#else
-  return false;
-#endif
-}
-
-bool CudaContext::isCompiled() noexcept
-{
-#if VTM_ENABLE_CUDA
-  return true;
-#else
-  return false;
-#endif
-}
-
-}   // namespace vtm

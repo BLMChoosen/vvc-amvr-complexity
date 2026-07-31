@@ -372,12 +372,9 @@ protected:
 #if GDR_ENABLED
   Distortion xPatternRefinement(const PredictionUnit &pu, RefPicList eRefPicList, int refIdx,
                                 const CPelBuf *pcPatternKey, Mv baseRefMv, int iFrac, Mv &rcMvFrac,
-                                bool bAllowUseOfHadamard, bool &rbCleanCandExist,
-                                const std::uint64_t *fractionalSad = nullptr);
+                                bool bAllowUseOfHadamard, bool &rbCleanCandExist);
 #else
-  Distortion  xPatternRefinement    ( const CPelBuf* pcPatternKey, Mv baseRefMv, int iFrac, Mv& rcMvFrac,
-                                      bool bAllowUseOfHadamard,
-                                      const std::uint64_t *fractionalSad = nullptr );
+  Distortion  xPatternRefinement    ( const CPelBuf* pcPatternKey, Mv baseRefMv, int iFrac, Mv& rcMvFrac, bool bAllowUseOfHadamard );
 #endif
 
    typedef struct

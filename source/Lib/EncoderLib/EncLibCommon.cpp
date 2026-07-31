@@ -40,7 +40,6 @@
 #include "CudaBackend/ComputeBackend.h"
 #include "CudaBackend/CudaContext.h"
 #include "CudaBackend/CudaDistortion.h"
-#include "CudaBackend/CudaInterpolation.h"
 
 struct EncLibCommon::ComputeState
 {
@@ -50,7 +49,6 @@ struct EncLibCommon::ComputeState
   bool               configured = false;
   bool               synchronized = false;
   std::vector<std::uint64_t> sadResults;
-  std::array<std::uint64_t, vtm::CUDA_FRACTIONAL_CANDIDATE_COUNT> fractionalResults{};
 };
 
 EncLibCommon::EncLibCommon()
@@ -72,8 +70,7 @@ void EncLibCommon::configureComputeBackend(const vtm::ComputeConfig &config)
   if (m_computeState->configured)
   {
     CHECK(m_computeState->config.backend != config.backend || m_computeState->config.device != config.device
-            || m_computeState->config.enableExperimentalSad != config.enableExperimentalSad
-            || m_computeState->config.enableExperimentalFractional != config.enableExperimentalFractional,
+            || m_computeState->config.enableExperimentalSad != config.enableExperimentalSad,
           "All encoder layers must use the same GPUBackend and GPUDevice");
     return;
   }
@@ -216,58 +213,4 @@ vtm::CudaSadStats EncLibCommon::cudaSadStats() const
            m_computeState->cudaContext.distortionBatchFailureCount(),
            m_computeState->cudaContext.isCreated()
              && !m_computeState->cudaContext.isDistortionAccelerationAvailable() };
-}
-
-bool EncLibCommon::isCudaFractionalBatchAvailable(const void *sourceOwner, const void *referenceOwner) const
-{
-  return m_computeState->config.enableExperimentalFractional
-         && m_computeState->cudaContext.isCreated()
-         && m_computeState->cudaContext.hasPictureMirror(sourceOwner, vtm::CudaPictureRole::Original)
-         && m_computeState->cudaContext.hasPictureMirror(referenceOwner, vtm::CudaPictureRole::Reconstruction)
-         && m_computeState->cudaContext.fractionalBatchFailureCount() == 0;
-}
-
-bool EncLibCommon::computeFractionalSad(const void *sourceOwner, const void *source,
-                                         const void *referenceOwner, const void *reference,
-                                         const std::uint32_t width, const std::uint32_t height,
-                                         const std::uint8_t elementSize, const std::uint8_t bitDepth,
-                                         const vtm::CudaFractionalStage stage,
-                                         const std::int8_t centreHorQuarter,
-                                         const std::int8_t centreVerQuarter,
-                                         const bool useAltHalfFilter,
-                                         const std::uint64_t *&results)
-{
-  results = nullptr;
-  if (!isCudaFractionalBatchAvailable(sourceOwner, referenceOwner))
-  {
-    return false;
-  }
-  vtm::CudaFractionalSadBatchDesc batch{};
-  batch.sourceMirror = m_computeState->cudaContext.pictureMirrorHandle(sourceOwner, vtm::CudaPictureRole::Original);
-  batch.referenceMirror =
-    m_computeState->cudaContext.pictureMirrorHandle(referenceOwner, vtm::CudaPictureRole::Reconstruction);
-  batch.source = source;
-  batch.reference = reference;
-  batch.width = width;
-  batch.height = height;
-  batch.elementSize = elementSize;
-  batch.bitDepth = bitDepth;
-  batch.stage = stage;
-  batch.centreHorQuarter = centreHorQuarter;
-  batch.centreVerQuarter = centreVerQuarter;
-  batch.useAltHalfFilter = useAltHalfFilter;
-  if (!m_computeState->cudaContext.computeFractionalSadBatch(batch, m_computeState->fractionalResults.data()))
-  {
-    return false;
-  }
-  results = m_computeState->fractionalResults.data();
-  return true;
-}
-
-vtm::CudaFractionalStats EncLibCommon::cudaFractionalStats() const
-{
-  return { m_computeState->cudaContext.isCreated() ? m_computeState->cudaContext.fractionalBatchDispatchCount() : 0,
-           m_computeState->cudaContext.fractionalBatchFailureCount(),
-           m_computeState->cudaContext.isCreated()
-             && m_computeState->cudaContext.fractionalBatchFailureCount() != 0 };
 }

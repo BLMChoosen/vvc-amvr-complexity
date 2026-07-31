@@ -51,17 +51,9 @@ struct ComputeConfig
   ComputeBackend backend = ComputeBackend::CPU;
   int            device  = 0;
   bool           enableExperimentalSad = false;
-  bool           enableExperimentalFractional = false;
 };
 
 struct CudaSadStats
-{
-  std::uint64_t dispatches = 0;
-  std::uint64_t failures = 0;
-  bool disabled = false;
-};
-
-struct CudaFractionalStats
 {
   std::uint64_t dispatches = 0;
   std::uint64_t failures = 0;

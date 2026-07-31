@@ -51,8 +51,6 @@ struct ComputeConfig;
 enum class CudaPictureRole : std::uint8_t;
 struct CudaHostPictureDesc;
 struct CudaSadStats;
-struct CudaFractionalStats;
-enum class CudaFractionalStage : std::uint8_t;
 }
 
 class EncLibCommon
@@ -98,18 +96,6 @@ public:
                                           std::uint8_t elementSize, std::uint8_t bitDepth,
                                           std::uint8_t subShift, const std::uint64_t *&results);
   vtm::CudaSadStats        cudaSadStats() const;
-  bool                     isCudaFractionalBatchAvailable(const void *sourceOwner,
-                                                          const void *referenceOwner) const;
-  bool                     computeFractionalSad(const void *sourceOwner, const void *source,
-                                                const void *referenceOwner, const void *reference,
-                                                std::uint32_t width, std::uint32_t height,
-                                                std::uint8_t elementSize, std::uint8_t bitDepth,
-                                                vtm::CudaFractionalStage stage,
-                                                std::int8_t centreHorQuarter,
-                                                std::int8_t centreVerQuarter,
-                                                bool useAltHalfFilter,
-                                                const std::uint64_t *&results);
-  vtm::CudaFractionalStats cudaFractionalStats() const;
 #if JVET_AJ0151_DSC_SEI
   DscSubstreamManager*     getDscSubstreamManager() { return &m_dscSubstreamManager; }
 #endif
