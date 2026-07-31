@@ -66,11 +66,14 @@ void computeDistortionBatch(RuntimeContext *context, const CudaDistortionBatchDe
                             const void *referenceDevice, std::size_t referencePitchBytes,
                             std::uint64_t *results);
 std::uint64_t distortionBatchDispatchCount(const RuntimeContext *context);
+void computeQpaBatch(RuntimeContext *context, const CudaDevicePlaneDesc &source,
+                     const CudaQpaTask *tasks, std::uint32_t taskCount, CudaQpaResult *results);
+std::uint64_t qpaBatchDispatchCount(const RuntimeContext *context);
+std::uint64_t qpaTaskCount(const RuntimeContext *context);
 void recoverDistortionRuntime(RuntimeContext *context) noexcept;
-#if VTM_CUDA_TESTING
 void injectReleaseFailures(RuntimeContext *context, unsigned asyncFailures, unsigned immediateFailures);
 void injectDistortionFailures(RuntimeContext *context, unsigned allocationFailureStep, unsigned executionFailures);
-#endif
+void injectQpaFailures(RuntimeContext *context, unsigned allocationFailureStep, unsigned executionFailures);
 
 }   // namespace vtm::cuda_backend
 

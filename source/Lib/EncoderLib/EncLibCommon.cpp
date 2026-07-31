@@ -40,6 +40,9 @@
 #include "CudaBackend/ComputeBackend.h"
 #include "CudaBackend/CudaContext.h"
 #include "CudaBackend/CudaDistortion.h"
+#include "CudaBackend/CudaQpa.h"
+
+#include <algorithm>
 
 struct EncLibCommon::ComputeState
 {
@@ -49,6 +52,8 @@ struct EncLibCommon::ComputeState
   bool               configured = false;
   bool               synchronized = false;
   std::vector<std::uint64_t> sadResults;
+  std::vector<vtm::CudaQpaResult> qpaChunkResults;
+  std::uint64_t qpaFallbacks = 0;
 };
 
 EncLibCommon::EncLibCommon()
@@ -70,7 +75,8 @@ void EncLibCommon::configureComputeBackend(const vtm::ComputeConfig &config)
   if (m_computeState->configured)
   {
     CHECK(m_computeState->config.backend != config.backend || m_computeState->config.device != config.device
-            || m_computeState->config.enableExperimentalSad != config.enableExperimentalSad,
+            || m_computeState->config.enableExperimentalSad != config.enableExperimentalSad
+            || m_computeState->config.enableExperimentalQpa != config.enableExperimentalQpa,
           "All encoder layers must use the same GPUBackend and GPUDevice");
     return;
   }
@@ -213,4 +219,59 @@ vtm::CudaSadStats EncLibCommon::cudaSadStats() const
            m_computeState->cudaContext.distortionBatchFailureCount(),
            m_computeState->cudaContext.isCreated()
              && !m_computeState->cudaContext.isDistortionAccelerationAvailable() };
+}
+
+bool EncLibCommon::isCudaQpaBatchAvailable(const void *sourceOwner) const
+{
+  return m_computeState->config.enableExperimentalQpa
+         && m_computeState->cudaContext.isQpaAccelerationAvailable()
+         && m_computeState->cudaContext.hasPictureMirror(sourceOwner, vtm::CudaPictureRole::Original);
+}
+
+bool EncLibCommon::computeQpaTasks(const void *sourceOwner, const vtm::CudaQpaTask *tasks,
+                                   const std::size_t taskCount, std::vector<vtm::CudaQpaResult> &results)
+{
+  if (!isCudaQpaBatchAvailable(sourceOwner) || tasks == nullptr || taskCount == 0)
+  {
+    return false;
+  }
+  for (std::size_t index = 1; index < taskCount; ++index)
+  {
+    if (tasks[index].ticket <= tasks[index - 1].ticket)
+    {
+      return false;
+    }
+  }
+
+  // Keep publication transactional across chunks: callers only see the completed vector after every chunk succeeds.
+  std::vector<vtm::CudaQpaResult> completed(taskCount);
+  if (m_computeState->qpaChunkResults.size() < vtm::CUDA_MAX_QPA_TASKS)
+  {
+    m_computeState->qpaChunkResults.resize(vtm::CUDA_MAX_QPA_TASKS);
+  }
+  const vtm::CudaMirrorHandle mirror =
+    m_computeState->cudaContext.pictureMirrorHandle(sourceOwner, vtm::CudaPictureRole::Original);
+  for (std::size_t offset = 0; offset < taskCount; offset += vtm::CUDA_MAX_QPA_TASKS)
+  {
+    const std::size_t remaining = taskCount - offset;
+    const std::uint32_t chunk = static_cast<std::uint32_t>(
+      std::min<std::size_t>(remaining, vtm::CUDA_MAX_QPA_TASKS));
+    if (!m_computeState->cudaContext.computeQpaBatch(mirror, tasks + offset, chunk,
+                                                     m_computeState->qpaChunkResults.data()))
+    {
+      ++m_computeState->qpaFallbacks;
+      return false;
+    }
+    std::copy_n(m_computeState->qpaChunkResults.begin(), chunk, completed.begin() + offset);
+  }
+  results.swap(completed);
+  return true;
+}
+
+vtm::CudaQpaStats EncLibCommon::cudaQpaStats() const
+{
+  return { m_computeState->cudaContext.isCreated() ? m_computeState->cudaContext.qpaBatchDispatchCount() : 0,
+           m_computeState->cudaContext.isCreated() ? m_computeState->cudaContext.qpaTaskCount() : 0,
+           m_computeState->cudaContext.qpaBatchFailureCount(), m_computeState->qpaFallbacks,
+           m_computeState->cudaContext.isCreated() && !m_computeState->cudaContext.isQpaAccelerationAvailable() };
 }

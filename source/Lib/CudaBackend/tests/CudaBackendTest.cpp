@@ -35,6 +35,7 @@
 #include "CudaBackend/CudaContext.h"
 
 #include <cstdlib>
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -141,7 +142,7 @@ struct TestPicture
       const std::uint16_t verticalMargin = index == 0 ? 2 : 1;
       Plane &plane = planes[index];
       plane.rowBytes = (horizontalMargin + planeWidth + horizontalMargin) * elementSize;
-      plane.stride = plane.rowBytes + 11 + index;
+      plane.stride = plane.rowBytes + (11 + index) * elementSize;
       plane.fullHeight = verticalMargin + planeHeight + verticalMargin;
       plane.storage.resize(plane.stride * plane.fullHeight, 0xcd);
       for (std::size_t row = 0; row < plane.fullHeight; ++row)
@@ -332,6 +333,123 @@ bool runSadBatchCase(vtm::CudaContext &context, const std::uint8_t elementSize, 
   return true;
 }
 
+vtm::CudaQpaResult referenceQpa(const TestPicture &picture, const vtm::CudaQpaTask &task)
+{
+  const vtm::CudaHostPlaneDesc &plane = picture.descriptor.planes[0];
+  if (plane.elementSize == 2)
+  {
+    return vtm::computeQpaResultCpu(static_cast<const std::int16_t *>(plane.data),
+                                    plane.strideBytes / sizeof(std::int16_t), task);
+  }
+  return vtm::computeQpaResultCpu(static_cast<const std::int32_t *>(plane.data),
+                                  plane.strideBytes / sizeof(std::int32_t), task);
+}
+
+std::vector<vtm::CudaQpaTask> makeQpaTasks(const std::uint32_t width, const std::uint32_t height,
+                                           const std::uint32_t ctuSize)
+{
+  std::vector<vtm::CudaQpaTask> tasks;
+  for (std::uint32_t y = 0; y < height; y += ctuSize)
+  {
+    for (std::uint32_t x = 0; x < width; x += ctuSize)
+    {
+      vtm::CudaQpaTask task{};
+      task.ticket = tasks.size();
+      task.ctuAddr = static_cast<std::uint32_t>(tasks.size());
+      task.lumaArea = { x, y, std::min(ctuSize, width - x), std::min(ctuSize, height - y) };
+      const std::uint32_t filterX = x > 0 ? x - 1 : 0;
+      const std::uint32_t filterY = y > 0 ? y - 1 : 0;
+      task.filterArea = { filterX, filterY,
+                          std::min(width - filterX, ctuSize + (x > 0 ? 2u : 1u)),
+                          std::min(height - filterY, ctuSize + (y > 0 ? 2u : 1u)) };
+      tasks.push_back(task);
+    }
+  }
+  return tasks;
+}
+
+bool runQpaBatchCase(vtm::CudaContext &context, const std::uint8_t elementSize, const std::uint8_t bitDepth)
+{
+  // Both dimensions intentionally leave partial CTUs; TestPicture always provides a 4:2:0 descriptor.
+  TestPicture picture(259, 195, elementSize, bitDepth, 43);
+  picture.fillSamples(43);
+  int owner = 0;
+  const vtm::CudaMirrorHandle mirror = context.registerPictureMirror(
+    &owner, vtm::CudaPictureRole::Original, picture.descriptor);
+  const std::vector<vtm::CudaQpaTask> tasks = makeQpaTasks(259, 195, 64);
+  std::vector<vtm::CudaQpaResult> results(tasks.size());
+  const std::uint64_t batchesBefore = context.qpaBatchDispatchCount();
+  const std::uint64_t tasksBefore = context.qpaTaskCount();
+  if (!context.computeQpaBatch(mirror, tasks.data(), static_cast<std::uint32_t>(tasks.size()), results.data())
+      || context.qpaBatchDispatchCount() != batchesBefore + 1
+      || context.qpaTaskCount() != tasksBefore + tasks.size())
+  {
+    std::cerr << "QPA dispatch failed for Pel" << unsigned(elementSize * 8) << '/' << unsigned(bitDepth)
+              << "-bit\n";
+    return false;
+  }
+  for (std::size_t index = 0; index < tasks.size(); ++index)
+  {
+    const vtm::CudaQpaResult expected = referenceQpa(picture, tasks[index]);
+    if (results[index].ticket != expected.ticket || results[index].ctuAddr != expected.ctuAddr
+        || results[index].highpassSum != expected.highpassSum || results[index].lumaSum != expected.lumaSum)
+    {
+      std::cerr << "QPA mismatch Pel" << unsigned(elementSize * 8) << '/' << unsigned(bitDepth)
+                << "-bit task " << index << ": hp " << results[index].highpassSum << '/' << expected.highpassSum
+                << ", luma " << results[index].lumaSum << '/' << expected.lumaSum << '\n';
+      return false;
+    }
+  }
+
+  vtm::CudaQpaTask invalid = tasks.front();
+  invalid.filterArea.width = 2;
+  if (context.computeQpaBatch(mirror, &invalid, 1, results.data())
+      || context.qpaBatchDispatchCount() != batchesBefore + 1)
+  {
+    return false;
+  }
+  context.releasePictureMirrors(&owner);
+  return true;
+}
+
+bool runQpaMultiChunkCase(vtm::CudaContext &context)
+{
+  TestPicture picture(67, 65, 2, 10, 57);
+  picture.fillSamples(57);
+  int owner = 0;
+  const auto mirror = context.registerPictureMirror(&owner, vtm::CudaPictureRole::Original, picture.descriptor);
+  constexpr std::size_t count = vtm::CUDA_MAX_QPA_TASKS + 37;
+  std::vector<vtm::CudaQpaTask> tasks(count);
+  for (std::size_t index = 0; index < count; ++index)
+  {
+    tasks[index].ticket = 9000 + index;
+    tasks[index].ctuAddr = static_cast<std::uint32_t>(index);
+    tasks[index].filterArea = { 0, 0, 65, 65 };
+    tasks[index].lumaArea = { 1, 1, 64, 63 };
+  }
+  std::vector<vtm::CudaQpaResult> results(count);
+  for (std::size_t offset = 0; offset < count; offset += vtm::CUDA_MAX_QPA_TASKS)
+  {
+    const std::uint32_t chunk = static_cast<std::uint32_t>(
+      std::min<std::size_t>(count - offset, vtm::CUDA_MAX_QPA_TASKS));
+    if (!context.computeQpaBatch(mirror, tasks.data() + offset, chunk, results.data() + offset))
+    {
+      return false;
+    }
+  }
+  for (std::size_t index = 0; index < count; ++index)
+  {
+    const vtm::CudaQpaResult expected = referenceQpa(picture, tasks[index]);
+    if (results[index].ticket != tasks[index].ticket || results[index].ctuAddr != tasks[index].ctuAddr
+        || results[index].highpassSum != expected.highpassSum || results[index].lumaSum != expected.lumaSum)
+    {
+      return false;
+    }
+  }
+  context.releasePictureMirrors(&owner);
+  return true;
+}
+
 bool benchmarkSadBatch(vtm::CudaContext &context)
 {
   TestPicture source(128, 128, 2, 10, 9);
@@ -397,6 +515,53 @@ bool benchmarkSadBatch(vtm::CudaContext &context)
   return gpuMilliseconds > 0.0;
 }
 
+bool benchmarkQpaBatch(vtm::CudaContext &context)
+{
+  TestPicture picture(512, 512, 2, 10, 73);
+  picture.fillSamples(73);
+  int owner = 0;
+  const auto mirror = context.registerPictureMirror(&owner, vtm::CudaPictureRole::Original, picture.descriptor);
+  const std::vector<vtm::CudaQpaTask> tasks = makeQpaTasks(512, 512, 64);
+  std::vector<vtm::CudaQpaResult> results(tasks.size());
+  if (!context.computeQpaBatch(mirror, tasks.data(), static_cast<std::uint32_t>(tasks.size()), results.data()))
+  {
+    return false;
+  }
+
+  constexpr unsigned gpuIterations = 300;
+  const auto gpuStart = std::chrono::steady_clock::now();
+  for (unsigned iteration = 0; iteration < gpuIterations; ++iteration)
+  {
+    if (!context.computeQpaBatch(mirror, tasks.data(), static_cast<std::uint32_t>(tasks.size()), results.data()))
+    {
+      return false;
+    }
+  }
+  const auto gpuEnd = std::chrono::steady_clock::now();
+
+  constexpr unsigned cpuIterations = 100;
+  std::uint64_t checksum = 0;
+  const auto cpuStart = std::chrono::steady_clock::now();
+  for (unsigned iteration = 0; iteration < cpuIterations; ++iteration)
+  {
+    for (const vtm::CudaQpaTask &task : tasks)
+    {
+      const vtm::CudaQpaResult result = referenceQpa(picture, task);
+      checksum += result.highpassSum + static_cast<std::uint64_t>(result.lumaSum) + iteration;
+    }
+  }
+  const auto cpuEnd = std::chrono::steady_clock::now();
+  const double gpuMilliseconds = std::chrono::duration<double, std::milli>(gpuEnd - gpuStart).count()
+                                 / gpuIterations;
+  const double cpuMilliseconds = std::chrono::duration<double, std::milli>(cpuEnd - cpuStart).count()
+                                 / cpuIterations;
+  std::cout << "QPA microbenchmark 64 CTUs x 64x64 Pel16/10-bit: CPU " << cpuMilliseconds
+            << " ms/batch, CUDA " << gpuMilliseconds << " ms/batch, ratio "
+            << (cpuMilliseconds / gpuMilliseconds) << "x, checksum " << checksum << '\n';
+  context.releasePictureMirrors(&owner);
+  return gpuMilliseconds > 0.0;
+}
+
 #if VTM_CUDA_TESTING
 bool runSadFailureCase(const int device, const unsigned allocationFailureStep, const unsigned executionFailures)
 {
@@ -437,6 +602,35 @@ bool runSadFailureCase(const int device, const unsigned allocationFailureStep, c
   context.shutdown();
   return true;
 }
+
+bool runQpaFailureCase(const int device, const unsigned allocationFailureStep, const unsigned executionFailures)
+{
+  vtm::CudaContext context;
+  context.create(device);
+  TestPicture picture(65, 65, 2, 10, 61);
+  picture.fillSamples(61);
+  const auto mirror = context.registerPictureMirror(&picture, vtm::CudaPictureRole::Original, picture.descriptor);
+  vtm::CudaQpaTask task{};
+  task.ticket = 17;
+  task.ctuAddr = 3;
+  task.filterArea = { 0, 0, 65, 65 };
+  task.lumaArea = { 0, 0, 64, 64 };
+  vtm::CudaQpaResult result{};
+  context.injectQpaFailuresForTesting(allocationFailureStep, executionFailures);
+  if (context.computeQpaBatch(mirror, &task, 1, &result)
+      || context.isQpaAccelerationAvailable()
+      || context.qpaBatchFailureCount() != 1
+      || context.qpaBatchDispatchCount() != 0)
+  {
+    return false;
+  }
+  if (context.computeQpaBatch(mirror, &task, 1, &result) || context.qpaBatchFailureCount() != 1)
+  {
+    return false;
+  }
+  context.shutdown();
+  return true;
+}
 #endif
 
 }   // namespace
@@ -444,7 +638,8 @@ bool runSadFailureCase(const int device, const unsigned allocationFailureStep, c
 int main(const int argc, char *argv[])
 {
   vtm::ComputeConfig config;
-  if (config.backend != vtm::ComputeBackend::CPU || config.device != 0)
+  if (config.backend != vtm::ComputeBackend::CPU || config.device != 0
+      || config.enableExperimentalSad || config.enableExperimentalQpa)
   {
     return fail("ComputeConfig defaults are invalid");
   }
@@ -708,6 +903,12 @@ int main(const int argc, char *argv[])
     {
       return fail("CUDA SAD batch differed from the ordered scalar reference");
     }
+    if (!runQpaBatchCase(context, 2, 8) || !runQpaBatchCase(context, 2, 10)
+        || !runQpaBatchCase(context, 4, 8) || !runQpaBatchCase(context, 4, 10)
+        || !runQpaMultiChunkCase(context))
+    {
+      return fail("CUDA QPA cross-CTU batch differed from the real ordered CPU calculation");
+    }
 #if VTM_CUDA_TESTING
     if (!runSadFailureCase(std::stoi(argv[2]), 1, 0)
         || !runSadFailureCase(std::stoi(argv[2]), 2, 0)
@@ -715,8 +916,16 @@ int main(const int argc, char *argv[])
     {
       return fail("CUDA SAD failure recovery or permanent poisoning is invalid");
     }
+    if (!runQpaFailureCase(std::stoi(argv[2]), 1, 0)
+        || !runQpaFailureCase(std::stoi(argv[2]), 2, 0)
+        || !runQpaFailureCase(std::stoi(argv[2]), 3, 0)
+        || !runQpaFailureCase(std::stoi(argv[2]), 4, 0)
+        || !runQpaFailureCase(std::stoi(argv[2]), 0, 1))
+    {
+      return fail("CUDA QPA failure recovery, discard, or permanent poisoning is invalid");
+    }
 #endif
-    if (runBenchmark && !benchmarkSadBatch(context))
+    if (runBenchmark && (!benchmarkSadBatch(context) || !benchmarkQpaBatch(context)))
     {
       return fail("CUDA SAD microbenchmark failed");
     }

@@ -48,6 +48,7 @@
 #include "CommonLib/ProfileTierLevel.h"
 #include "CudaBackend/ComputeBackend.h"
 #include "CudaBackend/CudaPictureMirror.h"
+#include "CudaBackend/CudaQpa.h"
 
 #include <exception>
 
@@ -232,6 +233,17 @@ void EncLib::synchronizeComputeBackend()
 vtm::CudaSadStats EncLib::cudaSadStats() const
 {
   return m_encLibCommon->cudaSadStats();
+}
+
+bool EncLib::computeQpaTasks(const void *sourceOwner, const vtm::CudaQpaTask *tasks, const std::size_t taskCount,
+                             std::vector<vtm::CudaQpaResult> &results)
+{
+  return m_encLibCommon->computeQpaTasks(sourceOwner, tasks, taskCount, results);
+}
+
+vtm::CudaQpaStats EncLib::cudaQpaStats() const
+{
+  return m_encLibCommon->cudaQpaStats();
 }
 
 void EncLib::init(AUWriterIf *auWriterIf)

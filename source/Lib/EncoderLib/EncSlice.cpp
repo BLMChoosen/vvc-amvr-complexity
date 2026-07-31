@@ -40,6 +40,7 @@
 #include "EncLib.h"
 #include "CommonLib/UnitTools.h"
 #include "CommonLib/Picture.h"
+#include "CudaBackend/CudaQpa.h"
 #if K0149_BLOCK_STATISTICS
 #include "CommonLib/dtrace_blockstatistics.h"
 #endif
@@ -1026,6 +1027,7 @@ void EncSlice::resetQP( Picture* pic, int sliceQP, double lambda )
 
 #if ENABLE_QPA
 static bool applyQPAdaptation (Picture* const pcPic,       Slice* const pcSlice,        const PreCalcValues& pcv,
+                               EncLib* const pcEncLib,
                                const bool useSharpLumaDQP,
                                const bool useFrameWiseQPA, const int previouslyAdaptedLumaQP = -1)
 {
@@ -1039,20 +1041,45 @@ static bool applyQPAdaptation (Picture* const pcPic,       Slice* const pcSlice,
   if (!useFrameWiseQPA || previouslyAdaptedLumaQP < 0)  // mean visual activity value and luma value in each CTU
 #endif
   {
+    std::vector<vtm::CudaQpaTask> qpaTasks;
+    qpaTasks.reserve(pcSlice->getNumCtuInSlice());
     for (uint32_t ctuIdx = 0; ctuIdx < pcSlice->getNumCtuInSlice(); ctuIdx++)
     {
       uint32_t ctuRsAddr = pcSlice->getCtuAddrInSlice( ctuIdx );
       const Position pos ((ctuRsAddr % pcv.widthInCtus) * pcv.maxCUWidth, (ctuRsAddr / pcv.widthInCtus) * pcv.maxCUHeight);
       const CompArea ctuArea    = clipArea (CompArea (COMPONENT_Y, pcPic->chromaFormat, Area (pos.x, pos.y, pcv.maxCUWidth, pcv.maxCUHeight)), pcPic->Y());
       const CompArea fltArea    = clipArea (CompArea (COMPONENT_Y, pcPic->chromaFormat, Area (pos.x > 0 ? pos.x - 1 : 0, pos.y > 0 ? pos.y - 1 : 0, pcv.maxCUWidth + (pos.x > 0 ? 2 : 1), pcv.maxCUHeight + (pos.y > 0 ? 2 : 1))), pcPic->Y());
-      const CPelBuf  picOrig    = pcPic->getOrigBuf (fltArea);
-      double hpEner = 0.0;
+      vtm::CudaQpaTask task{};
+      task.ticket = ctuIdx;
+      task.ctuAddr = ctuRsAddr;
+      task.filterArea = { static_cast<std::uint32_t>(fltArea.x), static_cast<std::uint32_t>(fltArea.y),
+                          static_cast<std::uint32_t>(fltArea.width), static_cast<std::uint32_t>(fltArea.height) };
+      task.lumaArea = { static_cast<std::uint32_t>(ctuArea.x), static_cast<std::uint32_t>(ctuArea.y),
+                        static_cast<std::uint32_t>(ctuArea.width), static_cast<std::uint32_t>(ctuArea.height) };
+      qpaTasks.push_back(task);
+    }
 
-      filterAndCalculateAverageEnergies (picOrig.buf,    picOrig.stride, hpEner,
-                                         picOrig.height, picOrig.width,  bitDepth);
+    std::vector<vtm::CudaQpaResult> qpaResults;
+    const bool cudaComplete = pcEncLib != nullptr
+                              && pcEncLib->computeQpaTasks(pcPic, qpaTasks.data(), qpaTasks.size(), qpaResults);
+    const CPelBuf fullOrig = pcPic->getOrigBuf().Y();
+    for (uint32_t ctuIdx = 0; ctuIdx < pcSlice->getNumCtuInSlice(); ctuIdx++)
+    {
+      const vtm::CudaQpaTask &task = qpaTasks[ctuIdx];
+      const uint32_t ctuRsAddr = task.ctuAddr;
+      const vtm::CudaQpaResult result = cudaComplete
+        ? qpaResults[ctuIdx]
+        : vtm::computeQpaResultCpu(fullOrig.buf, fullOrig.stride, task);
+      const int filteredSamples = int(task.filterArea.width - 2) * int(task.filterArea.height - 2);
+      double hpEner = double(result.highpassSum) / double(filteredSamples);
+      if (hpEner < double(1 << (bitDepth - 4)))
+      {
+        hpEner = double(1 << (bitDepth - 4));
+      }
       hpEnerAvg += hpEner;
       pcPic->m_uEnerHpCtu[ctuRsAddr] = hpEner;
-      pcPic->m_iOffsetCtu[ctuRsAddr] = pcPic->getOrigBuf (ctuArea).computeAvg();
+      const std::int64_t lumaSamples = static_cast<std::int64_t>(task.lumaArea.width) * task.lumaArea.height;
+      pcPic->m_iOffsetCtu[ctuRsAddr] = Pel((result.lumaSum + (lumaSamples >> 1)) / lumaSamples);
     }
 
     hpEnerAvg /= double (pcSlice->getNumCtuInSlice());
@@ -1586,7 +1613,8 @@ void EncSlice::compressSlice( Picture* pcPic, const bool bCompressEntireSlice, c
 #if ENABLE_QPA
   if (m_pcCfg->getUsePerceptQPA() && !m_pcCfg->getUseRateCtrl())
   {
-    if (applyQPAdaptation (pcPic, pcSlice, *cs.pcv, m_pcCfg->getLumaLevelToDeltaQPMapping().mode == LUMALVL_TO_DQP_NUM_MODES,
+    if (applyQPAdaptation (pcPic, pcSlice, *cs.pcv, m_pcLib,
+                           m_pcCfg->getLumaLevelToDeltaQPMapping().mode == LUMALVL_TO_DQP_NUM_MODES,
                            (m_pcCfg->getBaseQP() >= 38) || (m_pcCfg->getSourceWidth() <= 512 && m_pcCfg->getSourceHeight() <= 320), m_adaptedLumaQP))
     {
       m_CABACEstimator->initCtxModels (*pcSlice);

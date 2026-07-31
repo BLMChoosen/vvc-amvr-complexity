@@ -51,6 +51,7 @@ struct ComputeConfig
   ComputeBackend backend = ComputeBackend::CPU;
   int            device  = 0;
   bool           enableExperimentalSad = false;
+  bool           enableExperimentalQpa = false;
 };
 
 struct CudaSadStats

@@ -39,6 +39,8 @@
 #include <list>
 #include <fstream>
 #include <memory>
+#include <vector>
+#include <cstddef>
 #include "CommonLib/Slice.h"
 #include "CommonLib/ParameterSetManager.h"
 #if JVET_AJ0151_DSC_SEI
@@ -51,6 +53,9 @@ struct ComputeConfig;
 enum class CudaPictureRole : std::uint8_t;
 struct CudaHostPictureDesc;
 struct CudaSadStats;
+struct CudaQpaTask;
+struct CudaQpaResult;
+struct CudaQpaStats;
 }
 
 class EncLibCommon
@@ -96,8 +101,11 @@ public:
                                           std::uint8_t elementSize, std::uint8_t bitDepth,
                                           std::uint8_t subShift, const std::uint64_t *&results);
   vtm::CudaSadStats        cudaSadStats() const;
+  bool                     isCudaQpaBatchAvailable(const void *sourceOwner) const;
+  bool                     computeQpaTasks(const void *sourceOwner, const vtm::CudaQpaTask *tasks,
+                                           std::size_t taskCount, std::vector<vtm::CudaQpaResult> &results);
+  vtm::CudaQpaStats        cudaQpaStats() const;
 #if JVET_AJ0151_DSC_SEI
   DscSubstreamManager*     getDscSubstreamManager() { return &m_dscSubstreamManager; }
 #endif
 };
-

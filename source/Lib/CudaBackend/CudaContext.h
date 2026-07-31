@@ -36,6 +36,7 @@
 
 #include "CudaPictureMirror.h"
 #include "CudaDistortion.h"
+#include "CudaQpa.h"
 
 #include <memory>
 #include <cstddef>
@@ -125,9 +126,16 @@ public:
   bool computeDistortionBatch(const CudaDistortionBatchDesc &batch, std::uint64_t *results) noexcept;
   std::uint64_t distortionBatchDispatchCount() const;
   std::uint64_t distortionBatchFailureCount() const noexcept;
+  bool isQpaAccelerationAvailable() const noexcept;
+  bool computeQpaBatch(CudaMirrorHandle sourceMirror, const CudaQpaTask *tasks,
+                       std::uint32_t taskCount, CudaQpaResult *results) noexcept;
+  std::uint64_t qpaBatchDispatchCount() const;
+  std::uint64_t qpaTaskCount() const;
+  std::uint64_t qpaBatchFailureCount() const noexcept;
 #if VTM_CUDA_TESTING
   void injectReleaseFailuresForTesting(unsigned asyncFailures, unsigned immediateFailures);
   void injectDistortionFailuresForTesting(unsigned allocationFailureStep, unsigned executionFailures);
+  void injectQpaFailuresForTesting(unsigned allocationFailureStep, unsigned executionFailures);
 #endif
 
   bool isCreated() const noexcept;

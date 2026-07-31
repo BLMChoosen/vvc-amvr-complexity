@@ -43,6 +43,9 @@
 #include "CommonLib/DeblockingFilter.h"
 #include "CommonLib/NAL.h"
 
+#include <cstddef>
+#include <vector>
+
 #include "Utilities/VideoIOYuv.h"
 
 #include "EncCfg.h"
@@ -66,6 +69,9 @@ namespace vtm
 {
 struct ComputeConfig;
 struct CudaSadStats;
+struct CudaQpaTask;
+struct CudaQpaResult;
+struct CudaQpaStats;
 }
 
 class EncLibCommon;
@@ -188,6 +194,9 @@ public:
   void      setComputeConfig(const vtm::ComputeConfig &config);
   void      synchronizeComputeBackend();
   vtm::CudaSadStats cudaSadStats() const;
+  bool      computeQpaTasks(const void *sourceOwner, const vtm::CudaQpaTask *tasks, std::size_t taskCount,
+                            std::vector<vtm::CudaQpaResult> &results);
+  vtm::CudaQpaStats cudaQpaStats() const;
   void      deletePicBuffer ();
 
   // -------------------------------------------------------------------------------------------------------------------
@@ -285,4 +294,3 @@ public:
 //! \}
 
 #endif // __ENCTOP__
-

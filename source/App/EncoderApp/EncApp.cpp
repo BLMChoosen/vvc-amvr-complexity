@@ -47,6 +47,7 @@
 #include "EncoderLib/AnnexBwrite.h"
 #include "EncoderLib/EncLibCommon.h"
 #include "CommonLib/SEIPackedRegionsInfoProcess.h"
+#include "CudaBackend/CudaQpa.h"
 
 //! \ingroup EncoderApp
 //! \{
@@ -1977,11 +1978,17 @@ void EncApp::destroyLib()
   if (m_encLibCreated)
   {
     const vtm::CudaSadStats sadStats = m_cEncLib.cudaSadStats();
+    const vtm::CudaQpaStats qpaStats = m_cEncLib.cudaQpaStats();
     if (m_computeConfig.backend == vtm::ComputeBackend::CUDA)
     {
       msg(INFO, "\nCUDA SAD batches: %llu, failures: %llu, disabled: %d\n",
           static_cast<unsigned long long>(sadStats.dispatches),
           static_cast<unsigned long long>(sadStats.failures), sadStats.disabled ? 1 : 0);
+      msg(INFO, "CUDA QPA batches: %llu, tasks: %llu, failures: %llu, fallbacks: %llu, disabled: %d\n",
+          static_cast<unsigned long long>(qpaStats.batches),
+          static_cast<unsigned long long>(qpaStats.tasks),
+          static_cast<unsigned long long>(qpaStats.failures),
+          static_cast<unsigned long long>(qpaStats.fallbacks), qpaStats.disabled ? 1 : 0);
     }
     try
     {

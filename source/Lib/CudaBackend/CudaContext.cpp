@@ -182,6 +182,8 @@ struct CudaContext::Impl
   std::uint32_t nextHandle = 1;
   bool distortionAccelerationEnabled = true;
   std::uint64_t distortionFailures = 0;
+  bool qpaAccelerationEnabled = true;
+  std::uint64_t qpaFailures = 0;
 #endif
   std::thread::id ownerThread;
 };
@@ -593,6 +595,8 @@ void CudaContext::create(const int device)
   m_impl->runtime = cuda_backend::createRuntimeContext(device);
   m_impl->distortionAccelerationEnabled = true;
   m_impl->distortionFailures = 0;
+  m_impl->qpaAccelerationEnabled = true;
+  m_impl->qpaFailures = 0;
   m_impl->ownerThread = std::this_thread::get_id();
   m_impl->generation = nextContextGeneration.fetch_add(1, std::memory_order_relaxed);
   if (m_impl->generation == 0)
@@ -1247,11 +1251,134 @@ bool CudaContext::computeDistortionBatch(const CudaDistortionBatchDesc &batch, s
 #endif
 }
 
+bool CudaContext::isQpaAccelerationAvailable() const noexcept
+{
+#if VTM_ENABLE_CUDA
+  return m_impl->runtime != nullptr && m_impl->qpaAccelerationEnabled;
+#else
+  return false;
+#endif
+}
+
+bool CudaContext::computeQpaBatch(const CudaMirrorHandle sourceHandle, const CudaQpaTask *tasks,
+                                  const std::uint32_t taskCount, CudaQpaResult *results) noexcept
+{
+#if VTM_ENABLE_CUDA
+  if (!isQpaAccelerationAvailable() || tasks == nullptr || results == nullptr
+      || taskCount == 0 || taskCount > CUDA_MAX_QPA_TASKS)
+  {
+    return false;
+  }
+  try
+  {
+    requireRuntime(m_impl.get());
+    PictureMirror &sourceMirror = findMirror(m_impl.get(), sourceHandle);
+    if (sourceMirror.role != CudaPictureRole::Original || sourceMirror.host.planeCount == 0)
+    {
+      return false;
+    }
+    const CudaHostPlaneDesc &host = sourceMirror.host.planes[0];
+    if ((host.elementSize != 2 && host.elementSize != 4) || (host.bitDepth != 8 && host.bitDepth != 10)
+        || host.strideBytes <= 0 || (host.strideBytes % host.elementSize) != 0)
+    {
+      return false;
+    }
+
+    const std::uint64_t maxSample = (std::uint64_t{ 1 } << host.bitDepth) - 1;
+    for (std::uint32_t index = 0; index < taskCount; ++index)
+    {
+      const CudaQpaTask &task = tasks[index];
+      const auto areaInsidePlane = [&host](const CudaQpaRect &area) {
+        return area.width != 0 && area.height != 0
+               && static_cast<std::uint64_t>(area.x) + area.width <= host.width
+               && static_cast<std::uint64_t>(area.y) + area.height <= host.height;
+      };
+      if (!areaInsidePlane(task.filterArea) || !areaInsidePlane(task.lumaArea)
+          || task.filterArea.width < 3 || task.filterArea.height < 3)
+      {
+        return false;
+      }
+
+      const std::uint64_t filterSamples = static_cast<std::uint64_t>(task.filterArea.width - 2)
+                                          * (task.filterArea.height - 2);
+      const std::uint64_t areaSamples = static_cast<std::uint64_t>(task.lumaArea.width) * task.lumaArea.height;
+      // The 3x3 high-pass has positive and negative coefficient sums of 12. These guards prove that
+      // every integer reduction remains defined even for the largest descriptor accepted by this API.
+      if (filterSamples > std::numeric_limits<std::uint64_t>::max() / (12 * maxSample)
+          || areaSamples > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) / maxSample)
+      {
+        return false;
+      }
+    }
+
+    try
+    {
+      ensureDevice(sourceHandle);
+      cuda_backend::computeQpaBatch(m_impl->runtime, sourceMirror.device.planes[0], tasks, taskCount, results);
+      for (std::uint32_t index = 0; index < taskCount; ++index)
+      {
+        if (results[index].ticket != tasks[index].ticket || results[index].ctuAddr != tasks[index].ctuAddr)
+        {
+          throw std::runtime_error("CUDA QPA result ticket/order mismatch");
+        }
+      }
+      return true;
+    }
+    catch (...)
+    {
+      ++m_impl->qpaFailures;
+      m_impl->qpaAccelerationEnabled = false;
+      cuda_backend::recoverDistortionRuntime(m_impl->runtime);
+      return false;
+    }
+  }
+  catch (...)
+  {
+    return false;
+  }
+#else
+  (void) sourceHandle;
+  (void) tasks;
+  (void) taskCount;
+  (void) results;
+  return false;
+#endif
+}
+
 std::uint64_t CudaContext::distortionBatchDispatchCount() const
 {
 #if VTM_ENABLE_CUDA
   requireRuntime(m_impl.get());
   return cuda_backend::distortionBatchDispatchCount(m_impl->runtime);
+#else
+  return 0;
+#endif
+}
+
+std::uint64_t CudaContext::qpaBatchDispatchCount() const
+{
+#if VTM_ENABLE_CUDA
+  requireRuntime(m_impl.get());
+  return cuda_backend::qpaBatchDispatchCount(m_impl->runtime);
+#else
+  return 0;
+#endif
+}
+
+std::uint64_t CudaContext::qpaTaskCount() const
+{
+#if VTM_ENABLE_CUDA
+  requireRuntime(m_impl.get());
+  return cuda_backend::qpaTaskCount(m_impl->runtime);
+#else
+  return 0;
+#endif
+}
+
+std::uint64_t CudaContext::qpaBatchFailureCount() const noexcept
+{
+#if VTM_ENABLE_CUDA
+  return m_impl->qpaFailures;
 #else
   return 0;
 #endif
@@ -1286,6 +1413,18 @@ void CudaContext::injectDistortionFailuresForTesting(const unsigned allocationFa
 #if VTM_ENABLE_CUDA
   requireRuntime(m_impl.get());
   cuda_backend::injectDistortionFailures(m_impl->runtime, allocationFailureStep, executionFailures);
+#else
+  (void) allocationFailureStep;
+  (void) executionFailures;
+#endif
+}
+
+void CudaContext::injectQpaFailuresForTesting(const unsigned allocationFailureStep,
+                                              const unsigned executionFailures)
+{
+#if VTM_ENABLE_CUDA
+  requireRuntime(m_impl.get());
+  cuda_backend::injectQpaFailures(m_impl->runtime, allocationFailureStep, executionFailures);
 #else
   (void) allocationFailureStep;
   (void) executionFailures;

@@ -55,11 +55,20 @@ struct RuntimeContext
   std::uint64_t              *distortionResultsHost = nullptr;
   std::size_t                 distortionCapacity = 0;
   std::uint64_t               distortionDispatches = 0;
+  CudaQpaTask                *qpaTasksDevice = nullptr;
+  CudaQpaTask                *qpaTasksHost = nullptr;
+  CudaQpaResult              *qpaResultsDevice = nullptr;
+  CudaQpaResult              *qpaResultsHost = nullptr;
+  std::size_t                 qpaCapacity = 0;
+  std::uint64_t               qpaDispatches = 0;
+  std::uint64_t               qpaTasks = 0;
 #if VTM_CUDA_TESTING
   unsigned                    asyncReleaseFailures = 0;
   unsigned                    immediateReleaseFailures = 0;
   unsigned                    distortionAllocationFailureStep = 0;
   unsigned                    distortionExecutionFailures = 0;
+  unsigned                    qpaAllocationFailureStep = 0;
+  unsigned                    qpaExecutionFailures = 0;
 #endif
 };
 
@@ -123,6 +132,17 @@ void releaseRuntimeContext(RuntimeContext *context, const bool checked, const bo
                       "distortion result release");
     context->distortionResultsDevice = nullptr;
   }
+  for (void **allocation : { reinterpret_cast<void **>(&context->qpaTasksDevice),
+                             reinterpret_cast<void **>(&context->qpaResultsDevice) })
+  {
+    if (*allocation != nullptr)
+    {
+      rememberCudaError(firstError, firstOperation,
+                        cudaFreeAsync(*allocation, context->streams[queueIndex(CudaQueue::Compute)]),
+                        "QPA scratch release");
+      *allocation = nullptr;
+    }
+  }
   for (cudaStream_t stream : context->streams)
   {
     if (synchronize && stream != nullptr)
@@ -136,6 +156,15 @@ void releaseRuntimeContext(RuntimeContext *context, const bool checked, const bo
     rememberCudaError(firstError, firstOperation, cudaFreeHost(context->distortionResultsHost),
                       "pinned distortion result release");
     context->distortionResultsHost = nullptr;
+  }
+  for (void **allocation : { reinterpret_cast<void **>(&context->qpaTasksHost),
+                             reinterpret_cast<void **>(&context->qpaResultsHost) })
+  {
+    if (*allocation != nullptr)
+    {
+      rememberCudaError(firstError, firstOperation, cudaFreeHost(*allocation), "pinned QPA scratch release");
+      *allocation = nullptr;
+    }
   }
   for (cudaEvent_t &fence : context->fences)
   {
@@ -241,6 +270,96 @@ void ensureDistortionCapacity(RuntimeContext *context, const std::size_t require
   context->distortionCapacity = capacity;
 }
 
+void ensureQpaCapacity(RuntimeContext *context, const std::size_t required)
+{
+  if (required <= context->qpaCapacity)
+  {
+    return;
+  }
+  if (required > CUDA_MAX_QPA_TASKS)
+  {
+    throw std::runtime_error("CUDA QPA batch exceeds the fixed queue limit");
+  }
+
+  constexpr std::size_t capacity = CUDA_MAX_QPA_TASKS;
+  cudaStream_t stream = context->streams[queueIndex(CudaQueue::Compute)];
+  checkCuda(cudaStreamSynchronize(stream), "QPA scratch synchronization");
+
+  CudaQpaTask *newTasksDevice = nullptr;
+  CudaQpaTask *newTasksHost = nullptr;
+  CudaQpaResult *newResultsDevice = nullptr;
+  CudaQpaResult *newResultsHost = nullptr;
+  try
+  {
+#if VTM_CUDA_TESTING
+    if (context->qpaAllocationFailureStep == 1)
+    {
+      context->qpaAllocationFailureStep = 0;
+      throw std::runtime_error("Injected CUDA QPA task device allocation failure");
+    }
+#endif
+    checkCuda(cudaMallocFromPoolAsync(reinterpret_cast<void **>(&newTasksDevice),
+                                      capacity * sizeof(*newTasksDevice), context->memoryPool, stream),
+              "QPA task allocation");
+#if VTM_CUDA_TESTING
+    if (context->qpaAllocationFailureStep == 2)
+    {
+      context->qpaAllocationFailureStep = 0;
+      throw std::runtime_error("Injected CUDA QPA result device allocation failure");
+    }
+#endif
+    checkCuda(cudaMallocFromPoolAsync(reinterpret_cast<void **>(&newResultsDevice),
+                                      capacity * sizeof(*newResultsDevice), context->memoryPool, stream),
+              "QPA result allocation");
+#if VTM_CUDA_TESTING
+    if (context->qpaAllocationFailureStep == 3)
+    {
+      context->qpaAllocationFailureStep = 0;
+      throw std::runtime_error("Injected CUDA QPA task pinned allocation failure");
+    }
+#endif
+    checkCuda(cudaHostAlloc(reinterpret_cast<void **>(&newTasksHost), capacity * sizeof(*newTasksHost),
+                            cudaHostAllocPortable),
+              "pinned QPA task allocation");
+#if VTM_CUDA_TESTING
+    if (context->qpaAllocationFailureStep == 4)
+    {
+      context->qpaAllocationFailureStep = 0;
+      throw std::runtime_error("Injected CUDA QPA result pinned allocation failure");
+    }
+#endif
+    checkCuda(cudaHostAlloc(reinterpret_cast<void **>(&newResultsHost), capacity * sizeof(*newResultsHost),
+                            cudaHostAllocPortable),
+              "pinned QPA result allocation");
+  }
+  catch (...)
+  {
+    if (newTasksDevice != nullptr) (void) cudaFreeAsync(newTasksDevice, stream);
+    if (newResultsDevice != nullptr) (void) cudaFreeAsync(newResultsDevice, stream);
+    (void) cudaStreamSynchronize(stream);
+    if (newTasksHost != nullptr) (void) cudaFreeHost(newTasksHost);
+    if (newResultsHost != nullptr) (void) cudaFreeHost(newResultsHost);
+    throw;
+  }
+
+  if (context->qpaTasksDevice != nullptr || context->qpaResultsDevice != nullptr
+      || context->qpaTasksHost != nullptr || context->qpaResultsHost != nullptr)
+  {
+    (void) cudaFreeAsync(newTasksDevice, stream);
+    (void) cudaFreeAsync(newResultsDevice, stream);
+    (void) cudaStreamSynchronize(stream);
+    (void) cudaFreeHost(newTasksHost);
+    (void) cudaFreeHost(newResultsHost);
+    throw std::runtime_error("CUDA QPA scratch ownership is inconsistent");
+  }
+
+  context->qpaTasksDevice = newTasksDevice;
+  context->qpaTasksHost = newTasksHost;
+  context->qpaResultsDevice = newResultsDevice;
+  context->qpaResultsHost = newResultsHost;
+  context->qpaCapacity = capacity;
+}
+
 template<typename Sample>
 __global__ void sadBatchKernel(const Sample *source, const std::size_t sourcePitchBytes,
                                const Sample *referenceBase, const std::size_t referencePitchBytes,
@@ -286,6 +405,69 @@ __global__ void sadBatchKernel(const Sample *source, const std::size_t sourcePit
   if (threadIdx.x == 0)
   {
     results[candidate] = (partial[0] << subShift) >> distortionShift;
+  }
+}
+
+template<typename Sample>
+__global__ void qpaBatchKernel(const Sample *luma, const std::size_t pitchBytes,
+                               const CudaQpaTask *tasks, CudaQpaResult *results)
+{
+  const CudaQpaTask task = tasks[blockIdx.x];
+  const std::size_t stride = pitchBytes / sizeof(Sample);
+  const CudaQpaRect flt = task.filterArea;
+  const Sample *filterBase = luma + static_cast<std::size_t>(flt.y) * stride + flt.x;
+  const std::uint64_t innerWidth = flt.width - 2;
+  const std::uint64_t filterSamples = innerWidth * (flt.height - 2);
+
+  std::uint64_t highpassSum = 0;
+  for (std::uint64_t sample = threadIdx.x; sample < filterSamples; sample += blockDim.x)
+  {
+    const std::uint32_t y = static_cast<std::uint32_t>(sample / innerWidth) + 1;
+    const std::uint32_t x = static_cast<std::uint32_t>(sample % innerWidth) + 1;
+    const Sample *row = filterBase + static_cast<std::size_t>(y) * stride;
+    const Sample *previousRow = row - stride;
+    const Sample *nextRow = row + stride;
+    // The host preflight admits only 8/10-bit samples. This exactly mirrors the original signed-int expression.
+    const int f = 12 * int(row[x])
+                  - 2 * (int(row[x - 1]) + int(row[x + 1]) + int(previousRow[x]) + int(nextRow[x]))
+                  - int(previousRow[x - 1]) - int(previousRow[x + 1])
+                  - int(nextRow[x - 1]) - int(nextRow[x + 1]);
+    highpassSum += static_cast<std::uint64_t>(f < 0 ? -f : f);
+  }
+
+  const CudaQpaRect area = task.lumaArea;
+  const Sample *areaBase = luma + static_cast<std::size_t>(area.y) * stride + area.x;
+  const std::uint64_t areaSamples = static_cast<std::uint64_t>(area.width) * area.height;
+  std::int64_t lumaSum = 0;
+  for (std::uint64_t sample = threadIdx.x; sample < areaSamples; sample += blockDim.x)
+  {
+    const std::uint32_t y = static_cast<std::uint32_t>(sample / area.width);
+    const std::uint32_t x = static_cast<std::uint32_t>(sample % area.width);
+    lumaSum += areaBase[static_cast<std::size_t>(y) * stride + x];
+  }
+
+  __shared__ std::uint64_t highpassPartial[256];
+  __shared__ std::int64_t  lumaPartial[256];
+  highpassPartial[threadIdx.x] = highpassSum;
+  lumaPartial[threadIdx.x] = lumaSum;
+  __syncthreads();
+  for (unsigned offset = blockDim.x / 2; offset != 0; offset >>= 1)
+  {
+    if (threadIdx.x < offset)
+    {
+      highpassPartial[threadIdx.x] += highpassPartial[threadIdx.x + offset];
+      lumaPartial[threadIdx.x] += lumaPartial[threadIdx.x + offset];
+    }
+    __syncthreads();
+  }
+  if (threadIdx.x == 0)
+  {
+    CudaQpaResult result{};
+    result.ticket = task.ticket;
+    result.ctuAddr = task.ctuAddr;
+    result.highpassSum = highpassPartial[0];
+    result.lumaSum = lumaPartial[0];
+    results[blockIdx.x] = result;
   }
 }
 
@@ -526,9 +708,63 @@ void computeDistortionBatch(RuntimeContext *context, const CudaDistortionBatchDe
   ++context->distortionDispatches;
 }
 
+void computeQpaBatch(RuntimeContext *context, const CudaDevicePlaneDesc &source,
+                     const CudaQpaTask *tasks, const std::uint32_t taskCount, CudaQpaResult *results)
+{
+  checkCuda(cudaSetDevice(context->device), "device selection");
+  ensureQpaCapacity(context, taskCount);
+  cudaStream_t stream = context->streams[queueIndex(CudaQueue::Compute)];
+#if VTM_CUDA_TESTING
+  if (context->qpaExecutionFailures > 0)
+  {
+    --context->qpaExecutionFailures;
+    throw std::runtime_error("Injected CUDA QPA execution failure");
+  }
+#endif
+
+  const std::size_t taskBytes = static_cast<std::size_t>(taskCount) * sizeof(*tasks);
+  const std::size_t resultBytes = static_cast<std::size_t>(taskCount) * sizeof(*results);
+  std::memcpy(context->qpaTasksHost, tasks, taskBytes);
+  checkCuda(cudaMemcpyAsync(context->qpaTasksDevice, context->qpaTasksHost, taskBytes,
+                            cudaMemcpyHostToDevice, stream),
+            "QPA task upload");
+
+  constexpr unsigned threads = 256;
+  if (source.elementSize == 2)
+  {
+    qpaBatchKernel<std::int16_t><<<taskCount, threads, 0, stream>>>(
+      static_cast<const std::int16_t *>(source.data), source.pitchBytes,
+      context->qpaTasksDevice, context->qpaResultsDevice);
+  }
+  else
+  {
+    qpaBatchKernel<std::int32_t><<<taskCount, threads, 0, stream>>>(
+      static_cast<const std::int32_t *>(source.data), source.pitchBytes,
+      context->qpaTasksDevice, context->qpaResultsDevice);
+  }
+  checkCuda(cudaGetLastError(), "QPA batch launch");
+  checkCuda(cudaMemcpyAsync(context->qpaResultsHost, context->qpaResultsDevice, resultBytes,
+                            cudaMemcpyDeviceToHost, stream),
+            "QPA result download");
+  checkCuda(cudaStreamSynchronize(stream), "QPA batch completion");
+  std::memcpy(results, context->qpaResultsHost, resultBytes);
+  ++context->qpaDispatches;
+  context->qpaTasks += taskCount;
+}
+
 std::uint64_t distortionBatchDispatchCount(const RuntimeContext *context)
 {
   return context->distortionDispatches;
+}
+
+std::uint64_t qpaBatchDispatchCount(const RuntimeContext *context)
+{
+  return context->qpaDispatches;
+}
+
+std::uint64_t qpaTaskCount(const RuntimeContext *context)
+{
+  return context->qpaTasks;
 }
 
 void recoverDistortionRuntime(RuntimeContext *context) noexcept
@@ -542,14 +778,16 @@ void recoverDistortionRuntime(RuntimeContext *context) noexcept
   if (context->streams[computeIndex] != nullptr)
   {
     (void) cudaStreamSynchronize(context->streams[computeIndex]);
-    if (context->distortionResultsDevice != nullptr)
+    for (void **allocation : { reinterpret_cast<void **>(&context->distortionResultsDevice),
+                               reinterpret_cast<void **>(&context->qpaTasksDevice),
+                               reinterpret_cast<void **>(&context->qpaResultsDevice) })
     {
-      if (cudaFreeAsync(context->distortionResultsDevice, context->streams[computeIndex]) == cudaSuccess)
+      if (*allocation != nullptr && cudaFreeAsync(*allocation, context->streams[computeIndex]) == cudaSuccess)
       {
-        context->distortionResultsDevice = nullptr; // ownership transferred even if later synchronization fails
+        *allocation = nullptr; // ownership transferred even if later synchronization fails
         (void) cudaStreamSynchronize(context->streams[computeIndex]);
       }
-      else
+      else if (*allocation != nullptr)
       {
         (void) cudaGetLastError(); // retain ownership so normal context teardown can retry
       }
@@ -564,25 +802,57 @@ void recoverDistortionRuntime(RuntimeContext *context) noexcept
       context->distortionResultsHost = nullptr;
     }
   }
+  for (void **allocation : { reinterpret_cast<void **>(&context->qpaTasksHost),
+                             reinterpret_cast<void **>(&context->qpaResultsHost) })
+  {
+    if (*allocation != nullptr && cudaFreeHost(*allocation) == cudaSuccess)
+    {
+      *allocation = nullptr;
+    }
+  }
   context->distortionCapacity = 0;
+  context->qpaCapacity = 0;
   (void) cudaGetLastError();
   (void) cudaStreamCreateWithFlags(&context->streams[computeIndex], cudaStreamNonBlocking);
 }
 
-#if VTM_CUDA_TESTING
 void injectReleaseFailures(RuntimeContext *context, const unsigned asyncFailures, const unsigned immediateFailures)
 {
+#if VTM_CUDA_TESTING
   context->asyncReleaseFailures = asyncFailures;
   context->immediateReleaseFailures = immediateFailures;
+#else
+  (void) context;
+  (void) asyncFailures;
+  (void) immediateFailures;
+#endif
 }
 
 
 void injectDistortionFailures(RuntimeContext *context, const unsigned allocationFailureStep,
                               const unsigned executionFailures)
 {
+#if VTM_CUDA_TESTING
   context->distortionAllocationFailureStep = allocationFailureStep;
   context->distortionExecutionFailures = executionFailures;
-}
+#else
+  (void) context;
+  (void) allocationFailureStep;
+  (void) executionFailures;
 #endif
+}
+
+void injectQpaFailures(RuntimeContext *context, const unsigned allocationFailureStep,
+                       const unsigned executionFailures)
+{
+#if VTM_CUDA_TESTING
+  context->qpaAllocationFailureStep = allocationFailureStep;
+  context->qpaExecutionFailures = executionFailures;
+#else
+  (void) context;
+  (void) allocationFailureStep;
+  (void) executionFailures;
+#endif
+}
 
 }   // namespace vtm::cuda_backend
