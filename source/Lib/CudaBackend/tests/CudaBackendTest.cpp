@@ -965,6 +965,85 @@ bool runMultiPlaneTransactionFailureCase(vtm::CudaContext &context, const std::u
   context.releasePictureMirror(mirror);
   return matches;
 }
+
+bool runSameLayoutPartialReleaseCase(const int device, const bool retainDevice)
+{
+  vtm::CudaContext context;
+  context.create(device);
+  TestPicture initial(37, 29, 2, 10, 53);
+  TestPicture rebound(37, 29, 2, 10, 97);
+  int owner = 0;
+  const auto mirror = context.registerPictureMirror(&owner, vtm::CudaPictureRole::Reconstruction,
+                                                     initial.descriptor);
+  context.ensureDevicePlane(mirror, 0);
+  const std::uint64_t expectedDevice = initial.deviceBytes(0);
+  const std::uint64_t expectedPinned = initial.pinnedBytes(0);
+  const vtm::CudaMirrorMemoryStats allocated = context.pictureMirrorMemoryStats();
+  if (allocated.total.currentDeviceBytes != expectedDevice
+      || allocated.total.currentPinnedBytes != expectedPinned
+      || allocated.total.peakDeviceBytes != expectedDevice
+      || allocated.total.peakPinnedBytes != expectedPinned
+      || allocated.budgetBytes != vtm::CUDA_DEFAULT_MIRROR_MEMORY_BUDGET_BYTES
+      || allocated.budgetRejections != 0)
+  {
+    return false;
+  }
+
+  if (retainDevice)
+  {
+    context.injectReleaseFailuresForTesting(1, 1);
+  }
+  else
+  {
+    context.injectPinnedReleaseFailuresForTesting(1);
+  }
+  if (!throws([&context, mirror]() { context.releasePictureMirror(mirror); }))
+  {
+    return false;
+  }
+  const vtm::CudaMirrorMemoryStats partial = context.pictureMirrorMemoryStats();
+  if (context.pictureMirrorCount() != 1
+      || partial.total.currentDeviceBytes != (retainDevice ? expectedDevice : 0)
+      || partial.total.currentPinnedBytes != (retainDevice ? 0 : expectedPinned))
+  {
+    return false;
+  }
+
+  context.rebindHostPicture(mirror, rebound.descriptor);
+  const vtm::CudaMirrorMemoryStats restored = context.pictureMirrorMemoryStats();
+  if (restored.total.currentDeviceBytes != expectedDevice
+      || restored.total.currentPinnedBytes != expectedPinned
+      || restored.total.peakDeviceBytes != expectedDevice
+      || restored.total.peakPinnedBytes != expectedPinned
+      || restored.budgetBytes != allocated.budgetBytes || restored.budgetRejections != 0
+      || context.pictureMirrorAllocatedPlanes(mirror) != vtm::CUDA_PLANE_Y)
+  {
+    return false;
+  }
+
+  context.ensureDevicePlane(mirror, 0);
+  for (std::size_t row = 0; row < rebound.planes[0].fullHeight; ++row)
+  {
+    std::memset(rebound.planes[0].storage.data() + row * rebound.planes[0].stride, 0,
+                rebound.planes[0].rowBytes);
+  }
+  context.markDevicePlaneModified(mirror, 0);
+  context.ensureHostPlane(mirror, 0);
+  if (rebound.planes[0].storage != rebound.planes[0].expected)
+  {
+    return false;
+  }
+  context.releasePictureMirror(mirror);
+  const vtm::CudaMirrorMemoryStats released = context.pictureMirrorMemoryStats();
+  const bool releasedCleanly = context.pictureMirrorCount() == 0
+                               && released.total.currentDeviceBytes == 0
+                               && released.total.currentPinnedBytes == 0
+                               && released.total.peakDeviceBytes == expectedDevice
+                               && released.total.peakPinnedBytes == expectedPinned
+                               && released.budgetRejections == 0;
+  context.shutdown();
+  return releasedCleanly;
+}
 #endif
 
 }   // namespace
@@ -1396,6 +1475,11 @@ int main(const int argc, char *argv[])
         || !runMultiPlaneTransactionFailureCase(context, 2))
     {
       return fail("CUDA multi-plane mirror transfer failure was partially published without synchronization");
+    }
+    if (!runSameLayoutPartialReleaseCase(std::stoi(argv[2]), true)
+        || !runSameLayoutPartialReleaseCase(std::stoi(argv[2]), false))
+    {
+      return fail("CUDA same-layout rebind could not reconstruct independently retained mirror resources");
     }
 #endif
     if (runBenchmark && (!benchmarkSadBatch(context) || !benchmarkQpaBatch(std::stoi(argv[2]))))
