@@ -539,7 +539,8 @@ void SampleAdaptiveOffset::offsetBlock(const int channelBitDepth, const ClpRng &
 }
 
 void SampleAdaptiveOffset::offsetCTU(const UnitArea &area, const CPelUnitBuf &src, PelUnitBuf &res,
-                                     SAOBlkParam &saoblkParam, CodingStructure &cs, const bool processLuma)
+                                     SAOBlkParam &saoblkParam, CodingStructure &cs, const bool processLuma,
+                                     const bool processChroma)
 {
   const uint32_t numberOfComponents = getNumberValidComponents( area.chromaFormat );
 
@@ -579,7 +580,7 @@ void SampleAdaptiveOffset::offsetCTU(const UnitArea &area, const CPelUnitBuf &sr
                                  numVerVirBndry, horVirBndryPos, verVirBndryPos, cs.picHeader);
   for(int compIdx = 0; compIdx < numberOfComponents; compIdx++)
   {
-    if (compIdx == COMPONENT_Y && !processLuma)
+    if ((compIdx == COMPONENT_Y && !processLuma) || (compIdx != COMPONENT_Y && !processChroma))
     {
       continue;
     }
@@ -640,9 +641,14 @@ void SampleAdaptiveOffset::offsetCTU(const UnitArea &area, const CPelUnitBuf &sr
 }
 
 void SampleAdaptiveOffset::SAOProcess(CodingStructure &cs, SAOBlkParam *saoBlkParams,
-                                      std::vector<vtm::CudaSaoLumaCtuParam> *cudaLumaCtus)
+                                      std::vector<vtm::CudaSaoLumaCtuParam> *cudaLumaCtus,
+                                      const PictureProcessing processing)
 {
   CHECK(!saoBlkParams, "No parameters present");
+  CHECK(processing == PictureProcessing::CollectLumaOnly && cudaLumaCtus == nullptr,
+        "CUDA SAO luma collection requires an output vector");
+  CHECK(processing != PictureProcessing::CollectLumaOnly && cudaLumaCtus != nullptr,
+        "CUDA SAO descriptors may only be requested in collect-only mode");
 
   xReconstructBlkSAOParams(cs, saoBlkParams);
 
@@ -709,17 +715,24 @@ void SampleAdaptiveOffset::SAOProcess(CodingStructure &cs, SAOBlkParam *saoBlkPa
         }
         cudaLumaCtus->push_back(task);
       }
-      offsetCTU(area, m_tempBuf, rec, ctuParam, cs, cudaLumaCtus == nullptr);
+      offsetCTU(area, m_tempBuf, rec, ctuParam, cs,
+                processing == PictureProcessing::All,
+                processing != PictureProcessing::CollectLumaOnly);
     }
   }
 
-  DTRACE_UPDATE(g_trace_ctx, (std::make_pair("poc", cs.slice->getPOC())));
-  DTRACE_PIC_COMP(D_REC_CB_LUMA_SAO, cs, cs.getRecoBuf(), COMPONENT_Y);
-  DTRACE_PIC_COMP(D_REC_CB_CHROMA_SAO, cs, cs.getRecoBuf(), COMPONENT_Cb);
-  DTRACE_PIC_COMP(D_REC_CB_CHROMA_SAO, cs, cs.getRecoBuf(), COMPONENT_Cr);
-
-  DTRACE    ( g_trace_ctx, D_CRC, "SAO" );
-  DTRACE_CRC( g_trace_ctx, D_CRC, cs, cs.getRecoBuf() );
+  if (processing != PictureProcessing::CollectLumaOnly)
+  {
+    DTRACE_UPDATE(g_trace_ctx, (std::make_pair("poc", cs.slice->getPOC())));
+    if (processing != PictureProcessing::ChromaOnly)
+    {
+      DTRACE_PIC_COMP(D_REC_CB_LUMA_SAO, cs, cs.getRecoBuf(), COMPONENT_Y);
+    }
+    DTRACE_PIC_COMP(D_REC_CB_CHROMA_SAO, cs, cs.getRecoBuf(), COMPONENT_Cb);
+    DTRACE_PIC_COMP(D_REC_CB_CHROMA_SAO, cs, cs.getRecoBuf(), COMPONENT_Cr);
+    DTRACE    ( g_trace_ctx, D_CRC, "SAO" );
+    DTRACE_CRC( g_trace_ctx, D_CRC, cs, cs.getRecoBuf() );
+  }
 }
 
 void SampleAdaptiveOffset::deriveLoopFilterBoundaryAvailability(CodingStructure &cs, const Position &pos,

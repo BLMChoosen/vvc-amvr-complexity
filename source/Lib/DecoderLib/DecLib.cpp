@@ -953,6 +953,11 @@ void DecLib::executeLoopFilters()
 
   CodingStructure& cs = *m_pcPic->cs;
 
+#if GREEN_METADATA_SEI_ENABLED
+  FeatureCounterStruct initValues{};
+  cs.m_featureCounter = initValues;
+#endif
+
   const PreCalcValues &chainPcv = *cs.pcv;
   const std::uint64_t chainPixels = std::uint64_t(chainPcv.lumaWidth) * chainPcv.lumaHeight;
   const bool chainLmcsPicture = cs.sps->getUseLmcs() && cs.picHeader->getLmcsEnabledFlag();
@@ -960,7 +965,7 @@ void DecLib::executeLoopFilters()
   const bool chainDbf = !cs.slice->getDeblockingFilterDisable();
   const bool chainSaoPicture = cs.sps->getSAOEnabledFlag();
   bool chainSao = chainSaoPicture && cs.slice->getSaoEnabledFlag(ChannelType::LUMA);
-  const bool chainAlf = cs.sps->getALFEnabledFlag() && cs.slice->getAlfEnabledFlag(COMPONENT_Y);
+  bool chainAlf = cs.sps->getALFEnabledFlag() && cs.slice->getAlfEnabledFlag(COMPONENT_Y);
   const bool chainCcAlf = cs.slice->m_ccAlfFilterParam.ccAlfFilterEnabled[0]
                           || cs.slice->m_ccAlfFilterParam.ccAlfFilterEnabled[1];
   const bool cudaChainEligible = m_computeState->config.backend == vtm::ComputeBackend::CUDA
@@ -997,14 +1002,15 @@ void DecLib::executeLoopFilters()
     {
       dbfTasks.reserve(static_cast<std::size_t>(std::min<std::uint64_t>(chainPixels / 4,
                                                                         vtm::CUDA_DBF_MAX_TASKS)));
-      m_deblockingFilter.deblockingFilterPic(cs, &dbfTasks);
+      m_deblockingFilter.deblockingFilterPic(
+        cs, &dbfTasks, DeblockingFilter::PictureProcessing::CollectLumaOnly);
     }
-    CS::setRefinedMotionField(cs);
 
     std::vector<vtm::CudaSaoLumaCtuParam> saoCtus;
     if (chainSaoPicture)
     {
-      m_cSAO.SAOProcess(cs, cs.picture->getSAO(), chainSao ? &saoCtus : nullptr);
+      m_cSAO.SAOProcess(cs, cs.picture->getSAO(), &saoCtus,
+                        SampleAdaptiveOffset::PictureProcessing::CollectLumaOnly);
       // A signalled SAO stage can reconstruct to an all-disabled picture. The normative CPU
       // implementation returns before producing CTU work in that case, so omit the GPU stage.
       if (chainSao && saoCtus.empty()) chainSao = false;
@@ -1012,8 +1018,12 @@ void DecLib::executeLoopFilters()
 
     std::vector<vtm::CudaAlfCtuParam> alfCtus;
     vtm::CudaAlfLumaFrame alfFrame{};
+#if GREEN_METADATA_SEI_ENABLED
+    std::uint64_t chainAlfEnabledPixels = 0;
+#endif
     if (chainAlf)
     {
+      bool hasEnabledAlfLuma = false;
       m_cALF.getCcAlfFilterParam() = cs.slice->m_ccAlfFilterParam;
       m_cALF.prepareLumaParameters(cs);
       alfCtus.resize(chainPcv.sizeInCtus);
@@ -1027,6 +1037,10 @@ void DecLib::executeLoopFilters()
         const AlfMode mode = m_cALF.getLumaMode(ctu);
         dst.enabled = mode != AlfMode::OFF;
         if (!dst.enabled) continue;
+        hasEnabledAlfLuma = true;
+#if GREEN_METADATA_SEI_ENABLED
+        chainAlfEnabledPixels += static_cast<std::uint64_t>(dst.width) * dst.height;
+#endif
         const AlfCoeff *coeff = m_cALF.getLumaCoeff(mode);
         const Pel *clip = m_cALF.getLumaClip(mode);
         for (std::uint32_t i = 0; i < vtm::CUDA_ALF_CLASSES * vtm::CUDA_ALF_COEFFICIENTS; ++i)
@@ -1048,6 +1062,12 @@ void DecLib::executeLoopFilters()
       alfFrame.vbPos = m_cALF.getLumaVbPos();
       alfFrame.bitDepth = static_cast<std::uint8_t>(range.bd);
       alfFrame.elementSize = sizeof(Pel);
+      if (!hasEnabledAlfLuma)
+      {
+        chainAlf = false;
+        alfCtus.clear();
+        alfFrame = {};
+      }
     }
 
     m_computeState->cudaContext.recordLoopFilterChainCollection(static_cast<std::uint64_t>(
@@ -1070,35 +1090,78 @@ void DecLib::executeLoopFilters()
                    | (chainSao ? vtm::CUDA_LOOP_FILTER_SAO : 0)
                    | (chainAlf ? vtm::CUDA_LOOP_FILTER_ALF : 0);
 
-    const vtm::CudaMirrorHandle mirror = m_computeState->cudaContext.pictureMirrorHandle(
-      m_pcPic, vtm::CudaPictureRole::Reconstruction);
-    m_computeState->cudaContext.markHostPlaneModified(mirror, 0);
-    const vtm::CudaLoopFilterChainDispatchResult dispatch =
-      m_computeState->cudaContext.filterLoopFilterChain(
+    vtm::CudaMirrorHandle mirror = 0;
+    if (frame.stages != 0)
+    {
+      mirror = m_computeState->cudaContext.pictureMirrorHandle(
+        m_pcPic, vtm::CudaPictureRole::Reconstruction);
+    }
+    const vtm::CudaLoopFilterChainDispatchResult preflight =
+      m_computeState->cudaContext.preflightLoopFilterChain(
         mirror, frame, chainLmcs ? lmcsLut.data() : nullptr,
         dbfTasks.empty() ? nullptr : dbfTasks.data(), static_cast<std::uint32_t>(dbfTasks.size()),
         chainSao ? saoCtus.data() : nullptr, chainSao ? static_cast<std::uint32_t>(saoCtus.size()) : 0,
         chainAlf ? &alfFrame : nullptr, chainAlf ? alfCtus.data() : nullptr,
         chainAlf ? static_cast<std::uint32_t>(alfCtus.size()) : 0);
-    CHECK(dispatch == vtm::CudaLoopFilterChainDispatchResult::NotEligible,
-          "CUDA loop-filter chain rejected CPU-validated descriptors after selection");
-    if (chainLmcsPicture) m_cReshaper.setRecReshaped(false);
 
-    const bool chromaAlf = cs.sps->getALFEnabledFlag()
-      && (cs.slice->getAlfEnabledFlag(COMPONENT_Cb) || cs.slice->getAlfEnabledFlag(COMPONENT_Cr));
-    if (chromaAlf) m_cALF.ALFProcess(cs, false, true);
-    if (isChromaEnabled(cs.sps->getChromaFormatIdc()))
+    if (preflight == vtm::CudaLoopFilterChainDispatchResult::NotEligible)
     {
-      m_computeState->cudaContext.markHostPlaneModified(mirror, 1);
-      m_computeState->cudaContext.markHostPlaneModified(mirror, 2);
-    }
 #if GREEN_METADATA_SEI_ENABLED
-    m_featureCounter.addSAO(cs.m_featureCounter);
-    m_featureCounter.addALF(cs.m_featureCounter);
-    m_featureCounter.addBoundaryStrengths(cs.m_featureCounter);
+      cs.m_featureCounter = initValues;
 #endif
-    m_pcPic->cs->slice->stopProcessingTimer();
-    return;
+    }
+    else
+    {
+      // Backend and every POD contract are now fixed. Chroma work may start; any subsequent CUDA
+      // error is after selection and therefore fatal rather than a CPU fallback.
+      if (chainDbf)
+      {
+        m_deblockingFilter.deblockingFilterPic(
+          cs, nullptr, DeblockingFilter::PictureProcessing::ChromaOnly);
+      }
+      CS::setRefinedMotionField(cs);
+      if (chainSaoPicture)
+      {
+        m_cSAO.SAOProcess(cs, cs.picture->getSAO(), nullptr,
+                          SampleAdaptiveOffset::PictureProcessing::ChromaOnly);
+      }
+
+      if (preflight == vtm::CudaLoopFilterChainDispatchResult::Executed)
+      {
+        m_computeState->cudaContext.markHostPlaneModified(mirror, 0);
+        const vtm::CudaLoopFilterChainDispatchResult dispatch =
+          m_computeState->cudaContext.filterLoopFilterChain(
+            mirror, frame, chainLmcs ? lmcsLut.data() : nullptr,
+            dbfTasks.empty() ? nullptr : dbfTasks.data(), static_cast<std::uint32_t>(dbfTasks.size()),
+            chainSao ? saoCtus.data() : nullptr, chainSao ? static_cast<std::uint32_t>(saoCtus.size()) : 0,
+            chainAlf ? &alfFrame : nullptr, chainAlf ? alfCtus.data() : nullptr,
+            chainAlf ? static_cast<std::uint32_t>(alfCtus.size()) : 0);
+        CHECK(dispatch != vtm::CudaLoopFilterChainDispatchResult::Executed,
+              "CUDA loop-filter chain eligibility changed after selection");
+#if GREEN_METADATA_SEI_ENABLED
+        cs.m_featureCounter.alfLumaType7 += chainAlfEnabledPixels / 16;
+        cs.m_featureCounter.alfLumaPels += chainAlfEnabledPixels;
+#endif
+      }
+      if (chainLmcsPicture) m_cReshaper.setRecReshaped(false);
+
+      const bool chromaAlf = cs.sps->getALFEnabledFlag()
+        && (cs.slice->getAlfEnabledFlag(COMPONENT_Cb) || cs.slice->getAlfEnabledFlag(COMPONENT_Cr));
+      if (chromaAlf) m_cALF.ALFProcess(cs, false, true);
+      if (preflight == vtm::CudaLoopFilterChainDispatchResult::Executed
+          && isChromaEnabled(cs.sps->getChromaFormatIdc()))
+      {
+        m_computeState->cudaContext.markHostPlaneModified(mirror, 1);
+        m_computeState->cudaContext.markHostPlaneModified(mirror, 2);
+      }
+#if GREEN_METADATA_SEI_ENABLED
+      m_featureCounter.addSAO(cs.m_featureCounter);
+      m_featureCounter.addALF(cs.m_featureCounter);
+      m_featureCounter.addBoundaryStrengths(cs.m_featureCounter);
+#endif
+      m_pcPic->cs->slice->stopProcessingTimer();
+      return;
+    }
   }
 
   if (cs.sps->getUseLmcs() && cs.picHeader->getLmcsEnabledFlag())
@@ -1121,10 +1184,6 @@ void DecLib::executeLoopFilters()
     m_cReshaper.setRecReshaped(false);
     m_cSAO.setReshaper(&m_cReshaper);
   }
-#if GREEN_METADATA_SEI_ENABLED
-  FeatureCounterStruct initValues;
-  cs.m_featureCounter =  initValues;
-#endif
   // deblocking filter
   const PreCalcValues &dbfPcv = *cs.pcv;
   const std::uint64_t dbfPixels = std::uint64_t(dbfPcv.lumaWidth) * dbfPcv.lumaHeight;

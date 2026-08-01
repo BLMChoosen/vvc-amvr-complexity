@@ -101,6 +101,8 @@ void injectLoopFilterChainFailure(RuntimeContext *context, CudaLoopFilterChainTe
 void injectPinnedReleaseFailures(unsigned failures);
 std::uint64_t dbfLiveDeviceAllocationsForTesting() noexcept;
 std::uint64_t dbfLivePinnedAllocationsForTesting() noexcept;
+std::uint64_t chainLiveDeviceAllocationsForTesting() noexcept;
+std::uint64_t chainLivePinnedAllocationsForTesting() noexcept;
 
 }   // namespace vtm::cuda_backend
 
