@@ -33,6 +33,7 @@ enum CudaLoopFilterUnsupportedFeature : std::uint8_t
 enum class CudaLoopFilterChainDispatchResult : std::uint8_t
 {
   NotEligible,
+  NoOp,
   Executed
 };
 

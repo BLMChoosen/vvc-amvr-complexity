@@ -2396,7 +2396,13 @@ CudaLoopFilterChainDispatchResult CudaContext::filterLoopFilterChain(
   const CudaAlfLumaFrame *alfFrame, const CudaAlfCtuParam *alfCtus, const std::uint32_t alfCtuCount)
 {
 #if VTM_ENABLE_CUDA
-  const auto reject = [this]() {
+  const auto reject = [this](const char *reason = "unspecified") {
+#if VTM_CUDA_TESTING
+    if (std::getenv("VTM_CUDA_LOOP_FILTER_CHAIN_DIAGNOSTIC") != nullptr)
+      throw std::runtime_error(std::string("CUDA loop-filter chain preflight rejection: ") + reason);
+#else
+    (void) reason;
+#endif
     ++m_impl->loopFilterChainNotEligible;
     return CudaLoopFilterChainDispatchResult::NotEligible;
   };
@@ -2416,27 +2422,32 @@ CudaLoopFilterChainDispatchResult CudaContext::filterLoopFilterChain(
       || (frame.elementSize != 2 && frame.elementSize != 4)
       || frame.minSample != 0 || frame.maxSample != (std::int32_t{ 1 } << frame.bitDepth) - 1
       || frame.stages == 0 || (frame.stages & ~validStages) != 0 || frame.unsupportedFeatures != 0)
-    return reject();
+    return reject("frame descriptor or unsupported feature");
 
   const bool runLmcs = (frame.stages & CUDA_LOOP_FILTER_LMCS) != 0;
   const bool runDbf = (frame.stages & CUDA_LOOP_FILTER_DBF) != 0;
   const bool runSao = (frame.stages & CUDA_LOOP_FILTER_SAO) != 0;
   const bool runAlf = (frame.stages & CUDA_LOOP_FILTER_ALF) != 0;
-  if ((runLmcs && (lmcsLut == nullptr || frame.lmcsLutSize != (std::uint32_t{ 1 } << frame.bitDepth)))
-      || (!runLmcs && frame.lmcsLutSize != 0)
-      || (runDbf && dbfTaskCount != 0 && dbfTasks == nullptr) || dbfTaskCount > CUDA_DBF_MAX_TASKS
-      || (runSao && (saoCtus == nullptr || saoCtuCount != frame.ctuCount))
-      || (!runSao && saoCtuCount != 0)
-      || (runAlf && (alfFrame == nullptr || alfCtus == nullptr || alfCtuCount != frame.ctuCount))
-      || (!runAlf && alfCtuCount != 0))
-    return reject();
+  if (runLmcs && (lmcsLut == nullptr || frame.lmcsLutSize != (std::uint32_t{ 1 } << frame.bitDepth)))
+    return reject("enabled LMCS pointer or LUT size");
+  if (!runLmcs && frame.lmcsLutSize != 0) return reject("disabled LMCS has a LUT");
+  if (runDbf && dbfTaskCount != 0 && dbfTasks == nullptr) return reject("enabled DBF task pointer");
+  if (dbfTaskCount > CUDA_DBF_MAX_TASKS) return reject("DBF task count limit");
+  if (runSao && (saoCtus == nullptr || saoCtuCount != frame.ctuCount))
+    return reject("enabled SAO pointer or CTU count");
+  if (!runSao && saoCtuCount != 0) return reject("disabled SAO has CTUs");
+  if (runAlf && (alfFrame == nullptr || alfCtus == nullptr || alfCtuCount != frame.ctuCount))
+    return reject("enabled ALF pointer or CTU count");
+  if (!runAlf && alfCtuCount != 0) return reject("disabled ALF has CTUs");
   if (runLmcs)
     for (std::uint32_t i = 0; i < frame.lmcsLutSize; ++i)
-      if (lmcsLut[i] < frame.minSample || lmcsLut[i] > frame.maxSample) return reject();
+      if (lmcsLut[i] < frame.minSample || lmcsLut[i] > frame.maxSample) return reject("LMCS LUT sample range");
 
   for (std::uint32_t i = 0; i < dbfTaskCount; ++i)
   {
     const CudaDbfLumaTask &t = dbfTasks[i];
+    const bool pLarge = (t.flags & CUDA_DBF_SIDE_P_LARGE) != 0;
+    const bool qLarge = (t.flags & CUDA_DBF_SIDE_Q_LARGE) != 0;
     const bool validLenP = t.maxFilterLenP == 1 || t.maxFilterLenP == 2 || t.maxFilterLenP == 3
                            || t.maxFilterLenP == 5 || t.maxFilterLenP == 7;
     const bool validLenQ = t.maxFilterLenQ == 1 || t.maxFilterLenQ == 2 || t.maxFilterLenQ == 3
@@ -2447,8 +2458,11 @@ CudaLoopFilterChainDispatchResult CudaContext::filterLoopFilterChain(
     if (!runDbf || t.direction > 1 || !validLenP || !validLenQ || !segmentInside
         || (t.x & 3) != 0 || (t.y & 3) != 0 || t.tc < 0 || t.tc > cudaDbfMaximumTc(frame.bitDepth)
         || t.beta < 0 || t.beta > cudaDbfMaximumBeta(frame.bitDepth)
-        || t.minSample != frame.minSample || t.maxSample != frame.maxSample)
-      return reject();
+        || t.minSample != frame.minSample || t.maxSample != frame.maxSample
+        || (t.flags & ~(CUDA_DBF_SIDE_P_LARGE | CUDA_DBF_SIDE_Q_LARGE
+                        | CUDA_DBF_PART_P_NO_FILTER | CUDA_DBF_PART_Q_NO_FILTER)) != 0
+        || pLarge != (t.maxFilterLenP > 3) || qLarge != (t.maxFilterLenQ > 3))
+      return reject("DBF task descriptor");
   }
   if (runSao)
   {
@@ -2462,10 +2476,10 @@ CudaLoopFilterChainDispatchResult CudaContext::filterLoopFilterChain(
       const std::uint32_t height = std::min(frame.ctuHeight, frame.height - y);
       if (ctu.x != x || ctu.y != y || ctu.width != width || ctu.height != height
           || ctu.enabled > 1 || (ctu.enabled && (ctu.type < 0 || ctu.type > 4)))
-        return reject();
+        return reject("SAO CTU geometry or type");
       if (ctu.enabled)
         for (const std::int32_t offset : ctu.offsets)
-          if (offset < -maximumOffset || offset > maximumOffset) return reject();
+          if (offset < -maximumOffset || offset > maximumOffset) return reject("SAO offset range");
     }
   }
   if (runAlf)
@@ -2478,7 +2492,7 @@ CudaLoopFilterChainDispatchResult CudaContext::filterLoopFilterChain(
         || (frame.width & 3) != 0 || (frame.height & 3) != 0
         || alfFrame->vbCtuHeight != static_cast<std::int32_t>(frame.ctuHeight)
         || alfFrame->vbPos != alfFrame->vbCtuHeight - 4)
-      return reject();
+      return reject("ALF frame descriptor");
     for (std::uint32_t i = 0; i < alfCtuCount; ++i)
     {
       const CudaAlfCtuParam &ctu = alfCtus[i];
@@ -2486,7 +2500,7 @@ CudaLoopFilterChainDispatchResult CudaContext::filterLoopFilterChain(
       const std::uint32_t y = (i / frame.ctusInWidth) * frame.ctuHeight;
       if (ctu.x != x || ctu.y != y || ctu.width != std::min(frame.ctuWidth, frame.width - x)
           || ctu.height != std::min(frame.ctuHeight, frame.height - y) || ctu.enabled > 1)
-        return reject();
+        return reject("ALF CTU geometry");
       if (ctu.enabled)
         for (std::uint32_t j = 0; j < CUDA_ALF_CLASSES * CUDA_ALF_COEFFICIENTS; ++j)
         {
@@ -2495,26 +2509,55 @@ CudaLoopFilterChainDispatchResult CudaContext::filterLoopFilterChain(
               || (coefficientIndex + 1 == CUDA_ALF_COEFFICIENTS
                     ? ctu.coefficients[j] != 128
                     : ctu.coefficients[j] < -128 || ctu.coefficients[j] > 127))
-            return reject();
+            return reject("ALF coefficient or clip range");
         }
     }
   }
 
+  // A DBF-enabled picture can legitimately serialize no luma edges. With no other stage enabled,
+  // complete the chain as a no-op before touching the reconstruction mirror or allocating device data.
+  if (frame.stages == CUDA_LOOP_FILTER_DBF && dbfTaskCount == 0)
+    return CudaLoopFilterChainDispatchResult::NoOp;
+
   requireRuntime(m_impl.get());
   PictureMirror &mirror = findMirror(m_impl.get(), reconstructionHandle);
-  if (mirror.role != CudaPictureRole::Reconstruction || mirror.host.planeCount == 0) return reject();
+  if (mirror.role != CudaPictureRole::Reconstruction || mirror.host.planeCount == 0)
+    return reject("reconstruction mirror role or plane count");
   const CudaHostPlaneDesc &host = mirror.host.planes[0];
   if (host.width != frame.width || host.height != frame.height || host.bitDepth != frame.bitDepth
       || host.elementSize != frame.elementSize || host.data == nullptr || host.strideBytes <= 0
       || (runDbf && dbfTaskCount != 0
           && (host.marginLeft < 8 || host.marginRight < 8 || host.marginTop < 8 || host.marginBottom < 8)))
-    return reject();
+    return reject("host plane descriptor or DBF margins");
 
   const auto integrationStart = std::chrono::steady_clock::now();
   const CudaMirrorMemoryUsage before = m_impl->mirrorMemory.total;
   const std::uint64_t mirrorSyncBefore = m_impl->mirrorSynchronizationOperations;
   try
   {
+#if VTM_CUDA_TESTING
+    if (const char *failure = std::getenv("VTM_CUDA_LOOP_FILTER_CHAIN_TEST_FAILURE"))
+    {
+      CudaLoopFilterChainTestFailurePoint point = CudaLoopFilterChainTestFailurePoint::None;
+      if (std::strcmp(failure, "allocation") == 0) point = CudaLoopFilterChainTestFailurePoint::GrowLutDevice;
+      else if (std::strcmp(failure, "upload") == 0) point = CudaLoopFilterChainTestFailurePoint::Upload;
+      else if (std::strcmp(failure, "lmcs-launch") == 0) point = CudaLoopFilterChainTestFailurePoint::LmcsLaunch;
+      else if (std::strcmp(failure, "lmcs-sync") == 0) point = CudaLoopFilterChainTestFailurePoint::LmcsCompletion;
+      else if (std::strcmp(failure, "dbf-stage") == 0) point = CudaLoopFilterChainTestFailurePoint::DbfStage;
+      else if (std::strcmp(failure, "sao-snapshot") == 0) point = CudaLoopFilterChainTestFailurePoint::SaoSnapshot;
+      else if (std::strcmp(failure, "sao-launch") == 0) point = CudaLoopFilterChainTestFailurePoint::SaoLaunch;
+      else if (std::strcmp(failure, "sao-sync") == 0) point = CudaLoopFilterChainTestFailurePoint::SaoCompletion;
+      else if (std::strcmp(failure, "alf-stage") == 0) point = CudaLoopFilterChainTestFailurePoint::AlfStage;
+      else if (std::strcmp(failure, "download") == 0) point = CudaLoopFilterChainTestFailurePoint::Download;
+      else if (std::strcmp(failure, "commit") == 0) point = CudaLoopFilterChainTestFailurePoint::Commit;
+      else throw std::runtime_error(std::string("Invalid VTM_CUDA_LOOP_FILTER_CHAIN_TEST_FAILURE value: ") + failure);
+      if (point == CudaLoopFilterChainTestFailurePoint::Download
+          || point == CudaLoopFilterChainTestFailurePoint::Commit)
+        m_impl->loopFilterChainIntegrationFailure = point;
+      else
+        cuda_backend::injectLoopFilterChainFailure(m_impl->runtime, point);
+    }
+#endif
     ensureDevicePlane(reconstructionHandle, 0);
     cuda_backend::waitFence(m_impl->runtime, CudaQueue::Dbf, CudaFence::UploadComplete);
     const LoopFilterChainAccelerationStats runtimeBefore = cuda_backend::loopFilterChainStats(m_impl->runtime);

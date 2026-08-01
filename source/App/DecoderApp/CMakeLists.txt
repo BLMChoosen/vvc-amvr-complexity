@@ -123,5 +123,40 @@ if( VTM_BUILD_CUDA_BACKEND_TESTS )
     set_tests_properties( DecoderApp.CudaDbfParity DecoderApp.CudaDbfFailFast PROPERTIES
       FIXTURES_REQUIRED CudaDbfProcess RUN_SERIAL TRUE LABELS gpu TIMEOUT 60
     )
+
+    set( DECODER_CHAIN_FIXTURE_DIR "${CMAKE_CURRENT_BINARY_DIR}/cuda-loop-filter-chain-process" )
+    set( DECODER_CHAIN_PROCESS_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/RunCudaLoopFilterChainProcessTest.cmake" )
+    add_test(
+      NAME DecoderApp.CudaLoopFilterChainFixture
+      COMMAND ${CMAKE_COMMAND}
+        "-DTEST_MODE=SETUP"
+        "-DTEST_GENERATOR=$<TARGET_FILE:CudaBackendTest>"
+        "-DTEST_ENCODER=$<TARGET_FILE:EncoderApp>"
+        "-DTEST_SOURCE_DIR=${CMAKE_SOURCE_DIR}"
+        "-DTEST_WORK_DIR=${DECODER_CHAIN_FIXTURE_DIR}"
+        -P "${DECODER_CHAIN_PROCESS_SCRIPT}"
+    )
+    add_test(
+      NAME DecoderApp.CudaLoopFilterChainParity
+      COMMAND ${CMAKE_COMMAND}
+        "-DTEST_MODE=PARITY"
+        "-DTEST_DECODER=$<TARGET_FILE:${EXE_NAME}>"
+        "-DTEST_WORK_DIR=${DECODER_CHAIN_FIXTURE_DIR}"
+        -P "${DECODER_CHAIN_PROCESS_SCRIPT}"
+    )
+    add_test(
+      NAME DecoderApp.CudaLoopFilterChainFailFast
+      COMMAND ${CMAKE_COMMAND}
+        "-DTEST_MODE=FAILFAST"
+        "-DTEST_DECODER=$<TARGET_FILE:${EXE_NAME}>"
+        "-DTEST_WORK_DIR=${DECODER_CHAIN_FIXTURE_DIR}"
+        -P "${DECODER_CHAIN_PROCESS_SCRIPT}"
+    )
+    set_tests_properties( DecoderApp.CudaLoopFilterChainFixture PROPERTIES
+      FIXTURES_SETUP CudaLoopFilterChainProcess RUN_SERIAL TRUE LABELS gpu TIMEOUT 300
+    )
+    set_tests_properties( DecoderApp.CudaLoopFilterChainParity DecoderApp.CudaLoopFilterChainFailFast PROPERTIES
+      FIXTURES_REQUIRED CudaLoopFilterChainProcess RUN_SERIAL TRUE LABELS gpu TIMEOUT 60
+    )
   endif()
 endif()

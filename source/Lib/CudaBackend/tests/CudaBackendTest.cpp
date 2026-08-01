@@ -2064,6 +2064,11 @@ struct SaoReferenceAccess : SampleAdaptiveOffset
              const Pel *source, Pel *destination, const ptrdiff_t stride,
              const bool left, const bool right, const bool above, const bool below)
   {
+    if (m_signLineBuf1.size() < std::size_t(ctu.width) + 1)
+    {
+      m_signLineBuf1.resize(std::size_t(ctu.width) + 1);
+      m_signLineBuf2.resize(std::size_t(ctu.width) + 1);
+    }
     int horizontalBoundaries[] = { -1, -1, -1 };
     int verticalBoundaries[] = { -1, -1, -1 };
     int offsets[vtm::CUDA_SAO_NUM_OFFSETS]{};
@@ -2339,6 +2344,103 @@ bool runFullLoopFilterChainCase(vtm::CudaContext &context, const std::uint8_t bi
   return true;
 }
 
+bool runLoopFilterChainDisabledStageContractCase(vtm::CudaContext &context)
+{
+  constexpr std::uint32_t width = 1924;
+  constexpr std::uint32_t height = 1084;
+  TestPicture picture(width, height, sizeof(Pel), 10, 79, 1, 0, 0, 8, 8);
+  fillDbfPattern(picture, 10);
+  const auto original = picture.planes[0].storage;
+  const vtm::CudaLoopFilterChainFrame frame =
+    makeChainFrame(width, height, 10, vtm::CUDA_LOOP_FILTER_DBF);
+  int owner = 0;
+  const auto mirror = context.registerPictureMirror(&owner, vtm::CudaPictureRole::Reconstruction,
+                                                     picture.descriptor);
+
+  const auto sao = makeSaoCtus(frame, false);
+  const auto rejected = context.filterLoopFilterChain(mirror, frame, nullptr, nullptr, 0,
+    sao.data(), static_cast<std::uint32_t>(sao.size()), nullptr, nullptr, 0);
+  if (rejected != vtm::CudaLoopFilterChainDispatchResult::NotEligible
+      || picture.planes[0].storage != original)
+  {
+    context.releasePictureMirror(mirror);
+    return false;
+  }
+
+  const auto executed = context.filterLoopFilterChain(mirror, frame, nullptr, nullptr, 0,
+                                                       nullptr, 0, nullptr, nullptr, 0);
+  const bool valid = executed == vtm::CudaLoopFilterChainDispatchResult::NoOp
+                     && picture.planes[0].storage == original;
+  context.releasePictureMirror(mirror);
+  return valid;
+}
+
+#if VTM_CUDA_TESTING
+bool runLoopFilterChainFailureCase(const int device,
+                                   const vtm::CudaLoopFilterChainTestFailurePoint point)
+{
+  constexpr std::uint32_t width = 1924;
+  constexpr std::uint32_t height = 1084;
+  const std::uint8_t stages = vtm::CUDA_LOOP_FILTER_LMCS | vtm::CUDA_LOOP_FILTER_DBF
+                              | vtm::CUDA_LOOP_FILTER_SAO | vtm::CUDA_LOOP_FILTER_ALF;
+  vtm::CudaContext context;
+  context.create(device);
+  TestPicture picture(width, height, sizeof(Pel), 10, 79, 1, 0, 0, 8, 8);
+  fillDbfPattern(picture, 10);
+  const auto original = picture.planes[0].storage;
+  const auto frame = makeChainFrame(width, height, 10, stages);
+  std::vector<std::int32_t> lut(frame.lmcsLutSize);
+  for (std::uint32_t i = 0; i < frame.lmcsLutSize; ++i) lut[i] = i;
+  const auto dbf = makeDbfTasks(10);
+  const auto sao = makeSaoCtus(frame, true);
+  const vtm::CudaAlfLumaFrame alfFrame = makeAlfFrame(width, height, 10);
+  const auto alf = makeAlfCtus(alfFrame, true);
+  int owner = 0;
+  const auto mirror = context.registerPictureMirror(&owner, vtm::CudaPictureRole::Reconstruction,
+                                                     picture.descriptor);
+  context.injectLoopFilterChainFailureForTesting(point);
+  const bool failed = throws([&]() {
+    (void) context.filterLoopFilterChain(mirror, frame, lut.data(), dbf.data(),
+      static_cast<std::uint32_t>(dbf.size()), sao.data(), static_cast<std::uint32_t>(sao.size()),
+      &alfFrame, alf.data(), static_cast<std::uint32_t>(alf.size()));
+  });
+  const auto stats = context.loopFilterChainStats();
+  const bool quarantined = context.pictureMirrorPlaneState(mirror, 0) == vtm::CudaMirrorState::HostValid;
+  const auto retry = context.filterLoopFilterChain(mirror, frame, lut.data(), dbf.data(),
+    static_cast<std::uint32_t>(dbf.size()), sao.data(), static_cast<std::uint32_t>(sao.size()),
+    &alfFrame, alf.data(), static_cast<std::uint32_t>(alf.size()));
+  const bool valid = failed && picture.planes[0].storage == original && quarantined
+                     && stats.failures == 1 && stats.poisoned && !stats.enabled
+                     && retry == vtm::CudaLoopFilterChainDispatchResult::NotEligible;
+  context.releasePictureMirror(mirror);
+  context.shutdown();
+  return valid;
+}
+
+
+bool runLoopFilterChainFailureMatrix(const int device)
+{
+  for (const auto point : {
+         vtm::CudaLoopFilterChainTestFailurePoint::GrowLutDevice,
+         vtm::CudaLoopFilterChainTestFailurePoint::GrowLutPinned,
+         vtm::CudaLoopFilterChainTestFailurePoint::GrowSaoDevice,
+         vtm::CudaLoopFilterChainTestFailurePoint::GrowSaoPinned,
+         vtm::CudaLoopFilterChainTestFailurePoint::GrowSaoOutput,
+         vtm::CudaLoopFilterChainTestFailurePoint::Upload,
+         vtm::CudaLoopFilterChainTestFailurePoint::LmcsLaunch,
+         vtm::CudaLoopFilterChainTestFailurePoint::LmcsCompletion,
+         vtm::CudaLoopFilterChainTestFailurePoint::DbfStage,
+         vtm::CudaLoopFilterChainTestFailurePoint::SaoSnapshot,
+         vtm::CudaLoopFilterChainTestFailurePoint::SaoLaunch,
+         vtm::CudaLoopFilterChainTestFailurePoint::SaoCompletion,
+         vtm::CudaLoopFilterChainTestFailurePoint::AlfStage,
+         vtm::CudaLoopFilterChainTestFailurePoint::Download,
+         vtm::CudaLoopFilterChainTestFailurePoint::Commit })
+    if (!runLoopFilterChainFailureCase(device, point)) return false;
+  return true;
+}
+#endif
+
 }   // namespace
 
 int main(const int argc, char *argv[])
@@ -2461,7 +2563,11 @@ int main(const int argc, char *argv[])
       if (passed) { std::cerr << "chain-test sao-10\n"; passed = runSaoChainCase(context, 10); }
       if (passed) { std::cerr << "chain-test full-8\n"; passed = runFullLoopFilterChainCase(context, 8); }
       if (passed) { std::cerr << "chain-test full-10\n"; passed = runFullLoopFilterChainCase(context, 10); }
+      if (passed) { std::cerr << "chain-test disabled-stage-contract\n"; passed = runLoopFilterChainDisabledStageContractCase(context); }
       context.shutdown();
+#if VTM_CUDA_TESTING
+      if (passed) { std::cerr << "chain-test failures\n"; passed = runLoopFilterChainFailureMatrix(std::stoi(argv[2])); }
+#endif
       return passed ? EXIT_SUCCESS
                     : fail("CUDA resident loop-filter chain differed from normative stage references");
     }
@@ -2775,11 +2881,16 @@ int main(const int argc, char *argv[])
       return fail("CUDA luma DBF differed from the scalar DeblockingFilter reference");
     }
     if (!runSaoChainCase(context, 8) || !runSaoChainCase(context, 10)
-        || !runFullLoopFilterChainCase(context, 8) || !runFullLoopFilterChainCase(context, 10))
+        || !runFullLoopFilterChainCase(context, 8) || !runFullLoopFilterChainCase(context, 10)
+        || !runLoopFilterChainDisabledStageContractCase(context))
     {
       return fail("CUDA resident loop-filter chain differed from normative stage references");
     }
 #if VTM_CUDA_TESTING
+    if (!runLoopFilterChainFailureMatrix(std::stoi(argv[2])))
+    {
+      return fail("CUDA loop-filter chain rollback, fail-fast, or permanent poisoning is invalid");
+    }
     if (!runBatchOperationalPreflightExceptionCase(std::stoi(argv[2])))
     {
       return fail("CUDA SAD/QPA operational preflight exceptions were reported as NotEligible");

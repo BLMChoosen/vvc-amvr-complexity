@@ -2296,6 +2296,14 @@ void filterLoopFilterChain(RuntimeContext *context, const CudaDevicePlaneDesc &p
     uploaded += after.parameterUploadBytes - before.parameterUploadBytes;
     context->chainSynchronizations += after.runtimeSynchronizations - before.runtimeSynchronizations;
     context->chainInternalCopyBytes += after.commitBytes - before.commitBytes;
+    // The chain reuses the DBF primitive but is one composite dispatch, not a standalone DBF dispatch.
+    context->dbfDispatches = before.dispatches;
+    context->dbfTasks = before.tasks;
+    context->dbfPixels = before.pixels;
+    context->dbfParameterUploadBytes = before.parameterUploadBytes;
+    context->dbfCommitBytes = before.commitBytes;
+    context->dbfSynchronizations = before.runtimeSynchronizations;
+    context->dbfElapsedNanoseconds = before.runtimeNanoseconds;
     context->chainDbfNanoseconds += static_cast<std::uint64_t>(
       std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - stageStart).count());
   }
@@ -2352,6 +2360,15 @@ void filterLoopFilterChain(RuntimeContext *context, const CudaDevicePlaneDesc &p
     uploaded += after.parameterUploadBytes - before.parameterUploadBytes;
     context->chainSynchronizations += after.runtimeSynchronizations - before.runtimeSynchronizations;
     context->chainInternalCopyBytes += after.commitBytes - before.commitBytes;
+    // Keep standalone ALF telemetry independent from the composite chain dispatch.
+    context->alfDispatches = before.dispatches;
+    context->alfCtus = before.ctus;
+    context->alfPixels = before.pixels;
+    context->alfParameterUploadBytes = before.parameterUploadBytes;
+    context->alfDiagnosticDownloadBytes = before.diagnosticDownloadBytes;
+    context->alfCommitBytes = before.commitBytes;
+    context->alfSynchronizations = before.runtimeSynchronizations;
+    context->alfElapsedNanoseconds = before.runtimeNanoseconds;
     context->chainAlfNanoseconds += static_cast<std::uint64_t>(
       std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - stageStart).count());
   }

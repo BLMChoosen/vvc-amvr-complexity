@@ -955,9 +955,11 @@ void DecLib::executeLoopFilters()
 
   const PreCalcValues &chainPcv = *cs.pcv;
   const std::uint64_t chainPixels = std::uint64_t(chainPcv.lumaWidth) * chainPcv.lumaHeight;
-  const bool chainLmcs = cs.sps->getUseLmcs() && cs.picHeader->getLmcsEnabledFlag();
+  const bool chainLmcsPicture = cs.sps->getUseLmcs() && cs.picHeader->getLmcsEnabledFlag();
+  const bool chainLmcs = chainLmcsPicture && cs.slice->getLmcsEnabledFlag();
   const bool chainDbf = !cs.slice->getDeblockingFilterDisable();
-  const bool chainSao = cs.sps->getSAOEnabledFlag();
+  const bool chainSaoPicture = cs.sps->getSAOEnabledFlag();
+  bool chainSao = chainSaoPicture && cs.slice->getSaoEnabledFlag(ChannelType::LUMA);
   const bool chainAlf = cs.sps->getALFEnabledFlag() && cs.slice->getAlfEnabledFlag(COMPONENT_Y);
   const bool chainCcAlf = cs.slice->m_ccAlfFilterParam.ccAlfFilterEnabled[0]
                           || cs.slice->m_ccAlfFilterParam.ccAlfFilterEnabled[1];
@@ -987,8 +989,8 @@ void DecLib::executeLoopFilters()
       CHECK(sourceLut.size() != (std::size_t{ 1 } << cs.sps->getBitDepth(ChannelType::LUMA)),
             "CUDA loop-filter chain requires a complete inverse LMCS LUT");
       lmcsLut.assign(sourceLut.begin(), sourceLut.end());
-      m_cSAO.setReshaper(&m_cReshaper);
     }
+    if (chainLmcsPicture) m_cSAO.setReshaper(&m_cReshaper);
 
     std::vector<vtm::CudaDbfLumaTask> dbfTasks;
     if (chainDbf)
@@ -1000,9 +1002,12 @@ void DecLib::executeLoopFilters()
     CS::setRefinedMotionField(cs);
 
     std::vector<vtm::CudaSaoLumaCtuParam> saoCtus;
-    if (chainSao)
+    if (chainSaoPicture)
     {
-      m_cSAO.SAOProcess(cs, cs.picture->getSAO(), &saoCtus);
+      m_cSAO.SAOProcess(cs, cs.picture->getSAO(), chainSao ? &saoCtus : nullptr);
+      // A signalled SAO stage can reconstruct to an all-disabled picture. The normative CPU
+      // implementation returns before producing CTU work in that case, so omit the GPU stage.
+      if (chainSao && saoCtus.empty()) chainSao = false;
     }
 
     std::vector<vtm::CudaAlfCtuParam> alfCtus;
@@ -1077,7 +1082,7 @@ void DecLib::executeLoopFilters()
         chainAlf ? static_cast<std::uint32_t>(alfCtus.size()) : 0);
     CHECK(dispatch == vtm::CudaLoopFilterChainDispatchResult::NotEligible,
           "CUDA loop-filter chain rejected CPU-validated descriptors after selection");
-    if (chainLmcs) m_cReshaper.setRecReshaped(false);
+    if (chainLmcsPicture) m_cReshaper.setRecReshaped(false);
 
     const bool chromaAlf = cs.sps->getALFEnabledFlag()
       && (cs.slice->getAlfEnabledFlag(COMPONENT_Cb) || cs.slice->getAlfEnabledFlag(COMPONENT_Cr));
