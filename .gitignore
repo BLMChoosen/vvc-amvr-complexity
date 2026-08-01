@@ -24,12 +24,4 @@ deploy
 skills-lock.json
 CLAUDE.md
 /docs
-/build-phase1-cpu
-/build-phase1-cuda
-/build-phase1-cuda-sm120
-/build-phase1-review-cuda-b
-/build-phase1-review-cuda
-/build-phase1-review-cpu
-/build-alf-cpu
-/build-alf-pel32
-/build-alf-benchmark
+/build-*/

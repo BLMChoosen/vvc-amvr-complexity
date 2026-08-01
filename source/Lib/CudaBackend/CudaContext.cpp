@@ -39,8 +39,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <new>
 #include <algorithm>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <exception>
 #include <unordered_map>
@@ -214,11 +216,14 @@ struct CudaContext::Impl
   std::uint64_t alfMirrorUploadBytes = 0;
   std::uint64_t alfMirrorDownloadBytes = 0;
   std::uint64_t alfIntegrationSynchronizations = 0;
-  std::uint64_t alfUploadNanoseconds = 0;
+  std::uint64_t alfUploadSubmissionNanoseconds = 0;
   std::uint64_t alfDownloadNanoseconds = 0;
   std::uint64_t alfIntegrationNanoseconds = 0;
+  std::uint64_t mirrorSynchronizationOperations = 0;
   CudaMirrorMemoryStats mirrorMemory{};
 #if VTM_CUDA_TESTING
+  bool distortionDiagnosticConstructionFailure = false;
+  bool qpaDiagnosticConstructionFailure = false;
   std::uint8_t mirrorFailurePlane = 0xff;
   unsigned mirrorAllocationFailureStep = 0;
   unsigned mirrorUploadFailures = 0;
@@ -230,6 +235,26 @@ struct CudaContext::Impl
 
 namespace
 {
+
+class CudaBatchExecutionError final : public std::runtime_error
+{
+public:
+  explicit CudaBatchExecutionError(const std::string &message) : std::runtime_error(message) {}
+};
+
+#if VTM_CUDA_TESTING
+CudaBatchTestFailurePoint batchFailurePointFromEnvironment(const char *name)
+{
+  const char *value = std::getenv(name);
+  if (value == nullptr || *value == '\0') return CudaBatchTestFailurePoint::None;
+  if (std::strcmp(value, "upload") == 0) return CudaBatchTestFailurePoint::Upload;
+  if (std::strcmp(value, "kernel") == 0) return CudaBatchTestFailurePoint::KernelLaunch;
+  if (std::strcmp(value, "download") == 0) return CudaBatchTestFailurePoint::ResultDownload;
+  if (std::strcmp(value, "sync") == 0) return CudaBatchTestFailurePoint::Completion;
+  if (std::strcmp(value, "commit") == 0) return CudaBatchTestFailurePoint::Publication;
+  throw std::runtime_error(std::string("Invalid ") + name + " value: " + value);
+}
+#endif
 
 void requireOwnerThread(const std::thread::id &ownerThread)
 {
@@ -392,7 +417,9 @@ void recoverAndQuarantineAlfNoexcept(ContextImpl *impl, const CudaMirrorHandle h
   cuda_backend::recoverAlfRuntime(impl->runtime);
   try
   {
-    cuda_backend::synchronizeQueue(impl->runtime, CudaQueue::Download);
+    // Drain upload/download work as well as the recovered ALF queue before publishing HostValid.
+    // This stays local to the failing context and deliberately cannot replace the original error.
+    cuda_backend::synchronizeRuntimeContext(impl->runtime);
   }
   catch (...)
   {
@@ -909,14 +936,19 @@ void CudaContext::create(const int device)
   m_impl->distortionFailures = 0;
   m_impl->qpaAccelerationEnabled = true;
   m_impl->qpaFailures = 0;
+#if VTM_CUDA_TESTING
+  m_impl->distortionDiagnosticConstructionFailure = false;
+  m_impl->qpaDiagnosticConstructionFailure = false;
+#endif
   m_impl->alfAccelerationEnabled = true;
   m_impl->alfFailures = 0;
   m_impl->alfMirrorUploadBytes = 0;
   m_impl->alfMirrorDownloadBytes = 0;
   m_impl->alfIntegrationSynchronizations = 0;
-  m_impl->alfUploadNanoseconds = 0;
+  m_impl->alfUploadSubmissionNanoseconds = 0;
   m_impl->alfDownloadNanoseconds = 0;
   m_impl->alfIntegrationNanoseconds = 0;
+  m_impl->mirrorSynchronizationOperations = 0;
   m_impl->mirrorMemory = CudaMirrorMemoryStats{};
   m_impl->mirrorMemory.budgetBytes = CUDA_DEFAULT_MIRROR_MEMORY_BUDGET_BYTES;
   m_impl->ownerThread = std::this_thread::get_id();
@@ -1602,6 +1634,7 @@ void CudaContext::ensureDevicePlanes(const CudaMirrorHandle handle, const CudaPl
   if (needsUploadSynchronization)
   {
     cuda_backend::synchronizeQueue(m_impl->runtime, CudaQueue::Upload);
+    ++m_impl->mirrorSynchronizationOperations;
     for (PictureMirrorPlane &mirrorPlane : mirror.planes)
     {
       mirrorPlane.uploadPending = false;
@@ -1652,6 +1685,7 @@ void CudaContext::ensureDevicePlanes(const CudaMirrorHandle handle, const CudaPl
       try
       {
         cuda_backend::synchronizeQueue(m_impl->runtime, CudaQueue::Upload);
+        ++m_impl->mirrorSynchronizationOperations;
         synchronized = true;
       }
       catch (...)
@@ -1706,6 +1740,7 @@ void CudaContext::ensureHostPlanes(const CudaMirrorHandle handle, const CudaPlan
   if (hasPendingDownload)
   {
     cuda_backend::synchronizeQueue(m_impl->runtime, CudaQueue::Download);
+    ++m_impl->mirrorSynchronizationOperations;
     for (PictureMirrorPlane &mirrorPlane : mirror.planes) mirrorPlane.downloadPending = false;
   }
   CudaPlaneMask submitted = 0;
@@ -1732,6 +1767,7 @@ void CudaContext::ensureHostPlanes(const CudaMirrorHandle handle, const CudaPlan
     if (submitted != 0)
     {
       cuda_backend::synchronizeQueue(m_impl->runtime, CudaQueue::Download);
+      ++m_impl->mirrorSynchronizationOperations;
       for (std::uint8_t index = 0; index < mirror.host.planeCount; ++index)
       {
         if ((submitted & planeBit(index)) == 0) continue;
@@ -1751,6 +1787,7 @@ void CudaContext::ensureHostPlanes(const CudaMirrorHandle handle, const CudaPlan
       try
       {
         cuda_backend::synchronizeQueue(m_impl->runtime, CudaQueue::Download);
+        ++m_impl->mirrorSynchronizationOperations;
         synchronized = true;
       }
       catch (...)
@@ -1823,7 +1860,7 @@ bool CudaContext::isDistortionAccelerationAvailable() const noexcept
 #endif
 }
 
-bool CudaContext::computeDistortionBatch(const CudaDistortionBatchDesc &batch, std::uint64_t *results) noexcept
+bool CudaContext::computeDistortionBatch(const CudaDistortionBatchDesc &batch, std::uint64_t *results)
 {
 #if VTM_ENABLE_CUDA
   if (!isDistortionAccelerationAvailable() || results == nullptr || batch.candidateGrid.reference == nullptr
@@ -1841,71 +1878,93 @@ bool CudaContext::computeDistortionBatch(const CudaDistortionBatchDesc &batch, s
   {
     return false;
   }
+  requireRuntime(m_impl.get());
+  PictureMirror &sourceMirror = findMirror(m_impl.get(), batch.sourceMirror);
+  PictureMirror &referenceMirror = findMirror(m_impl.get(), batch.referenceMirror);
+  if (batch.sourcePlane >= sourceMirror.host.planeCount || batch.referencePlane >= referenceMirror.host.planeCount)
+  {
+    return false;
+  }
+  const CudaHostPlaneDesc &sourcePlane = sourceMirror.host.planes[batch.sourcePlane];
+  const CudaHostPlaneDesc &referencePlane = referenceMirror.host.planes[batch.referencePlane];
+  if (sourcePlane.elementSize != batch.elementSize || referencePlane.elementSize != batch.elementSize
+      || sourcePlane.bitDepth != batch.bitDepth || referencePlane.bitDepth != batch.bitDepth)
+  {
+    return false;
+  }
+  const std::uint64_t referenceWidth64 = batch.width
+    + static_cast<std::uint64_t>(batch.candidateGrid.columns - 1) * batch.candidateGrid.stepX;
+  const std::uint64_t referenceHeight64 = batch.height
+    + static_cast<std::uint64_t>(batch.candidateGrid.rows - 1) * batch.candidateGrid.stepY;
+  if (referenceWidth64 > std::numeric_limits<std::uint32_t>::max()
+      || referenceHeight64 > std::numeric_limits<std::uint32_t>::max())
+  {
+    return false;
+  }
+  // Mapping validates the operational mirror state. It deliberately throws instead of reporting NotEligible.
+  (void) mapHostBlock(sourceMirror, batch.sourcePlane, batch.source, batch.width, batch.height);
+  (void) mapHostBlock(referenceMirror, batch.referencePlane, batch.candidateGrid.reference,
+                      static_cast<std::uint32_t>(referenceWidth64),
+                      static_cast<std::uint32_t>(referenceHeight64));
   try
   {
-    requireRuntime(m_impl.get());
-    PictureMirror &sourceMirror = findMirror(m_impl.get(), batch.sourceMirror);
-    PictureMirror &referenceMirror = findMirror(m_impl.get(), batch.referenceMirror);
-    if (batch.sourcePlane >= sourceMirror.host.planeCount || batch.referencePlane >= referenceMirror.host.planeCount)
+#if VTM_CUDA_TESTING
+    const CudaBatchTestFailurePoint environmentFailure =
+      batchFailurePointFromEnvironment("VTM_CUDA_SAD_TEST_FAILURE");
+    if (environmentFailure != CudaBatchTestFailurePoint::None)
     {
-      return false;
-    }
-    const CudaHostPlaneDesc &sourcePlane = sourceMirror.host.planes[batch.sourcePlane];
-    const CudaHostPlaneDesc &referencePlane = referenceMirror.host.planes[batch.referencePlane];
-    if (sourcePlane.elementSize != batch.elementSize || referencePlane.elementSize != batch.elementSize
-        || sourcePlane.bitDepth != batch.bitDepth || referencePlane.bitDepth != batch.bitDepth)
-    {
-      return false;
-    }
-    const std::uint64_t referenceWidth64 = batch.width
-      + static_cast<std::uint64_t>(batch.candidateGrid.columns - 1) * batch.candidateGrid.stepX;
-    const std::uint64_t referenceHeight64 = batch.height
-      + static_cast<std::uint64_t>(batch.candidateGrid.rows - 1) * batch.candidateGrid.stepY;
-    if (referenceWidth64 > std::numeric_limits<std::uint32_t>::max()
-        || referenceHeight64 > std::numeric_limits<std::uint32_t>::max())
-    {
-      return false;
-    }
-    // Validate both host ranges before entering the backend-failure region. Invalid caller descriptors must not
-    // poison acceleration, while the second mapping below resolves the lazily allocated device addresses.
-    (void) mapHostBlock(sourceMirror, batch.sourcePlane, batch.source, batch.width, batch.height);
-    (void) mapHostBlock(referenceMirror, batch.referencePlane, batch.candidateGrid.reference,
-                        static_cast<std::uint32_t>(referenceWidth64),
-                        static_cast<std::uint32_t>(referenceHeight64));
-    try
-    {
-      ensureDevicePlane(batch.sourceMirror, batch.sourcePlane);
-      if (batch.referenceMirror != batch.sourceMirror)
+      if (environmentFailure == CudaBatchTestFailurePoint::Upload)
       {
-        ensureDevicePlane(batch.referenceMirror, batch.referencePlane);
+        m_impl->mirrorFailurePlane = batch.sourcePlane;
+        m_impl->mirrorUploadFailures = 1;
       }
-      else if (batch.referencePlane != batch.sourcePlane)
+      else
       {
-        ensureDevicePlane(batch.referenceMirror, batch.referencePlane);
+        cuda_backend::injectDistortionFailurePoint(m_impl->runtime, environmentFailure);
       }
-      const void *sourceDevice = mapHostBlock(sourceMirror, batch.sourcePlane, batch.source,
-                                              batch.width, batch.height);
-      const void *referenceDevice = mapHostBlock(referenceMirror, batch.referencePlane,
-                                                 batch.candidateGrid.reference,
-                                                 static_cast<std::uint32_t>(referenceWidth64),
-                                                 static_cast<std::uint32_t>(referenceHeight64));
-      cuda_backend::computeDistortionBatch(m_impl->runtime, batch, sourceDevice,
-                                           sourceMirror.planes[batch.sourcePlane].device.pitchBytes,
-                                           referenceDevice,
-                                           referenceMirror.planes[batch.referencePlane].device.pitchBytes, results);
-      return true;
     }
-    catch (...)
+#endif
+    ensureDevicePlane(batch.sourceMirror, batch.sourcePlane);
+    if (batch.referenceMirror != batch.sourceMirror)
     {
-      ++m_impl->distortionFailures;
-      m_impl->distortionAccelerationEnabled = false;
-      cuda_backend::recoverDistortionRuntime(m_impl->runtime);
-      return false;
+      ensureDevicePlane(batch.referenceMirror, batch.referencePlane);
     }
+    else if (batch.referencePlane != batch.sourcePlane)
+    {
+      ensureDevicePlane(batch.referenceMirror, batch.referencePlane);
+    }
+    const void *sourceDevice = mapHostBlock(sourceMirror, batch.sourcePlane, batch.source,
+                                            batch.width, batch.height);
+    const void *referenceDevice = mapHostBlock(referenceMirror, batch.referencePlane,
+                                               batch.candidateGrid.reference,
+                                               static_cast<std::uint32_t>(referenceWidth64),
+                                               static_cast<std::uint32_t>(referenceHeight64));
+    cuda_backend::computeDistortionBatch(m_impl->runtime, batch, sourceDevice,
+                                         sourceMirror.planes[batch.sourcePlane].device.pitchBytes,
+                                         referenceDevice,
+                                         referenceMirror.planes[batch.referencePlane].device.pitchBytes, results);
+    return true;
+  }
+  catch (const std::exception &error)
+  {
+    ++m_impl->distortionFailures;
+    m_impl->distortionAccelerationEnabled = false;
+    cuda_backend::recoverDistortionRuntime(m_impl->runtime);
+#if VTM_CUDA_TESTING
+    if (m_impl->distortionDiagnosticConstructionFailure)
+    {
+      m_impl->distortionDiagnosticConstructionFailure = false;
+      throw std::bad_alloc();
+    }
+#endif
+    throw CudaBatchExecutionError(std::string("CUDA SAD execution failed after selection: ") + error.what());
   }
   catch (...)
   {
-    return false;
+    ++m_impl->distortionFailures;
+    m_impl->distortionAccelerationEnabled = false;
+    cuda_backend::recoverDistortionRuntime(m_impl->runtime);
+    throw CudaBatchExecutionError("CUDA SAD execution failed after selection: unknown error");
   }
 #else
   (void) batch;
@@ -2015,6 +2074,7 @@ CudaAlfDispatchResult CudaContext::filterAlfLumaFrame(const CudaMirrorHandle rec
 
   const auto integrationStart = std::chrono::steady_clock::now();
   const CudaMirrorMemoryUsage mirrorBefore = m_impl->mirrorMemory.total;
+  const std::uint64_t mirrorSynchronizationsBefore = m_impl->mirrorSynchronizationOperations;
   try
   {
 #if VTM_CUDA_TESTING
@@ -2043,12 +2103,16 @@ CudaAlfDispatchResult CudaContext::filterAlfLumaFrame(const CudaMirrorHandle rec
     const std::uint64_t downloadBytes = mirrorAfter.downloadedBytes - mirrorBefore.downloadedBytes;
     const std::uint64_t runtimeSynchronizations =
       runtimeAfter.runtimeSynchronizations - runtimeBefore.runtimeSynchronizations;
+    const std::uint64_t mirrorSynchronizations =
+      m_impl->mirrorSynchronizationOperations - mirrorSynchronizationsBefore;
     m_impl->alfMirrorUploadBytes += uploadBytes;
     m_impl->alfMirrorDownloadBytes += downloadBytes;
-    m_impl->alfIntegrationSynchronizations += runtimeSynchronizations + 1
-                                               + (uploadBytes != 0 ? 1 : 0)
-                                               + (downloadBytes != 0 ? 1 : 0);
-    m_impl->alfUploadNanoseconds += static_cast<std::uint64_t>(
+    // Include the runtime's host synchronizations, actual mirror host synchronizations, and the
+    // upload-to-ALF stream dependency.  Keep runtimeSynchronizations independently reportable.
+    m_impl->alfIntegrationSynchronizations += runtimeSynchronizations + mirrorSynchronizations + 1;
+    // This interval measures host-side staging/submission and dependency enqueue only. The ALF
+    // runtime synchronizes its stream, so runtimeNanoseconds includes any device wait for upload.
+    m_impl->alfUploadSubmissionNanoseconds += static_cast<std::uint64_t>(
       std::chrono::duration_cast<std::chrono::nanoseconds>(uploadEnd - uploadStart).count());
     m_impl->alfDownloadNanoseconds += static_cast<std::uint64_t>(
       std::chrono::duration_cast<std::chrono::nanoseconds>(integrationEnd - downloadStart).count());
@@ -2090,7 +2154,7 @@ AlfAccelerationStats CudaContext::alfStats() const noexcept
   stats.mirrorUploadBytes = m_impl->alfMirrorUploadBytes;
   stats.mirrorDownloadBytes = m_impl->alfMirrorDownloadBytes;
   stats.integrationSynchronizations = m_impl->alfIntegrationSynchronizations;
-  stats.uploadNanoseconds = m_impl->alfUploadNanoseconds;
+  stats.uploadSubmissionNanoseconds = m_impl->alfUploadSubmissionNanoseconds;
   stats.downloadNanoseconds = m_impl->alfDownloadNanoseconds;
   stats.integrationNanoseconds = m_impl->alfIntegrationNanoseconds;
   stats.failures = m_impl->alfFailures;
@@ -2101,7 +2165,7 @@ AlfAccelerationStats CudaContext::alfStats() const noexcept
 }
 
 bool CudaContext::computeQpaBatch(const CudaMirrorHandle sourceHandle, const CudaQpaTask *tasks,
-                                  const std::uint32_t taskCount, CudaQpaResult *results) noexcept
+                                  const std::uint32_t taskCount, CudaQpaResult *results)
 {
 #if VTM_ENABLE_CUDA
   if (!isQpaAccelerationAvailable() || tasks == nullptr || results == nullptr
@@ -2109,73 +2173,81 @@ bool CudaContext::computeQpaBatch(const CudaMirrorHandle sourceHandle, const Cud
   {
     return false;
   }
-  try
+  requireRuntime(m_impl.get());
+  PictureMirror &sourceMirror = findMirror(m_impl.get(), sourceHandle);
+  if (sourceMirror.role != CudaPictureRole::Original || sourceMirror.host.planeCount == 0)
   {
-    requireRuntime(m_impl.get());
-    PictureMirror &sourceMirror = findMirror(m_impl.get(), sourceHandle);
-    if (sourceMirror.role != CudaPictureRole::Original || sourceMirror.host.planeCount == 0)
+    return false;
+  }
+  const CudaHostPlaneDesc &host = sourceMirror.host.planes[0];
+  if ((host.elementSize != 2 && host.elementSize != 4) || (host.bitDepth != 8 && host.bitDepth != 10)
+      || host.strideBytes <= 0 || (host.strideBytes % host.elementSize) != 0)
+  {
+    return false;
+  }
+
+  const std::uint64_t maxSample = (std::uint64_t{ 1 } << host.bitDepth) - 1;
+  for (std::uint32_t index = 0; index < taskCount; ++index)
+  {
+    const CudaQpaTask &task = tasks[index];
+    const auto areaInsidePlane = [&host](const CudaQpaRect &area) {
+      return area.width != 0 && area.height != 0
+             && static_cast<std::uint64_t>(area.x) + area.width <= host.width
+             && static_cast<std::uint64_t>(area.y) + area.height <= host.height;
+    };
+    if (!areaInsidePlane(task.filterArea) || !areaInsidePlane(task.lumaArea)
+        || task.filterArea.width < 3 || task.filterArea.height < 3)
     {
       return false;
     }
-    const CudaHostPlaneDesc &host = sourceMirror.host.planes[0];
-    if ((host.elementSize != 2 && host.elementSize != 4) || (host.bitDepth != 8 && host.bitDepth != 10)
-        || host.strideBytes <= 0 || (host.strideBytes % host.elementSize) != 0)
-    {
-      return false;
-    }
 
-    const std::uint64_t maxSample = (std::uint64_t{ 1 } << host.bitDepth) - 1;
-    for (std::uint32_t index = 0; index < taskCount; ++index)
+    const std::uint64_t filterSamples = static_cast<std::uint64_t>(task.filterArea.width - 2)
+                                        * (task.filterArea.height - 2);
+    const std::uint64_t areaSamples = static_cast<std::uint64_t>(task.lumaArea.width) * task.lumaArea.height;
+    // The 3x3 high-pass has positive and negative coefficient sums of 12. These guards prove that
+    // every integer reduction remains defined even for the largest descriptor accepted by this API.
+    if (filterSamples > std::numeric_limits<std::uint64_t>::max() / (12 * maxSample)
+        || areaSamples > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) / maxSample)
     {
-      const CudaQpaTask &task = tasks[index];
-      const auto areaInsidePlane = [&host](const CudaQpaRect &area) {
-        return area.width != 0 && area.height != 0
-               && static_cast<std::uint64_t>(area.x) + area.width <= host.width
-               && static_cast<std::uint64_t>(area.y) + area.height <= host.height;
-      };
-      if (!areaInsidePlane(task.filterArea) || !areaInsidePlane(task.lumaArea)
-          || task.filterArea.width < 3 || task.filterArea.height < 3)
-      {
-        return false;
-      }
-
-      const std::uint64_t filterSamples = static_cast<std::uint64_t>(task.filterArea.width - 2)
-                                          * (task.filterArea.height - 2);
-      const std::uint64_t areaSamples = static_cast<std::uint64_t>(task.lumaArea.width) * task.lumaArea.height;
-      // The 3x3 high-pass has positive and negative coefficient sums of 12. These guards prove that
-      // every integer reduction remains defined even for the largest descriptor accepted by this API.
-      if (filterSamples > std::numeric_limits<std::uint64_t>::max() / (12 * maxSample)
-          || areaSamples > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) / maxSample)
-      {
-        return false;
-      }
-    }
-
-    try
-    {
-      ensureDevicePlane(sourceHandle, 0);
-      cuda_backend::waitFence(m_impl->runtime, CudaQueue::Qpa, CudaFence::UploadComplete);
-      cuda_backend::computeQpaBatch(m_impl->runtime, sourceMirror.planes[0].device, tasks, taskCount, results);
-      for (std::uint32_t index = 0; index < taskCount; ++index)
-      {
-        if (results[index].ticket != tasks[index].ticket || results[index].ctuAddr != tasks[index].ctuAddr)
-        {
-          throw std::runtime_error("CUDA QPA result ticket/order mismatch");
-        }
-      }
-      return true;
-    }
-    catch (...)
-    {
-      ++m_impl->qpaFailures;
-      m_impl->qpaAccelerationEnabled = false;
-      cuda_backend::recoverQpaRuntime(m_impl->runtime);
       return false;
     }
   }
+
+  try
+  {
+#if VTM_CUDA_TESTING
+    const CudaBatchTestFailurePoint environmentFailure =
+      batchFailurePointFromEnvironment("VTM_CUDA_QPA_TEST_FAILURE");
+    if (environmentFailure != CudaBatchTestFailurePoint::None)
+    {
+      cuda_backend::injectQpaFailurePoint(m_impl->runtime, environmentFailure);
+    }
+#endif
+    ensureDevicePlane(sourceHandle, 0);
+    cuda_backend::waitFence(m_impl->runtime, CudaQueue::Qpa, CudaFence::UploadComplete);
+    cuda_backend::computeQpaBatch(m_impl->runtime, sourceMirror.planes[0].device, tasks, taskCount, results);
+    return true;
+  }
+  catch (const std::exception &error)
+  {
+    ++m_impl->qpaFailures;
+    m_impl->qpaAccelerationEnabled = false;
+    cuda_backend::recoverQpaRuntime(m_impl->runtime);
+#if VTM_CUDA_TESTING
+    if (m_impl->qpaDiagnosticConstructionFailure)
+    {
+      m_impl->qpaDiagnosticConstructionFailure = false;
+      throw std::bad_alloc();
+    }
+#endif
+    throw CudaBatchExecutionError(std::string("CUDA QPA execution failed after selection: ") + error.what());
+  }
   catch (...)
   {
-    return false;
+    ++m_impl->qpaFailures;
+    m_impl->qpaAccelerationEnabled = false;
+    cuda_backend::recoverQpaRuntime(m_impl->runtime);
+    throw CudaBatchExecutionError("CUDA QPA execution failed after selection: unknown error");
   }
 #else
   (void) sourceHandle;
@@ -2269,6 +2341,47 @@ void CudaContext::injectQpaFailuresForTesting(const unsigned allocationFailureSt
 #else
   (void) allocationFailureStep;
   (void) executionFailures;
+#endif
+}
+
+void CudaContext::injectDistortionFailurePointForTesting(const CudaBatchTestFailurePoint failurePoint)
+{
+#if VTM_ENABLE_CUDA
+  requireRuntime(m_impl.get());
+  if (failurePoint == CudaBatchTestFailurePoint::Upload)
+  {
+    m_impl->mirrorFailurePlane = 0;
+    m_impl->mirrorUploadFailures = 1;
+  }
+  else if (failurePoint == CudaBatchTestFailurePoint::DiagnosticConstruction)
+  {
+    m_impl->distortionDiagnosticConstructionFailure = true;
+    cuda_backend::injectDistortionFailures(m_impl->runtime, 0, 1);
+  }
+  else
+  {
+    cuda_backend::injectDistortionFailurePoint(m_impl->runtime, failurePoint);
+  }
+#else
+  (void) failurePoint;
+#endif
+}
+
+void CudaContext::injectQpaFailurePointForTesting(const CudaBatchTestFailurePoint failurePoint)
+{
+#if VTM_ENABLE_CUDA
+  requireRuntime(m_impl.get());
+  if (failurePoint == CudaBatchTestFailurePoint::DiagnosticConstruction)
+  {
+    m_impl->qpaDiagnosticConstructionFailure = true;
+    cuda_backend::injectQpaFailures(m_impl->runtime, 0, 1);
+  }
+  else
+  {
+    cuda_backend::injectQpaFailurePoint(m_impl->runtime, failurePoint);
+  }
+#else
+  (void) failurePoint;
 #endif
 }
 

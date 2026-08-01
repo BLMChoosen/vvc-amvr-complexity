@@ -99,6 +99,45 @@ if( VTM_BUILD_CUDA_BACKEND_TESTS )
   if( ENABLE_CUDA )
     set( ENCODER_BACKEND_FAILURE_TEST EncoderApp.InvalidCudaDeviceAfterCreate )
     set( ENCODER_BACKEND_FAILURE_ARGS --GPUBackend=cuda --GPUDevice=999 )
+
+    # Deterministic raw 4:2:0 inputs for real process-level fail-fast coverage. Any byte pattern is valid raw YUV;
+    # the sizes are exactly two 64x64 frames for inter SAD and one 512x512 frame for QPA.
+    set( ENCODER_CUDA_SAD_INPUT "${CMAKE_CURRENT_BINARY_DIR}/encoder-cuda-sad-failfast.yuv" )
+    set( ENCODER_CUDA_QPA_INPUT "${CMAKE_CURRENT_BINARY_DIR}/encoder-cuda-qpa-failfast.yuv" )
+    string( REPEAT "0123456789abcdef" 768 ENCODER_CUDA_SAD_CONTENT )
+    string( REPEAT "0123456789abcdef" 24576 ENCODER_CUDA_QPA_CONTENT )
+    file( GENERATE OUTPUT "${ENCODER_CUDA_SAD_INPUT}" CONTENT "${ENCODER_CUDA_SAD_CONTENT}" )
+    file( GENERATE OUTPUT "${ENCODER_CUDA_QPA_INPUT}" CONTENT "${ENCODER_CUDA_QPA_CONTENT}" )
+    unset( ENCODER_CUDA_SAD_CONTENT )
+    unset( ENCODER_CUDA_QPA_CONTENT )
+
+    add_test(
+      NAME EncoderApp.CudaSadFailFast
+      COMMAND ${CMAKE_COMMAND}
+        "-DTEST_EXECUTABLE=$<TARGET_FILE:${EXE_NAME}>"
+        "-DTEST_KIND=SAD"
+        "-DTEST_INPUT=${ENCODER_CUDA_SAD_INPUT}"
+        "-DTEST_OUTPUT=${CMAKE_CURRENT_BINARY_DIR}/encoder-cuda-sad-failfast.vvc"
+        "-DTEST_SOURCE_DIR=${CMAKE_SOURCE_DIR}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/RunCudaFailFastTest.cmake"
+    )
+    set_tests_properties( EncoderApp.CudaSadFailFast PROPERTIES
+      RUN_SERIAL TRUE LABELS gpu
+    )
+
+    add_test(
+      NAME EncoderApp.CudaQpaFailFast
+      COMMAND ${CMAKE_COMMAND}
+        "-DTEST_EXECUTABLE=$<TARGET_FILE:${EXE_NAME}>"
+        "-DTEST_KIND=QPA"
+        "-DTEST_INPUT=${ENCODER_CUDA_QPA_INPUT}"
+        "-DTEST_OUTPUT=${CMAKE_CURRENT_BINARY_DIR}/encoder-cuda-qpa-failfast.vvc"
+        "-DTEST_SOURCE_DIR=${CMAKE_SOURCE_DIR}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/RunCudaFailFastTest.cmake"
+    )
+    set_tests_properties( EncoderApp.CudaQpaFailFast PROPERTIES
+      RUN_SERIAL TRUE LABELS gpu
+    )
   else()
     set( ENCODER_BACKEND_FAILURE_TEST EncoderApp.CudaUnavailableAfterCreate )
     set( ENCODER_BACKEND_FAILURE_ARGS --GPUBackend=cuda )

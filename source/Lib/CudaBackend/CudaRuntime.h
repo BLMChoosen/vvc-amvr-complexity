@@ -80,6 +80,8 @@ void recoverAlfRuntime(RuntimeContext *context) noexcept;
 void injectReleaseFailures(RuntimeContext *context, unsigned asyncFailures, unsigned immediateFailures);
 void injectDistortionFailures(RuntimeContext *context, unsigned allocationFailureStep, unsigned executionFailures);
 void injectQpaFailures(RuntimeContext *context, unsigned allocationFailureStep, unsigned executionFailures);
+void injectDistortionFailurePoint(RuntimeContext *context, CudaBatchTestFailurePoint failurePoint);
+void injectQpaFailurePoint(RuntimeContext *context, CudaBatchTestFailurePoint failurePoint);
 void injectAlfFailure(RuntimeContext *context, CudaAlfTestFailurePoint failurePoint);
 void injectPinnedReleaseFailures(unsigned failures);
 

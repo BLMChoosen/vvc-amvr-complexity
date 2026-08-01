@@ -88,6 +88,8 @@ struct RuntimeContext
   std::uint64_t               alfSynchronizations = 0;
   std::uint64_t               alfElapsedNanoseconds = 0;
   std::uint64_t               alfPeakScratchBytes = 0;
+  CudaBatchTestFailurePoint   distortionFailurePoint = CudaBatchTestFailurePoint::None;
+  CudaBatchTestFailurePoint   qpaFailurePoint = CudaBatchTestFailurePoint::None;
 #if VTM_CUDA_TESTING
   unsigned                    asyncReleaseFailures = 0;
   unsigned                    immediateReleaseFailures = 0;
@@ -152,8 +154,20 @@ bool consumeAlfFailure(RuntimeContext *context, const CudaAlfTestFailurePoint po
   context->alfFailurePoint = CudaAlfTestFailurePoint::None;
   return true;
 }
+
+bool consumeBatchFailure(CudaBatchTestFailurePoint &configured,
+                         const CudaBatchTestFailurePoint point) noexcept
+{
+  if (configured != point)
+  {
+    return false;
+  }
+  configured = CudaBatchTestFailurePoint::None;
+  return true;
+}
 #else
 bool consumeAlfFailure(RuntimeContext *, CudaAlfTestFailurePoint) noexcept { return false; }
+bool consumeBatchFailure(CudaBatchTestFailurePoint &, CudaBatchTestFailurePoint) noexcept { return false; }
 #endif
 
 std::size_t queueIndex(const CudaQueue queue)
@@ -1111,6 +1125,11 @@ void computeDistortionBatch(RuntimeContext *context, const CudaDistortionBatchDe
   }
 #endif
 
+  if (consumeBatchFailure(context->distortionFailurePoint, CudaBatchTestFailurePoint::KernelLaunch))
+  {
+    throw std::runtime_error("Injected CUDA SAD kernel launch failure");
+  }
+
   constexpr unsigned threads = 256;
   // VTM 24 builds use FULL_NBIT=1 for both Pel configurations, so SAD retains all source precision.
   constexpr std::uint8_t distortionShift = 0;
@@ -1133,11 +1152,23 @@ void computeDistortionBatch(RuntimeContext *context, const CudaDistortionBatchDe
       context->distortionResultsDevice);
   }
   checkCuda(cudaGetLastError(), "SAD batch launch");
+  if (consumeBatchFailure(context->distortionFailurePoint, CudaBatchTestFailurePoint::ResultDownload))
+  {
+    throw std::runtime_error("Injected CUDA SAD result download failure");
+  }
   checkCuda(cudaMemcpyAsync(context->distortionResultsHost, context->distortionResultsDevice,
                             static_cast<std::size_t>(candidateCount) * sizeof(*results),
                             cudaMemcpyDeviceToHost, stream),
             "distortion result download");
+  if (consumeBatchFailure(context->distortionFailurePoint, CudaBatchTestFailurePoint::Completion))
+  {
+    throw std::runtime_error("Injected CUDA SAD completion failure");
+  }
   checkCuda(cudaStreamSynchronize(stream), "distortion batch completion");
+  if (consumeBatchFailure(context->distortionFailurePoint, CudaBatchTestFailurePoint::Publication))
+  {
+    throw std::runtime_error("Injected CUDA SAD publication failure");
+  }
   std::memcpy(results, context->distortionResultsHost,
               static_cast<std::size_t>(candidateCount) * sizeof(*results));
   ++context->distortionDispatches;
@@ -1160,9 +1191,18 @@ void computeQpaBatch(RuntimeContext *context, const CudaDevicePlaneDesc &source,
   const std::size_t taskBytes = static_cast<std::size_t>(taskCount) * sizeof(*tasks);
   const std::size_t resultBytes = static_cast<std::size_t>(taskCount) * sizeof(*results);
   std::memcpy(context->qpaTasksHost, tasks, taskBytes);
+  if (consumeBatchFailure(context->qpaFailurePoint, CudaBatchTestFailurePoint::Upload))
+  {
+    throw std::runtime_error("Injected CUDA QPA task upload failure");
+  }
   checkCuda(cudaMemcpyAsync(context->qpaTasksDevice, context->qpaTasksHost, taskBytes,
                             cudaMemcpyHostToDevice, stream),
             "QPA task upload");
+
+  if (consumeBatchFailure(context->qpaFailurePoint, CudaBatchTestFailurePoint::KernelLaunch))
+  {
+    throw std::runtime_error("Injected CUDA QPA kernel launch failure");
+  }
 
   constexpr unsigned threads = 256;
   if (source.elementSize == 2)
@@ -1178,10 +1218,34 @@ void computeQpaBatch(RuntimeContext *context, const CudaDevicePlaneDesc &source,
       context->qpaTasksDevice, context->qpaResultsDevice);
   }
   checkCuda(cudaGetLastError(), "QPA batch launch");
+  if (consumeBatchFailure(context->qpaFailurePoint, CudaBatchTestFailurePoint::ResultDownload))
+  {
+    throw std::runtime_error("Injected CUDA QPA result download failure");
+  }
   checkCuda(cudaMemcpyAsync(context->qpaResultsHost, context->qpaResultsDevice, resultBytes,
                             cudaMemcpyDeviceToHost, stream),
             "QPA result download");
+  if (consumeBatchFailure(context->qpaFailurePoint, CudaBatchTestFailurePoint::Completion))
+  {
+    throw std::runtime_error("Injected CUDA QPA completion failure");
+  }
   checkCuda(cudaStreamSynchronize(stream), "QPA batch completion");
+  if (consumeBatchFailure(context->qpaFailurePoint, CudaBatchTestFailurePoint::ResultCorruption))
+  {
+    context->qpaResultsHost[0].ticket ^= 1;
+  }
+  for (std::uint32_t index = 0; index < taskCount; ++index)
+  {
+    if (context->qpaResultsHost[index].ticket != context->qpaTasksHost[index].ticket
+        || context->qpaResultsHost[index].ctuAddr != context->qpaTasksHost[index].ctuAddr)
+    {
+      throw std::runtime_error("CUDA QPA staged result ticket/order mismatch");
+    }
+  }
+  if (consumeBatchFailure(context->qpaFailurePoint, CudaBatchTestFailurePoint::Publication))
+  {
+    throw std::runtime_error("Injected CUDA QPA publication failure");
+  }
   std::memcpy(results, context->qpaResultsHost, resultBytes);
   ++context->qpaDispatches;
   context->qpaTasks += taskCount;
@@ -1339,6 +1403,9 @@ void recoverDistortionRuntime(RuntimeContext *context) noexcept
     }
   }
   context->distortionCapacity = 0;
+#if VTM_CUDA_TESTING
+  context->distortionFailurePoint = CudaBatchTestFailurePoint::None;
+#endif
   (void) cudaGetLastError();
   (void) cudaStreamCreateWithFlags(&context->streams[computeIndex], cudaStreamNonBlocking);
 }
@@ -1379,6 +1446,9 @@ void recoverQpaRuntime(RuntimeContext *context) noexcept
     }
   }
   context->qpaCapacity = 0;
+#if VTM_CUDA_TESTING
+  context->qpaFailurePoint = CudaBatchTestFailurePoint::None;
+#endif
   (void) cudaGetLastError();
   (void) cudaStreamCreateWithFlags(&context->streams[qpaIndex], cudaStreamNonBlocking);
 }
@@ -1458,7 +1528,6 @@ void injectReleaseFailures(RuntimeContext *context, const unsigned asyncFailures
 #endif
 }
 
-
 void injectDistortionFailures(RuntimeContext *context, const unsigned allocationFailureStep,
                               const unsigned executionFailures)
 {
@@ -1482,6 +1551,26 @@ void injectQpaFailures(RuntimeContext *context, const unsigned allocationFailure
   (void) context;
   (void) allocationFailureStep;
   (void) executionFailures;
+#endif
+}
+
+void injectDistortionFailurePoint(RuntimeContext *context, const CudaBatchTestFailurePoint failurePoint)
+{
+#if VTM_CUDA_TESTING
+  context->distortionFailurePoint = failurePoint;
+#else
+  (void) context;
+  (void) failurePoint;
+#endif
+}
+
+void injectQpaFailurePoint(RuntimeContext *context, const CudaBatchTestFailurePoint failurePoint)
+{
+#if VTM_CUDA_TESTING
+  context->qpaFailurePoint = failurePoint;
+#else
+  (void) context;
+  (void) failurePoint;
 #endif
 }
 

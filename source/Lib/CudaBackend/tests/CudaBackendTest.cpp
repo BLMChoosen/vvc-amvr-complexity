@@ -46,6 +46,7 @@
 #include <iostream>
 #include <iterator>
 #include <limits>
+#include <new>
 #include <string>
 #include <thread>
 #include <utility>
@@ -69,6 +70,35 @@ bool throws(const std::function<void()> &operation)
   catch (const std::exception &)
   {
     return true;
+  }
+  return false;
+}
+
+bool throwsWithText(const std::function<void()> &operation, const std::string &expected)
+{
+  try
+  {
+    operation();
+  }
+  catch (const std::exception &error)
+  {
+    return std::string(error.what()).find(expected) != std::string::npos;
+  }
+  return false;
+}
+
+bool throwsBadAlloc(const std::function<void()> &operation)
+{
+  try
+  {
+    operation();
+  }
+  catch (const std::bad_alloc &)
+  {
+    return true;
+  }
+  catch (...)
+  {
   }
   return false;
 }
@@ -461,8 +491,11 @@ bool runSadBatchCase(vtm::CudaContext &context, const std::uint8_t elementSize, 
                                              * referencePlane.strideBytes;
   outsideBatch.candidateGrid.columns = 1;
   outsideBatch.candidateGrid.rows = 1;
-  if (context.computeDistortionBatch(outsideBatch, results.data())
-      || context.distortionBatchDispatchCount() != dispatchesAfterValidBatch)
+  if (!throwsWithText([&context, &outsideBatch, &results]() {
+        (void) context.computeDistortionBatch(outsideBatch, results.data());
+      }, "CUDA distortion block exceeds its registered mirror")
+      || context.distortionBatchDispatchCount() != dispatchesAfterValidBatch
+      || !context.isDistortionAccelerationAvailable())
   {
     return false;
   }
@@ -764,7 +797,84 @@ bool benchmarkQpaBatch(const int device)
 }
 
 #if VTM_CUDA_TESTING
-bool runSadFailureCase(const int device, const unsigned allocationFailureStep, const unsigned executionFailures)
+bool runBatchOperationalPreflightExceptionCase(const int device)
+{
+  vtm::CudaContext context;
+  context.create(device);
+  TestPicture source(96, 80, 2, 10, 41);
+  TestPicture reference(96, 80, 2, 10, 43);
+  source.fillSamples(41);
+  reference.fillSamples(43);
+  const auto sourceMirror = context.registerPictureMirror(&source, vtm::CudaPictureRole::Original,
+                                                          source.descriptor);
+  const auto referenceMirror = context.registerPictureMirror(&reference, vtm::CudaPictureRole::Reconstruction,
+                                                             reference.descriptor);
+
+  vtm::CudaDistortionBatchDesc batch{};
+  batch.sourceMirror = sourceMirror;
+  batch.referenceMirror = referenceMirror;
+  batch.source = source.descriptor.planes[0].data;
+  batch.candidateGrid = { reference.descriptor.planes[0].data, 8, 8, 1, 1 };
+  batch.width = 8;
+  batch.height = 8;
+  batch.elementSize = 2;
+  batch.bitDepth = 10;
+  batch.metric = vtm::CudaDistortionMetric::Sad;
+  std::array<std::uint64_t, 64> sadResults{};
+
+  auto invalidMirrorBatch = batch;
+  invalidMirrorBatch.sourceMirror = 0;
+  if (!throwsWithText([&context, &invalidMirrorBatch, &sadResults]() {
+        (void) context.computeDistortionBatch(invalidMirrorBatch, sadResults.data());
+      }, "CUDA picture mirror handle is invalid")
+      || !context.isDistortionAccelerationAvailable() || context.distortionBatchFailureCount() != 0)
+  {
+    return false;
+  }
+
+  auto invalidMappingBatch = batch;
+  invalidMappingBatch.source = nullptr;
+  if (!throwsWithText([&context, &invalidMappingBatch, &sadResults]() {
+        (void) context.computeDistortionBatch(invalidMappingBatch, sadResults.data());
+      }, "CUDA distortion block descriptor is invalid")
+      || !context.isDistortionAccelerationAvailable() || context.distortionBatchFailureCount() != 0)
+  {
+    return false;
+  }
+
+  vtm::CudaQpaTask task{};
+  task.ticket = 1;
+  task.ctuAddr = 0;
+  task.filterArea = { 0, 0, 65, 65 };
+  task.lumaArea = { 0, 0, 64, 64 };
+  vtm::CudaQpaResult qpaResult{};
+  if (!throwsWithText([&context, &task, &qpaResult]() {
+        (void) context.computeQpaBatch(0, &task, 1, &qpaResult);
+      }, "CUDA picture mirror handle is invalid")
+      || !context.isQpaAccelerationAvailable() || context.qpaBatchFailureCount() != 0)
+  {
+    return false;
+  }
+
+  auto notEligibleBatch = batch;
+  notEligibleBatch.width = 0;
+  auto notEligibleTask = task;
+  notEligibleTask.filterArea.width = 2;
+  if (context.computeDistortionBatch(notEligibleBatch, sadResults.data())
+      || context.computeQpaBatch(sourceMirror, &notEligibleTask, 1, &qpaResult)
+      || !context.isDistortionAccelerationAvailable() || !context.isQpaAccelerationAvailable()
+      || context.distortionBatchFailureCount() != 0 || context.qpaBatchFailureCount() != 0)
+  {
+    return false;
+  }
+
+  context.releaseAllPictureMirrors();
+  context.shutdown();
+  return true;
+}
+
+bool runSadFailureCase(const int device, const unsigned allocationFailureStep, const unsigned executionFailures,
+                       const vtm::CudaBatchTestFailurePoint failurePoint = vtm::CudaBatchTestFailurePoint::None)
 {
   vtm::CudaContext context;
   context.create(device);
@@ -787,9 +897,18 @@ bool runSadFailureCase(const int device, const unsigned allocationFailureStep, c
   batch.bitDepth = 10;
   batch.metric = vtm::CudaDistortionMetric::Sad;
   std::array<std::uint64_t, 64> results{};
+  results.fill(UINT64_C(0xfedcba9876543210));
+  const auto untouched = results;
   context.injectDistortionFailuresForTesting(allocationFailureStep, executionFailures);
-  if (context.computeDistortionBatch(batch, results.data())
-      || context.isDistortionAccelerationAvailable()
+  context.injectDistortionFailurePointForTesting(failurePoint);
+  const auto compute = [&context, &batch, &results]() {
+    (void) context.computeDistortionBatch(batch, results.data());
+  };
+  const bool threwExpected = failurePoint == vtm::CudaBatchTestFailurePoint::DiagnosticConstruction
+                               ? throwsBadAlloc(compute)
+                               : throwsWithText(compute, "CUDA SAD execution failed after selection:");
+  if (!threwExpected
+      || results != untouched || context.isDistortionAccelerationAvailable()
       || context.distortionBatchFailureCount() != 1
       || context.distortionBatchDispatchCount() != 0)
   {
@@ -800,11 +919,19 @@ bool runSadFailureCase(const int device, const unsigned allocationFailureStep, c
   {
     return false;
   }
+  context.releaseAllPictureMirrors();
+  if (context.pictureMirrorCount() != 0
+      || context.pictureMirrorMemoryStats().total.currentDeviceBytes != 0
+      || context.pictureMirrorMemoryStats().total.currentPinnedBytes != 0)
+  {
+    return false;
+  }
   context.shutdown();
   return true;
 }
 
-bool runQpaFailureCase(const int device, const unsigned allocationFailureStep, const unsigned executionFailures)
+bool runQpaFailureCase(const int device, const unsigned allocationFailureStep, const unsigned executionFailures,
+                       const vtm::CudaBatchTestFailurePoint failurePoint = vtm::CudaBatchTestFailurePoint::None)
 {
   vtm::CudaContext context;
   context.create(device);
@@ -816,16 +943,33 @@ bool runQpaFailureCase(const int device, const unsigned allocationFailureStep, c
   task.ctuAddr = 3;
   task.filterArea = { 0, 0, 65, 65 };
   task.lumaArea = { 0, 0, 64, 64 };
-  vtm::CudaQpaResult result{};
+  vtm::CudaQpaResult result{ UINT64_C(0x123456789abcdef0), UINT32_C(0x76543210),
+                            UINT32_C(0x89abcdef), UINT64_C(0xfedcba9876543210),
+                            INT64_C(-1234567890123456) };
+  const vtm::CudaQpaResult untouched = result;
   context.injectQpaFailuresForTesting(allocationFailureStep, executionFailures);
-  if (context.computeQpaBatch(mirror, &task, 1, &result)
-      || context.isQpaAccelerationAvailable()
+  context.injectQpaFailurePointForTesting(failurePoint);
+  const auto compute = [&context, mirror, &task, &result]() {
+    (void) context.computeQpaBatch(mirror, &task, 1, &result);
+  };
+  const bool threwExpected = failurePoint == vtm::CudaBatchTestFailurePoint::DiagnosticConstruction
+                               ? throwsBadAlloc(compute)
+                               : throwsWithText(compute, "CUDA QPA execution failed after selection:");
+  if (!threwExpected
+      || std::memcmp(&result, &untouched, sizeof(result)) != 0 || context.isQpaAccelerationAvailable()
       || context.qpaBatchFailureCount() != 1
-      || context.qpaBatchDispatchCount() != 0)
+      || context.qpaBatchDispatchCount() != 0 || context.qpaTaskCount() != 0)
   {
     return false;
   }
   if (context.computeQpaBatch(mirror, &task, 1, &result) || context.qpaBatchFailureCount() != 1)
+  {
+    return false;
+  }
+  context.releaseAllPictureMirrors();
+  if (context.pictureMirrorCount() != 0
+      || context.pictureMirrorMemoryStats().total.currentDeviceBytes != 0
+      || context.pictureMirrorMemoryStats().total.currentPinnedBytes != 0)
   {
     return false;
   }
@@ -868,7 +1012,9 @@ bool runRecoveryIsolationCase(const int device, const bool failQpaFirst)
   if (failQpaFirst)
   {
     context.injectQpaFailuresForTesting(0, 1);
-    if (context.computeQpaBatch(sourceMirror, &qpaTask, 1, &qpaResult)
+    if (!throwsWithText([&context, sourceMirror, &qpaTask, &qpaResult]() {
+          (void) context.computeQpaBatch(sourceMirror, &qpaTask, 1, &qpaResult);
+        }, "CUDA QPA execution failed after selection:")
         || context.isQpaAccelerationAvailable()
         || !context.computeDistortionBatch(sadBatch, sadResults.data())
         || !context.isDistortionAccelerationAvailable())
@@ -879,7 +1025,9 @@ bool runRecoveryIsolationCase(const int device, const bool failQpaFirst)
   else
   {
     context.injectDistortionFailuresForTesting(0, 1);
-    if (context.computeDistortionBatch(sadBatch, sadResults.data())
+    if (!throwsWithText([&context, &sadBatch, &sadResults]() {
+          (void) context.computeDistortionBatch(sadBatch, sadResults.data());
+        }, "CUDA SAD execution failed after selection:")
         || context.isDistortionAccelerationAvailable()
         || !context.computeQpaBatch(sourceMirror, &qpaTask, 1, &qpaResult)
         || !context.isQpaAccelerationAvailable())
@@ -1171,12 +1319,12 @@ std::vector<vtm::CudaAlfCtuParam> makeAlfCtus(const vtm::CudaAlfLumaFrame &frame
       for (std::uint32_t tap = 0; tap < vtm::CUDA_ALF_COEFFICIENTS; ++tap)
       {
         const std::uint32_t offset = classIdx * vtm::CUDA_ALF_COEFFICIENTS + tap;
-        const int apsValue = tap == 12 ? 0 : int((index * 11 + classIdx * 7 + tap * 5) % 31) - 15;
-        ctu.coefficients[offset] = varied && (index & 1) == 0 ? fixed[offset]
-                                                                      : static_cast<std::int16_t>(apsValue);
+        const int apsValue = tap == 12 ? 128 : int((index * 11 + classIdx * 7 + tap * 5) % 31) - 15;
+        ctu.coefficients[offset] = tap == 12 ? std::int16_t(128)
+          : (varied && (index & 1) == 0 ? fixed[offset] : static_cast<std::int16_t>(apsValue));
         constexpr int clips[6] = { 0, 1, 3, 7, 31, 1023 };
-        ctu.clipValues[offset] = varied ? std::min(frame.maxSample, clips[(index + classIdx + tap) % 6])
-                                        : frame.maxSample;
+        ctu.clipValues[offset] = tap == 12 ? (1 << frame.bitDepth)
+          : (varied ? std::min(frame.maxSample, clips[(index + classIdx + tap) % 6]) : frame.maxSample);
       }
     }
   }
@@ -1295,12 +1443,40 @@ bool runAlfLumaCase(vtm::CudaContext &context, const std::uint8_t bitDepth,
   int owner = 0;
   const auto mirror = context.registerPictureMirror(&owner, vtm::CudaPictureRole::Reconstruction,
                                                      picture.descriptor);
+  const vtm::AlfAccelerationStats statsBefore = context.alfStats();
   const auto gpuStart = std::chrono::steady_clock::now();
   if (context.filterAlfLumaFrame(mirror, frame, ctus.data(), static_cast<std::uint32_t>(ctus.size()),
                                  collectDiagnostics ? gpuClassifiers.data() : nullptr)
       != vtm::CudaAlfDispatchResult::Executed)
+  {
+    std::cerr << "ALF dispatch unexpectedly ineligible for " << unsigned(bitDepth) << "-bit case\n";
     return false;
+  }
   const auto gpuEnd = std::chrono::steady_clock::now();
+  const vtm::AlfAccelerationStats statsAfter = context.alfStats();
+  const std::uint64_t runtimeSynchronizations = statsAfter.runtimeSynchronizations
+                                                - statsBefore.runtimeSynchronizations;
+  const std::uint64_t integrationSynchronizations = statsAfter.integrationSynchronizations
+                                                    - statsBefore.integrationSynchronizations;
+  if (statsAfter.dispatches != statsBefore.dispatches + 1
+      || statsAfter.parameterUploadBytes <= statsBefore.parameterUploadBytes
+      || statsAfter.commitBytes <= statsBefore.commitBytes
+      || statsAfter.mirrorUploadBytes <= statsBefore.mirrorUploadBytes
+      || statsAfter.mirrorDownloadBytes <= statsBefore.mirrorDownloadBytes
+      || runtimeSynchronizations < (collectDiagnostics ? 3u : 2u)
+      || integrationSynchronizations != runtimeSynchronizations + 2
+      || statsAfter.uploadSubmissionNanoseconds <= statsBefore.uploadSubmissionNanoseconds
+      || statsAfter.runtimeNanoseconds <= statsBefore.runtimeNanoseconds
+      || statsAfter.downloadNanoseconds <= statsBefore.downloadNanoseconds
+      || statsAfter.integrationNanoseconds - statsBefore.integrationNanoseconds
+           < statsAfter.runtimeNanoseconds - statsBefore.runtimeNanoseconds)
+  {
+    std::cerr << "ALF telemetry mismatch: runtime/integration sync delta " << runtimeSynchronizations << "/"
+              << integrationSynchronizations << ", mirror bytes "
+              << (statsAfter.mirrorUploadBytes - statsBefore.mirrorUploadBytes) << "/"
+              << (statsAfter.mirrorDownloadBytes - statsBefore.mirrorDownloadBytes) << '\n';
+    return false;
+  }
   if (collectDiagnostics)
   {
     unsigned transposeMask = 0;
@@ -1312,14 +1488,21 @@ bool runAlfLumaCase(vtm::CudaContext &context, const std::uint8_t bitDepth,
         transposeMask |= 1u << cpuRows[y][x].transposeIdx;
         if (gpuClassifiers[compact].classIdx != cpuRows[y][x].classIdx
             || gpuClassifiers[compact].transposeIdx != cpuRows[y][x].transposeIdx)
+        {
+          std::cerr << "ALF classifier mismatch at " << x << "," << y << '\n';
           return false;
+        }
       }
     }
     if (transposeMask != 0xf) return false;
   }
   for (std::uint32_t y = 0; y < height; ++y)
     for (std::uint32_t x = 0; x < width; ++x)
-      if (sample(x, y) != expected[static_cast<std::size_t>(y) * width + x]) return false;
+      if (sample(x, y) != expected[static_cast<std::size_t>(y) * width + x])
+      {
+        std::cerr << "ALF sample mismatch at " << x << "," << y << '\n';
+        return false;
+      }
   context.releasePictureMirror(mirror);
   if (cpuMilliseconds != nullptr)
     *cpuMilliseconds = std::chrono::duration<double, std::milli>(cpuEnd - cpuStart).count();
@@ -1357,8 +1540,8 @@ bool benchmarkAlfFrame(vtm::CudaContext &context)
             << (after.mirrorDownloadBytes - before.mirrorDownloadBytes) << " bytes, syncs runtime/integration "
             << (after.runtimeSynchronizations - before.runtimeSynchronizations) << "/"
             << (after.integrationSynchronizations - before.integrationSynchronizations)
-            << ", time upload/runtime/download/integration "
-            << double(after.uploadNanoseconds - before.uploadNanoseconds) / 1000000.0 << "/"
+            << ", time upload-submit/runtime/download/integration "
+            << double(after.uploadSubmissionNanoseconds - before.uploadSubmissionNanoseconds) / 1000000.0 << "/"
             << double(after.runtimeNanoseconds - before.runtimeNanoseconds) / 1000000.0 << "/"
             << double(after.downloadNanoseconds - before.downloadNanoseconds) / 1000000.0 << "/"
             << double(after.integrationNanoseconds - before.integrationNanoseconds) / 1000000.0 << " ms. "
@@ -1391,6 +1574,12 @@ bool runAlfGeometryCase(vtm::CudaContext &context)
   altered = frame;
   altered.ctusInHeight--;
   if (!rejected(altered, validCtus, static_cast<std::uint32_t>(validCtus.size()))) return false;
+  altered = frame;
+  altered.minSample = -1;
+  if (!rejected(altered, validCtus, static_cast<std::uint32_t>(validCtus.size()))) return false;
+  altered = frame;
+  altered.maxSample = 1 << frame.bitDepth;
+  if (!rejected(altered, validCtus, static_cast<std::uint32_t>(validCtus.size()))) return false;
   if (!rejected(frame, validCtus, static_cast<std::uint32_t>(validCtus.size() - 1))) return false;
   for (int field = 0; field < 5; ++field)
   {
@@ -1403,9 +1592,33 @@ bool runAlfGeometryCase(vtm::CudaContext &context)
     if (field == 4) last.enabled = 2;
     if (!rejected(frame, std::move(ctus), static_cast<std::uint32_t>(validCtus.size()))) return false;
   }
+  for (const std::int32_t invalidClip : { std::numeric_limits<std::int32_t>::min(), -1,
+                                          (1 << frame.bitDepth) + 1 })
+  {
+    auto ctus = validCtus;
+    ctus.front().clipValues[0] = invalidClip;
+    if (!rejected(frame, std::move(ctus), static_cast<std::uint32_t>(validCtus.size()))) return false;
+  }
+  for (const std::int16_t invalidCoefficient : { std::numeric_limits<std::int16_t>::min(),
+                                                  std::int16_t(-129), std::int16_t(128) })
+  {
+    auto ctus = validCtus;
+    ctus.front().coefficients[0] = invalidCoefficient;
+    if (!rejected(frame, std::move(ctus), static_cast<std::uint32_t>(validCtus.size()))) return false;
+  }
+  {
+    auto ctus = validCtus;
+    ctus.front().coefficients[vtm::CUDA_ALF_COEFFICIENTS - 1] = 127;
+    if (!rejected(frame, std::move(ctus), static_cast<std::uint32_t>(validCtus.size()))) return false;
+  }
   if (context.alfStats().dispatches != before.dispatches
       || context.alfStats().failures != before.failures) return false;
-  if (context.filterAlfLumaFrame(mirror, frame, validCtus.data(), static_cast<std::uint32_t>(validCtus.size()))
+  auto boundaryCtus = validCtus;
+  boundaryCtus.front().clipValues[0] = 0;
+  boundaryCtus.front().clipValues[1] = 1 << frame.bitDepth;
+  boundaryCtus.front().coefficients[0] = -128;
+  boundaryCtus.front().coefficients[1] = 127;
+  if (context.filterAlfLumaFrame(mirror, frame, boundaryCtus.data(), static_cast<std::uint32_t>(boundaryCtus.size()))
       != vtm::CudaAlfDispatchResult::Executed) return false;
   context.releasePictureMirror(mirror);
   return true;
@@ -1885,9 +2098,20 @@ int main(const int argc, char *argv[])
       return fail("CUDA luma ALF classifier/filter differed from the scalar VTM reference");
     }
 #if VTM_CUDA_TESTING
+    if (!runBatchOperationalPreflightExceptionCase(std::stoi(argv[2])))
+    {
+      return fail("CUDA SAD/QPA operational preflight exceptions were reported as NotEligible");
+    }
     if (!runSadFailureCase(std::stoi(argv[2]), 1, 0)
         || !runSadFailureCase(std::stoi(argv[2]), 2, 0)
-        || !runSadFailureCase(std::stoi(argv[2]), 0, 1))
+        || !runSadFailureCase(std::stoi(argv[2]), 0, 1)
+        || !runSadFailureCase(std::stoi(argv[2]), 0, 0, vtm::CudaBatchTestFailurePoint::Upload)
+        || !runSadFailureCase(std::stoi(argv[2]), 0, 0, vtm::CudaBatchTestFailurePoint::KernelLaunch)
+        || !runSadFailureCase(std::stoi(argv[2]), 0, 0, vtm::CudaBatchTestFailurePoint::ResultDownload)
+        || !runSadFailureCase(std::stoi(argv[2]), 0, 0, vtm::CudaBatchTestFailurePoint::Completion)
+        || !runSadFailureCase(std::stoi(argv[2]), 0, 0, vtm::CudaBatchTestFailurePoint::Publication)
+        || !runSadFailureCase(std::stoi(argv[2]), 0, 0,
+                              vtm::CudaBatchTestFailurePoint::DiagnosticConstruction))
     {
       return fail("CUDA SAD failure recovery or permanent poisoning is invalid");
     }
@@ -1895,7 +2119,15 @@ int main(const int argc, char *argv[])
         || !runQpaFailureCase(std::stoi(argv[2]), 2, 0)
         || !runQpaFailureCase(std::stoi(argv[2]), 3, 0)
         || !runQpaFailureCase(std::stoi(argv[2]), 4, 0)
-        || !runQpaFailureCase(std::stoi(argv[2]), 0, 1))
+        || !runQpaFailureCase(std::stoi(argv[2]), 0, 1)
+        || !runQpaFailureCase(std::stoi(argv[2]), 0, 0, vtm::CudaBatchTestFailurePoint::Upload)
+        || !runQpaFailureCase(std::stoi(argv[2]), 0, 0, vtm::CudaBatchTestFailurePoint::KernelLaunch)
+        || !runQpaFailureCase(std::stoi(argv[2]), 0, 0, vtm::CudaBatchTestFailurePoint::ResultDownload)
+        || !runQpaFailureCase(std::stoi(argv[2]), 0, 0, vtm::CudaBatchTestFailurePoint::Completion)
+        || !runQpaFailureCase(std::stoi(argv[2]), 0, 0, vtm::CudaBatchTestFailurePoint::Publication)
+        || !runQpaFailureCase(std::stoi(argv[2]), 0, 0, vtm::CudaBatchTestFailurePoint::ResultCorruption)
+        || !runQpaFailureCase(std::stoi(argv[2]), 0, 0,
+                              vtm::CudaBatchTestFailurePoint::DiagnosticConstruction))
     {
       return fail("CUDA QPA failure recovery, discard, or permanent poisoning is invalid");
     }

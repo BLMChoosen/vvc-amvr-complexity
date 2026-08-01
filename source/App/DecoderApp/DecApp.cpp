@@ -35,6 +35,7 @@
     \brief    Decoder application class
 */
 
+#include <algorithm>
 #include <list>
 #include <numeric>
 #include <vector>
@@ -915,7 +916,7 @@ uint32_t DecApp::decode()
     const vtm::AlfAccelerationStats stats = m_cDecLib.alfAccelerationStats();
     msg(INFO, "CUDA ALF frames: %llu, CTUs: %llu, pixels: %llu, scratch current/retired/peak: %llu/%llu/%llu bytes, "
               "runtime transfer params/diagnostic/commit: %llu/%llu/%llu bytes, mirror upload/download: %llu/%llu bytes, "
-              "syncs runtime/integration: %llu/%llu, time upload/runtime/download/integration: %.3f/%.3f/%.3f/%.3f ms, "
+              "syncs runtime/integration: %llu/%llu, time upload-submit/runtime/download/integration: %.3f/%.3f/%.3f/%.3f ms, "
               "failures: %llu, enabled: %d, poisoned: %d, disabled-by-flag: %d\n",
         static_cast<unsigned long long>(stats.dispatches), static_cast<unsigned long long>(stats.ctus),
         static_cast<unsigned long long>(stats.pixels), static_cast<unsigned long long>(stats.scratchBytes),
@@ -927,7 +928,7 @@ uint32_t DecApp::decode()
         static_cast<unsigned long long>(stats.mirrorDownloadBytes),
         static_cast<unsigned long long>(stats.runtimeSynchronizations),
         static_cast<unsigned long long>(stats.integrationSynchronizations),
-        static_cast<double>(stats.uploadNanoseconds) / 1000000.0,
+        static_cast<double>(stats.uploadSubmissionNanoseconds) / 1000000.0,
         static_cast<double>(stats.runtimeNanoseconds) / 1000000.0,
         static_cast<double>(stats.downloadNanoseconds) / 1000000.0,
         static_cast<double>(stats.integrationNanoseconds) / 1000000.0,
@@ -1452,10 +1453,16 @@ void DecApp::xFlushOutput( PicList* pcListPic, const int layerId )
   }
   PicList::iterator iterPic   = pcListPic->begin();
 
-  auto destroyPictureSlot = [this](Picture *&slot, std::exception_ptr &firstError) noexcept
+  auto destroyPictureSlot = [this, pcListPic](Picture *&slot, std::exception_ptr &firstError) noexcept
   {
     Picture *picture = slot;
     if (picture == nullptr) return;
+    // Publish the empty slot before any fallible cleanup.  A later cleanup pass can therefore
+    // neither dereference nor delete the same Picture again if release/destroy reports an error.
+    for (Picture *&candidate : *pcListPic)
+    {
+      if (candidate == picture) candidate = nullptr;
+    }
     try
     {
       m_cDecLib.releasePictureComputeResources(picture);
@@ -1475,17 +1482,24 @@ void DecApp::xFlushOutput( PicList* pcListPic, const int layerId )
     try
     {
       delete picture;
-      slot = nullptr;
     }
     catch (...)
     {
-      slot = nullptr;
       if (!firstError) firstError = std::current_exception();
     }
   };
 
-  iterPic   = pcListPic->begin();
-  Picture* pcPic = *(iterPic);
+  iterPic = std::find_if(pcListPic->begin(), pcListPic->end(), [](const Picture *picture) {
+    return picture != nullptr;
+  });
+  if (iterPic == pcListPic->end())
+  {
+    pcListPic->clear();
+    m_iPOCLastDisplay = -MAX_INT;
+    return;
+  }
+  Picture* pcPic = *iterPic;
+  std::exception_ptr cleanupError;
 
   if (pcPic->fieldPic ) //Field Decoding
   {
@@ -1546,16 +1560,12 @@ void DecApp::xFlushOutput( PicList* pcListPic, const int layerId )
         pcPicTop->neededForOutput = false;
         pcPicBottom->neededForOutput = false;
 
-        std::exception_ptr cleanupError;
         destroyPictureSlot(*iterPicTop, cleanupError);
         destroyPictureSlot(*iterPic2, cleanupError);
-        if (cleanupError) std::rethrow_exception(cleanupError);
       }
       else
       {
-        std::exception_ptr cleanupError;
         destroyPictureSlot(*iterPicTop, cleanupError);
-        if (cleanupError) std::rethrow_exception(cleanupError);
       }
     }
   }
@@ -1564,6 +1574,12 @@ void DecApp::xFlushOutput( PicList* pcListPic, const int layerId )
     while (iterPic != pcListPic->end())
     {
       pcPic = *(iterPic);
+
+      if (pcPic == nullptr)
+      {
+        iterPic++;
+        continue;
+      }
 
       if( pcPic->layerId != layerId && layerId != NOT_VALID )
       {
@@ -1760,7 +1776,6 @@ void DecApp::xFlushOutput( PicList* pcListPic, const int layerId )
       iterPic++;
     }
 
-    std::exception_ptr cleanupError;
     for (Picture*& p: *pcListPic)
     {
       if (p == nullptr || (layerId != NOT_VALID && p->layerId != layerId))
@@ -1773,7 +1788,6 @@ void DecApp::xFlushOutput( PicList* pcListPic, const int layerId )
         destroyPictureSlot(p, cleanupError);
       }
     }
-    if (cleanupError) std::rethrow_exception(cleanupError);
   }
 
   if( layerId != NOT_VALID )
@@ -1785,6 +1799,7 @@ void DecApp::xFlushOutput( PicList* pcListPic, const int layerId )
     pcListPic->clear();
   }
   m_iPOCLastDisplay = -MAX_INT;
+  if (cleanupError) std::rethrow_exception(cleanupError);
 }
 
 /** \param pcListPic list of pictures to be written to file

@@ -61,6 +61,18 @@ enum class CudaFence
   DownloadComplete
 };
 
+enum class CudaBatchTestFailurePoint : std::uint8_t
+{
+  None,
+  Upload,
+  KernelLaunch,
+  ResultDownload,
+  Completion,
+  Publication,
+  ResultCorruption,
+  DiagnosticConstruction
+};
+
 constexpr std::uint64_t CUDA_DEFAULT_MIRROR_MEMORY_BUDGET_BYTES = std::uint64_t{ 512 } * 1024 * 1024;
 
 class CudaPinnedBuffer
@@ -142,12 +154,14 @@ public:
   void setPictureMirrorMemoryBudget(std::uint64_t bytes);
   static bool isPictureMirrorDescriptorSupported(const CudaHostPictureDesc &picture) noexcept;
   bool isDistortionAccelerationAvailable() const noexcept;
-  bool computeDistortionBatch(const CudaDistortionBatchDesc &batch, std::uint64_t *results) noexcept;
+  // false means an explicitly unsupported descriptor/NotEligible. Once CUDA selection starts, failures throw.
+  bool computeDistortionBatch(const CudaDistortionBatchDesc &batch, std::uint64_t *results);
   std::uint64_t distortionBatchDispatchCount() const;
   std::uint64_t distortionBatchFailureCount() const noexcept;
   bool isQpaAccelerationAvailable() const noexcept;
+  // false means an explicitly unsupported descriptor/NotEligible. Once CUDA selection starts, failures throw.
   bool computeQpaBatch(CudaMirrorHandle sourceMirror, const CudaQpaTask *tasks,
-                       std::uint32_t taskCount, CudaQpaResult *results) noexcept;
+                       std::uint32_t taskCount, CudaQpaResult *results);
   std::uint64_t qpaBatchDispatchCount() const;
   std::uint64_t qpaTaskCount() const;
   std::uint64_t qpaBatchFailureCount() const noexcept;
@@ -161,6 +175,8 @@ public:
   void injectReleaseFailuresForTesting(unsigned asyncFailures, unsigned immediateFailures);
   void injectDistortionFailuresForTesting(unsigned allocationFailureStep, unsigned executionFailures);
   void injectQpaFailuresForTesting(unsigned allocationFailureStep, unsigned executionFailures);
+  void injectDistortionFailurePointForTesting(CudaBatchTestFailurePoint failurePoint);
+  void injectQpaFailurePointForTesting(CudaBatchTestFailurePoint failurePoint);
   void injectAlfFailureForTesting(CudaAlfTestFailurePoint failurePoint);
   void injectMirrorPlaneFailuresForTesting(std::uint8_t plane, unsigned allocationFailureStep,
                                            unsigned uploadFailures, unsigned downloadFailures);
