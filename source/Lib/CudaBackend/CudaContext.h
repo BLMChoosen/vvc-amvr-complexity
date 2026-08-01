@@ -39,6 +39,7 @@
 #include "CudaQpa.h"
 #include "CudaAlf.h"
 #include "CommonLib/CudaDeblocking.h"
+#include "CommonLib/CudaLoopFilterChain.h"
 
 #include <memory>
 #include <cstddef>
@@ -179,6 +180,14 @@ public:
                                             const CudaDbfLumaTask *tasks, std::uint32_t taskCount);
   DbfAccelerationStats dbfStats() const noexcept;
   void recordDbfDescriptorCollection(std::uint64_t nanoseconds) noexcept;
+  bool isLoopFilterChainAccelerationAvailable() const noexcept;
+  CudaLoopFilterChainDispatchResult filterLoopFilterChain(
+    CudaMirrorHandle reconstructionMirror, const CudaLoopFilterChainFrame &frame,
+    const std::int32_t *lmcsLut, const CudaDbfLumaTask *dbfTasks, std::uint32_t dbfTaskCount,
+    const CudaSaoLumaCtuParam *saoCtus, std::uint32_t saoCtuCount,
+    const CudaAlfLumaFrame *alfFrame, const CudaAlfCtuParam *alfCtus, std::uint32_t alfCtuCount);
+  LoopFilterChainAccelerationStats loopFilterChainStats() const noexcept;
+  void recordLoopFilterChainCollection(std::uint64_t nanoseconds) noexcept;
 #if VTM_CUDA_TESTING
   void injectReleaseFailuresForTesting(unsigned asyncFailures, unsigned immediateFailures);
   void injectDistortionFailuresForTesting(unsigned allocationFailureStep, unsigned executionFailures);
@@ -187,6 +196,7 @@ public:
   void injectQpaFailurePointForTesting(CudaBatchTestFailurePoint failurePoint);
   void injectAlfFailureForTesting(CudaAlfTestFailurePoint failurePoint);
   void injectDbfFailureForTesting(CudaDbfTestFailurePoint failurePoint);
+  void injectLoopFilterChainFailureForTesting(CudaLoopFilterChainTestFailurePoint failurePoint);
   static std::uint64_t dbfLiveDeviceAllocationsForTesting() noexcept;
   static std::uint64_t dbfLivePinnedAllocationsForTesting() noexcept;
   void injectMirrorPlaneFailuresForTesting(std::uint8_t plane, unsigned allocationFailureStep,

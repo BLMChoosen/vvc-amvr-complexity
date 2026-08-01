@@ -54,6 +54,7 @@ struct ComputeConfig
   bool           enableExperimentalQpa = false;
   bool           enableExperimentalAlf = false;
   bool           enableExperimentalDbf = false;
+  bool           enableExperimentalLoopFilterChain = false;
 };
 
 struct CudaSadStats

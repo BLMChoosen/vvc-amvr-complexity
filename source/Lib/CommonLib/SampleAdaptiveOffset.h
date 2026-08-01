@@ -41,6 +41,9 @@
 #include "CommonDef.h"
 #include "Unit.h"
 #include "Reshape.h"
+#include "CudaLoopFilterChain.h"
+
+#include <vector>
 //! \ingroup CommonLib
 //! \{
 
@@ -61,7 +64,8 @@ public:
   SampleAdaptiveOffset();
   virtual ~SampleAdaptiveOffset();
 
-  void SAOProcess(CodingStructure &cs, SAOBlkParam *saoBlkParams);
+  void SAOProcess(CodingStructure &cs, SAOBlkParam *saoBlkParams,
+                  std::vector<vtm::CudaSaoLumaCtuParam> *cudaLumaCtus = nullptr);
   void create(int picWidth, int picHeight, ChromaFormat format, uint32_t maxCUWidth, uint32_t maxCUHeight,
               uint32_t maxCUDepth, uint32_t lumaBitShift, uint32_t chromaBitShift);
   void setReshaper(Reshape *p) { m_pcReshape = p; }
@@ -91,7 +95,7 @@ protected:
   void reconstructBlkSAOParam(SAOBlkParam &recParam, MergeBlkParams &mergeList);
   int  getMergeList(CodingStructure &cs, int ctuRsAddr, SAOBlkParam *blkParams, MergeBlkParams &mergeList);
   void offsetCTU(const UnitArea &area, const CPelUnitBuf &src, PelUnitBuf &res, SAOBlkParam &saoblkParam,
-                 CodingStructure &cs);
+                  CodingStructure &cs, bool processLuma = true);
   void xReconstructBlkSAOParams(CodingStructure &cs, SAOBlkParam *saoBlkParams);
   bool isCrossedByVirtualBoundaries(const int xPos, const int yPos, const int width, const int height,
                                     int &numHorVirBndry, int &numVerVirBndry, int horVirBndryPos[],

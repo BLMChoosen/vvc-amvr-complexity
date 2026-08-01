@@ -371,7 +371,7 @@ void AdaptiveLoopFilter::applyCcAlfFilter(CodingStructure& cs, ComponentID compI
   }
 }
 
-void AdaptiveLoopFilter::ALFProcess(CodingStructure& cs)
+void AdaptiveLoopFilter::ALFProcess(CodingStructure& cs, const bool processLuma, const bool processChroma)
 {
 
   // set clipping range
@@ -406,29 +406,33 @@ void AdaptiveLoopFilter::ALFProcess(CodingStructure& cs)
       const CodingUnit *cu = cs.getCU(Position(xPos, yPos), ChannelType::LUMA);
 
       // skip this CTU if ALF is disabled
-      if (!cu->slice->getAlfEnabledFlag(COMPONENT_Y) && !cu->slice->getAlfEnabledFlag(COMPONENT_Cb) && !cu->slice->getAlfEnabledFlag(COMPONENT_Cr))
+      if ((!processLuma || !cu->slice->getAlfEnabledFlag(COMPONENT_Y))
+          && (!processChroma || (!cu->slice->getAlfEnabledFlag(COMPONENT_Cb)
+                                 && !cu->slice->getAlfEnabledFlag(COMPONENT_Cr))))
       {
         ctuIdx++;
         continue;
       }
 
       // reload ALF APS each time the slice changes during raster scan filtering
-      if (ctuIdx == 0 || lastSliceIdx != cu->slice->getSliceID() || lumaModes == nullptr)
+      if (ctuIdx == 0 || lastSliceIdx != cu->slice->getSliceID() || (processLuma && lumaModes == nullptr))
       {
         cs.slice = cu->slice;
-        reconstructCoeffAPSs(cs, true, cu->slice->getAlfEnabledFlag(COMPONENT_Cb) || cu->slice->getAlfEnabledFlag(COMPONENT_Cr), false);
-        lumaModes          = cu->slice->getPic()->getAlfModes(COMPONENT_Y);
+        reconstructCoeffAPSs(cs, processLuma,
+                             processChroma && (cu->slice->getAlfEnabledFlag(COMPONENT_Cb)
+                                               || cu->slice->getAlfEnabledFlag(COMPONENT_Cr)), false);
+        lumaModes = processLuma ? cu->slice->getPic()->getAlfModes(COMPONENT_Y) : nullptr;
         m_ccAlfFilterParam = cu->slice->m_ccAlfFilterParam;
       }
       lastSliceIdx = cu->slice->getSliceID();
 
       const int width = ( xPos + pcv.maxCUWidth > pcv.lumaWidth ) ? ( pcv.lumaWidth - xPos ) : pcv.maxCUWidth;
       const int height = ( yPos + pcv.maxCUHeight > pcv.lumaHeight ) ? ( pcv.lumaHeight - yPos ) : pcv.maxCUHeight;
-      bool      ctuEnableFlag = m_modes[COMPONENT_Y][ctuIdx] != AlfMode::OFF;
+      bool      ctuEnableFlag = processLuma && m_modes[COMPONENT_Y][ctuIdx] != AlfMode::OFF;
       for( int compIdx = 1; compIdx < MAX_NUM_COMPONENT; compIdx++ )
       {
-        ctuEnableFlag |= m_modes[compIdx][ctuIdx] != AlfMode::OFF;
-        if (cu->slice->m_ccAlfFilterParam.ccAlfFilterEnabled[compIdx - 1])
+        ctuEnableFlag |= processChroma && m_modes[compIdx][ctuIdx] != AlfMode::OFF;
+        if (processChroma && cu->slice->m_ccAlfFilterParam.ccAlfFilterEnabled[compIdx - 1])
         {
           ctuEnableFlag |= m_ccAlfFilterControl[compIdx - 1][ctuIdx] > 0;
         }
@@ -468,7 +472,7 @@ void AdaptiveLoopFilter::ALFProcess(CodingStructure& cs)
             buf.extendBorderPel( MAX_ALF_PADDING_SIZE );
             buf = buf.subBuf( UnitArea ( cs.area.chromaFormat, Area( clipL ? 0 : MAX_ALF_PADDING_SIZE, clipT ? 0 : MAX_ALF_PADDING_SIZE, w, h ) ) );
 
-            if (m_modes[COMPONENT_Y][ctuIdx] != AlfMode::OFF)
+            if (processLuma && m_modes[COMPONENT_Y][ctuIdx] != AlfMode::OFF)
             {
               const Area blkSrc( 0, 0, w, h );
               const Area blkDst( xStart, yStart, w, h );
@@ -486,7 +490,7 @@ void AdaptiveLoopFilter::ALFProcess(CodingStructure& cs)
               );
             }
 
-            for( int compIdx = 1; compIdx < MAX_NUM_COMPONENT; compIdx++ )
+            for( int compIdx = processChroma ? 1 : MAX_NUM_COMPONENT; compIdx < MAX_NUM_COMPONENT; compIdx++ )
             {
               ComponentID compID = ComponentID( compIdx );
               const int chromaScaleX = getComponentScaleX( compID, tmpYuv.chromaFormat );
@@ -534,7 +538,7 @@ void AdaptiveLoopFilter::ALFProcess(CodingStructure& cs)
       else
       {
         const UnitArea area( cs.area.chromaFormat, Area( xPos, yPos, width, height ) );
-        if (m_modes[COMPONENT_Y][ctuIdx] != AlfMode::OFF)
+        if (processLuma && m_modes[COMPONENT_Y][ctuIdx] != AlfMode::OFF)
         {
           Area blk( xPos, yPos, width, height );
           deriveClassification( m_classifier, tmpYuv.get( COMPONENT_Y ), blk, blk );
@@ -549,7 +553,7 @@ void AdaptiveLoopFilter::ALFProcess(CodingStructure& cs)
                          cs, m_alfVBLumaCTUHeight, m_alfVBLumaPos);
         }
 
-        for( int compIdx = 1; compIdx < MAX_NUM_COMPONENT; compIdx++ )
+        for( int compIdx = processChroma ? 1 : MAX_NUM_COMPONENT; compIdx < MAX_NUM_COMPONENT; compIdx++ )
         {
           ComponentID compID = ComponentID( compIdx );
           const int chromaScaleX = getComponentScaleX( compID, tmpYuv.chromaFormat );

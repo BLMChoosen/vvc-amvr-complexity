@@ -87,4 +87,41 @@ if( VTM_BUILD_CUDA_BACKEND_TESTS )
   add_test( NAME ${DECODER_BACKEND_FAILURE_TEST}
             COMMAND ${EXE_NAME} --BitstreamFile=${DECODER_BACKEND_SMOKE_INPUT} ${DECODER_BACKEND_FAILURE_ARGS} )
   set_tests_properties( ${DECODER_BACKEND_FAILURE_TEST} PROPERTIES WILL_FAIL TRUE RUN_SERIAL TRUE )
+
+  if( ENABLE_CUDA )
+    set( DECODER_DBF_FIXTURE_DIR "${CMAKE_CURRENT_BINARY_DIR}/cuda-dbf-process" )
+    set( DECODER_DBF_PROCESS_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/RunCudaDbfProcessTest.cmake" )
+    add_test(
+      NAME DecoderApp.CudaDbfFixture
+      COMMAND ${CMAKE_COMMAND}
+        "-DTEST_MODE=SETUP"
+        "-DTEST_GENERATOR=$<TARGET_FILE:CudaBackendTest>"
+        "-DTEST_ENCODER=$<TARGET_FILE:EncoderApp>"
+        "-DTEST_SOURCE_DIR=${CMAKE_SOURCE_DIR}"
+        "-DTEST_WORK_DIR=${DECODER_DBF_FIXTURE_DIR}"
+        -P "${DECODER_DBF_PROCESS_SCRIPT}"
+    )
+    add_test(
+      NAME DecoderApp.CudaDbfParity
+      COMMAND ${CMAKE_COMMAND}
+        "-DTEST_MODE=PARITY"
+        "-DTEST_DECODER=$<TARGET_FILE:${EXE_NAME}>"
+        "-DTEST_WORK_DIR=${DECODER_DBF_FIXTURE_DIR}"
+        -P "${DECODER_DBF_PROCESS_SCRIPT}"
+    )
+    add_test(
+      NAME DecoderApp.CudaDbfFailFast
+      COMMAND ${CMAKE_COMMAND}
+        "-DTEST_MODE=FAILFAST"
+        "-DTEST_DECODER=$<TARGET_FILE:${EXE_NAME}>"
+        "-DTEST_WORK_DIR=${DECODER_DBF_FIXTURE_DIR}"
+        -P "${DECODER_DBF_PROCESS_SCRIPT}"
+    )
+    set_tests_properties( DecoderApp.CudaDbfFixture PROPERTIES
+      FIXTURES_SETUP CudaDbfProcess RUN_SERIAL TRUE LABELS gpu TIMEOUT 180
+    )
+    set_tests_properties( DecoderApp.CudaDbfParity DecoderApp.CudaDbfFailFast PROPERTIES
+      FIXTURES_REQUIRED CudaDbfProcess RUN_SERIAL TRUE LABELS gpu TIMEOUT 60
+    )
+  endif()
 endif()

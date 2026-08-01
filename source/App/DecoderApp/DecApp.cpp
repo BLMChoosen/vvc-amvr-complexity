@@ -958,6 +958,33 @@ uint32_t DecApp::decode()
         static_cast<double>(dbf.integrationNanoseconds) / 1000000.0,
         static_cast<unsigned long long>(dbf.failures), dbf.enabled ? 1 : 0, dbf.poisoned ? 1 : 0,
         m_computeConfig.enableExperimentalDbf ? 0 : 1);
+    const vtm::LoopFilterChainAccelerationStats chain = m_cDecLib.loopFilterChainAccelerationStats();
+    msg(INFO, "CUDA loop-filter chain frames/pixels/DBF tasks/SAO CTUs/ALF CTUs: %llu/%llu/%llu/%llu/%llu, "
+              "params/internal copies/mirror up/down: %llu/%llu/%llu/%llu bytes, "
+              "scratch current/retired/peak: %llu/%llu/%llu bytes, syncs runtime/integration: %llu/%llu, "
+              "time collection/LMCS/DBF/SAO/ALF/runtime/integration: %.3f/%.3f/%.3f/%.3f/%.3f/%.3f/%.3f ms, "
+              "failures/not-eligible: %llu/%llu, enabled: %d, poisoned: %d, disabled-by-flag: %d\n",
+        static_cast<unsigned long long>(chain.dispatches), static_cast<unsigned long long>(chain.pixels),
+        static_cast<unsigned long long>(chain.dbfTasks), static_cast<unsigned long long>(chain.saoCtus),
+        static_cast<unsigned long long>(chain.alfCtus), static_cast<unsigned long long>(chain.parameterUploadBytes),
+        static_cast<unsigned long long>(chain.internalCopyBytes),
+        static_cast<unsigned long long>(chain.mirrorUploadBytes),
+        static_cast<unsigned long long>(chain.mirrorDownloadBytes),
+        static_cast<unsigned long long>(chain.scratchBytes),
+        static_cast<unsigned long long>(chain.retiredScratchBytes),
+        static_cast<unsigned long long>(chain.peakScratchBytes),
+        static_cast<unsigned long long>(chain.runtimeSynchronizations),
+        static_cast<unsigned long long>(chain.integrationSynchronizations),
+        static_cast<double>(chain.collectionNanoseconds) / 1000000.0,
+        static_cast<double>(chain.lmcsNanoseconds) / 1000000.0,
+        static_cast<double>(chain.dbfNanoseconds) / 1000000.0,
+        static_cast<double>(chain.saoNanoseconds) / 1000000.0,
+        static_cast<double>(chain.alfNanoseconds) / 1000000.0,
+        static_cast<double>(chain.runtimeNanoseconds) / 1000000.0,
+        static_cast<double>(chain.integrationNanoseconds) / 1000000.0,
+        static_cast<unsigned long long>(chain.failures), static_cast<unsigned long long>(chain.notEligible),
+        chain.enabled ? 1 : 0, chain.poisoned ? 1 : 0,
+        m_computeConfig.enableExperimentalLoopFilterChain ? 0 : 1);
   }
 
   // Synchronize compute work before deleting pictures, then release the backend last.

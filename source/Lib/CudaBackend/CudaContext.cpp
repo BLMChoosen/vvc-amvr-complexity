@@ -228,6 +228,14 @@ struct CudaContext::Impl
   std::uint64_t dbfIntegrationSynchronizations = 0;
   std::uint64_t dbfDescriptorCollectionNanoseconds = 0;
   std::uint64_t dbfIntegrationNanoseconds = 0;
+  bool loopFilterChainAccelerationEnabled = true;
+  std::uint64_t loopFilterChainFailures = 0;
+  std::uint64_t loopFilterChainNotEligible = 0;
+  std::uint64_t loopFilterChainMirrorUploadBytes = 0;
+  std::uint64_t loopFilterChainMirrorDownloadBytes = 0;
+  std::uint64_t loopFilterChainIntegrationSynchronizations = 0;
+  std::uint64_t loopFilterChainCollectionNanoseconds = 0;
+  std::uint64_t loopFilterChainIntegrationNanoseconds = 0;
   std::uint64_t mirrorSynchronizationOperations = 0;
   CudaMirrorMemoryStats mirrorMemory{};
 #if VTM_CUDA_TESTING
@@ -237,6 +245,8 @@ struct CudaContext::Impl
   unsigned mirrorAllocationFailureStep = 0;
   unsigned mirrorUploadFailures = 0;
   unsigned mirrorDownloadFailures = 0;
+  CudaLoopFilterChainTestFailurePoint loopFilterChainIntegrationFailure =
+    CudaLoopFilterChainTestFailurePoint::None;
 #endif
 #endif
   std::thread::id ownerThread;
@@ -445,6 +455,21 @@ void recoverAndQuarantineDbfNoexcept(ContextImpl *impl, const CudaMirrorHandle h
     return;
   }
   cuda_backend::recoverDbfRuntime(impl->runtime);
+  try { cuda_backend::synchronizeRuntimeContext(impl->runtime); } catch (...) {}
+  quarantineAlfMirrorNoexcept(impl, handle);
+}
+
+template<typename ContextImpl>
+void recoverAndQuarantineLoopFilterChainNoexcept(ContextImpl *impl, const CudaMirrorHandle handle) noexcept
+{
+  if (impl == nullptr || impl->runtime == nullptr)
+  {
+    quarantineAlfMirrorNoexcept(impl, handle);
+    return;
+  }
+  cuda_backend::recoverLoopFilterChainRuntime(impl->runtime);
+  cuda_backend::recoverDbfRuntime(impl->runtime);
+  cuda_backend::recoverAlfRuntime(impl->runtime);
   try { cuda_backend::synchronizeRuntimeContext(impl->runtime); } catch (...) {}
   quarantineAlfMirrorNoexcept(impl, handle);
 }
@@ -979,6 +1004,17 @@ void CudaContext::create(const int device)
   m_impl->dbfIntegrationSynchronizations = 0;
   m_impl->dbfDescriptorCollectionNanoseconds = 0;
   m_impl->dbfIntegrationNanoseconds = 0;
+  m_impl->loopFilterChainAccelerationEnabled = true;
+  m_impl->loopFilterChainFailures = 0;
+  m_impl->loopFilterChainNotEligible = 0;
+  m_impl->loopFilterChainMirrorUploadBytes = 0;
+  m_impl->loopFilterChainMirrorDownloadBytes = 0;
+  m_impl->loopFilterChainIntegrationSynchronizations = 0;
+  m_impl->loopFilterChainCollectionNanoseconds = 0;
+  m_impl->loopFilterChainIntegrationNanoseconds = 0;
+#if VTM_CUDA_TESTING
+  m_impl->loopFilterChainIntegrationFailure = CudaLoopFilterChainTestFailurePoint::None;
+#endif
   m_impl->mirrorSynchronizationOperations = 0;
   m_impl->mirrorMemory = CudaMirrorMemoryStats{};
   m_impl->mirrorMemory.budgetBytes = CUDA_DEFAULT_MIRROR_MEMORY_BUDGET_BYTES;
@@ -2344,6 +2380,220 @@ void CudaContext::recordDbfDescriptorCollection(const std::uint64_t nanoseconds)
 #endif
 }
 
+bool CudaContext::isLoopFilterChainAccelerationAvailable() const noexcept
+{
+#if VTM_ENABLE_CUDA
+  return m_impl->runtime != nullptr && m_impl->loopFilterChainAccelerationEnabled;
+#else
+  return false;
+#endif
+}
+
+CudaLoopFilterChainDispatchResult CudaContext::filterLoopFilterChain(
+  const CudaMirrorHandle reconstructionHandle, const CudaLoopFilterChainFrame &frame,
+  const std::int32_t *lmcsLut, const CudaDbfLumaTask *dbfTasks, const std::uint32_t dbfTaskCount,
+  const CudaSaoLumaCtuParam *saoCtus, const std::uint32_t saoCtuCount,
+  const CudaAlfLumaFrame *alfFrame, const CudaAlfCtuParam *alfCtus, const std::uint32_t alfCtuCount)
+{
+#if VTM_ENABLE_CUDA
+  const auto reject = [this]() {
+    ++m_impl->loopFilterChainNotEligible;
+    return CudaLoopFilterChainDispatchResult::NotEligible;
+  };
+  const std::uint8_t validStages = CUDA_LOOP_FILTER_LMCS | CUDA_LOOP_FILTER_DBF
+                                   | CUDA_LOOP_FILTER_SAO | CUDA_LOOP_FILTER_ALF;
+  const std::uint64_t pixels = std::uint64_t(frame.width) * frame.height;
+  const std::uint64_t expectedWidth = frame.ctuWidth == 0 ? 0
+    : (std::uint64_t(frame.width) + frame.ctuWidth - 1) / frame.ctuWidth;
+  const std::uint64_t expectedHeight = frame.ctuHeight == 0 ? 0
+    : (std::uint64_t(frame.height) + frame.ctuHeight - 1) / frame.ctuHeight;
+  if (!isLoopFilterChainAccelerationAvailable() || frame.width == 0 || frame.height == 0
+      || frame.ctuWidth == 0 || frame.ctuHeight == 0 || frame.ctusInWidth != expectedWidth
+      || frame.ctusInHeight != expectedHeight || expectedWidth * expectedHeight != frame.ctuCount
+      || frame.ctuCount == 0 || frame.ctuCount > CUDA_LOOP_FILTER_CHAIN_MAX_CTUS
+      || pixels < CUDA_LOOP_FILTER_CHAIN_MIN_FRAME_PIXELS
+      || (frame.bitDepth != 8 && frame.bitDepth != 10)
+      || (frame.elementSize != 2 && frame.elementSize != 4)
+      || frame.minSample != 0 || frame.maxSample != (std::int32_t{ 1 } << frame.bitDepth) - 1
+      || frame.stages == 0 || (frame.stages & ~validStages) != 0 || frame.unsupportedFeatures != 0)
+    return reject();
+
+  const bool runLmcs = (frame.stages & CUDA_LOOP_FILTER_LMCS) != 0;
+  const bool runDbf = (frame.stages & CUDA_LOOP_FILTER_DBF) != 0;
+  const bool runSao = (frame.stages & CUDA_LOOP_FILTER_SAO) != 0;
+  const bool runAlf = (frame.stages & CUDA_LOOP_FILTER_ALF) != 0;
+  if ((runLmcs && (lmcsLut == nullptr || frame.lmcsLutSize != (std::uint32_t{ 1 } << frame.bitDepth)))
+      || (!runLmcs && frame.lmcsLutSize != 0)
+      || (runDbf && dbfTaskCount != 0 && dbfTasks == nullptr) || dbfTaskCount > CUDA_DBF_MAX_TASKS
+      || (runSao && (saoCtus == nullptr || saoCtuCount != frame.ctuCount))
+      || (!runSao && saoCtuCount != 0)
+      || (runAlf && (alfFrame == nullptr || alfCtus == nullptr || alfCtuCount != frame.ctuCount))
+      || (!runAlf && alfCtuCount != 0))
+    return reject();
+  if (runLmcs)
+    for (std::uint32_t i = 0; i < frame.lmcsLutSize; ++i)
+      if (lmcsLut[i] < frame.minSample || lmcsLut[i] > frame.maxSample) return reject();
+
+  for (std::uint32_t i = 0; i < dbfTaskCount; ++i)
+  {
+    const CudaDbfLumaTask &t = dbfTasks[i];
+    const bool validLenP = t.maxFilterLenP == 1 || t.maxFilterLenP == 2 || t.maxFilterLenP == 3
+                           || t.maxFilterLenP == 5 || t.maxFilterLenP == 7;
+    const bool validLenQ = t.maxFilterLenQ == 1 || t.maxFilterLenQ == 2 || t.maxFilterLenQ == 3
+                           || t.maxFilterLenQ == 5 || t.maxFilterLenQ == 7;
+    const bool segmentInside = t.direction == 0
+      ? t.x < frame.width && std::uint64_t(t.y) + 4 <= frame.height
+      : t.y < frame.height && std::uint64_t(t.x) + 4 <= frame.width;
+    if (!runDbf || t.direction > 1 || !validLenP || !validLenQ || !segmentInside
+        || (t.x & 3) != 0 || (t.y & 3) != 0 || t.tc < 0 || t.tc > cudaDbfMaximumTc(frame.bitDepth)
+        || t.beta < 0 || t.beta > cudaDbfMaximumBeta(frame.bitDepth)
+        || t.minSample != frame.minSample || t.maxSample != frame.maxSample)
+      return reject();
+  }
+  if (runSao)
+  {
+    const std::int32_t maximumOffset = (std::int32_t{ 1 } << (frame.bitDepth - 5)) - 1;
+    for (std::uint32_t i = 0; i < saoCtuCount; ++i)
+    {
+      const CudaSaoLumaCtuParam &ctu = saoCtus[i];
+      const std::uint32_t x = (i % frame.ctusInWidth) * frame.ctuWidth;
+      const std::uint32_t y = (i / frame.ctusInWidth) * frame.ctuHeight;
+      const std::uint32_t width = std::min(frame.ctuWidth, frame.width - x);
+      const std::uint32_t height = std::min(frame.ctuHeight, frame.height - y);
+      if (ctu.x != x || ctu.y != y || ctu.width != width || ctu.height != height
+          || ctu.enabled > 1 || (ctu.enabled && (ctu.type < 0 || ctu.type > 4)))
+        return reject();
+      if (ctu.enabled)
+        for (const std::int32_t offset : ctu.offsets)
+          if (offset < -maximumOffset || offset > maximumOffset) return reject();
+    }
+  }
+  if (runAlf)
+  {
+    if (alfFrame->width != frame.width || alfFrame->height != frame.height
+        || alfFrame->ctuWidth != frame.ctuWidth || alfFrame->ctuHeight != frame.ctuHeight
+        || alfFrame->ctusInWidth != frame.ctusInWidth || alfFrame->ctusInHeight != frame.ctusInHeight
+        || alfFrame->bitDepth != frame.bitDepth || alfFrame->elementSize != frame.elementSize
+        || alfFrame->minSample != frame.minSample || alfFrame->maxSample != frame.maxSample
+        || (frame.width & 3) != 0 || (frame.height & 3) != 0
+        || alfFrame->vbCtuHeight != static_cast<std::int32_t>(frame.ctuHeight)
+        || alfFrame->vbPos != alfFrame->vbCtuHeight - 4)
+      return reject();
+    for (std::uint32_t i = 0; i < alfCtuCount; ++i)
+    {
+      const CudaAlfCtuParam &ctu = alfCtus[i];
+      const std::uint32_t x = (i % frame.ctusInWidth) * frame.ctuWidth;
+      const std::uint32_t y = (i / frame.ctusInWidth) * frame.ctuHeight;
+      if (ctu.x != x || ctu.y != y || ctu.width != std::min(frame.ctuWidth, frame.width - x)
+          || ctu.height != std::min(frame.ctuHeight, frame.height - y) || ctu.enabled > 1)
+        return reject();
+      if (ctu.enabled)
+        for (std::uint32_t j = 0; j < CUDA_ALF_CLASSES * CUDA_ALF_COEFFICIENTS; ++j)
+        {
+          const std::uint32_t coefficientIndex = j % CUDA_ALF_COEFFICIENTS;
+          if (ctu.clipValues[j] < 0 || ctu.clipValues[j] > (std::int32_t{ 1 } << frame.bitDepth)
+              || (coefficientIndex + 1 == CUDA_ALF_COEFFICIENTS
+                    ? ctu.coefficients[j] != 128
+                    : ctu.coefficients[j] < -128 || ctu.coefficients[j] > 127))
+            return reject();
+        }
+    }
+  }
+
+  requireRuntime(m_impl.get());
+  PictureMirror &mirror = findMirror(m_impl.get(), reconstructionHandle);
+  if (mirror.role != CudaPictureRole::Reconstruction || mirror.host.planeCount == 0) return reject();
+  const CudaHostPlaneDesc &host = mirror.host.planes[0];
+  if (host.width != frame.width || host.height != frame.height || host.bitDepth != frame.bitDepth
+      || host.elementSize != frame.elementSize || host.data == nullptr || host.strideBytes <= 0
+      || (runDbf && dbfTaskCount != 0
+          && (host.marginLeft < 8 || host.marginRight < 8 || host.marginTop < 8 || host.marginBottom < 8)))
+    return reject();
+
+  const auto integrationStart = std::chrono::steady_clock::now();
+  const CudaMirrorMemoryUsage before = m_impl->mirrorMemory.total;
+  const std::uint64_t mirrorSyncBefore = m_impl->mirrorSynchronizationOperations;
+  try
+  {
+    ensureDevicePlane(reconstructionHandle, 0);
+    cuda_backend::waitFence(m_impl->runtime, CudaQueue::Dbf, CudaFence::UploadComplete);
+    const LoopFilterChainAccelerationStats runtimeBefore = cuda_backend::loopFilterChainStats(m_impl->runtime);
+    cuda_backend::filterLoopFilterChain(m_impl->runtime, mirror.planes[0].device, frame, lmcsLut,
+                                         dbfTasks, dbfTaskCount, saoCtus, saoCtuCount,
+                                         alfFrame, alfCtus, alfCtuCount);
+    const LoopFilterChainAccelerationStats runtimeAfter = cuda_backend::loopFilterChainStats(m_impl->runtime);
+    mirror.planes[0].state = CudaMirrorState::DeviceValid;
+    mirror.planes[0].uploadPending = false;
+#if VTM_CUDA_TESTING
+    if (m_impl->loopFilterChainIntegrationFailure == CudaLoopFilterChainTestFailurePoint::Download
+        || m_impl->loopFilterChainIntegrationFailure == CudaLoopFilterChainTestFailurePoint::Commit)
+    {
+      const CudaLoopFilterChainTestFailurePoint point = m_impl->loopFilterChainIntegrationFailure;
+      m_impl->loopFilterChainIntegrationFailure = CudaLoopFilterChainTestFailurePoint::None;
+      throw std::runtime_error(point == CudaLoopFilterChainTestFailurePoint::Download
+                                 ? "Injected CUDA loop-filter chain download failure"
+                                 : "Injected CUDA loop-filter chain commit failure");
+    }
+#endif
+    ensureHostPlane(reconstructionHandle, 0);
+    const CudaMirrorMemoryUsage after = m_impl->mirrorMemory.total;
+    m_impl->loopFilterChainMirrorUploadBytes += after.uploadedBytes - before.uploadedBytes;
+    m_impl->loopFilterChainMirrorDownloadBytes += after.downloadedBytes - before.downloadedBytes;
+    m_impl->loopFilterChainIntegrationSynchronizations +=
+      runtimeAfter.runtimeSynchronizations - runtimeBefore.runtimeSynchronizations
+      + (m_impl->mirrorSynchronizationOperations - mirrorSyncBefore) + 1;
+    m_impl->loopFilterChainIntegrationNanoseconds += static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - integrationStart).count());
+    return CudaLoopFilterChainDispatchResult::Executed;
+  }
+  catch (const std::exception &error)
+  {
+    ++m_impl->loopFilterChainFailures;
+    m_impl->loopFilterChainAccelerationEnabled = false;
+    recoverAndQuarantineLoopFilterChainNoexcept(m_impl.get(), reconstructionHandle);
+    throw std::runtime_error(std::string("CUDA loop-filter chain execution failed after selection: ") + error.what());
+  }
+  catch (...)
+  {
+    ++m_impl->loopFilterChainFailures;
+    m_impl->loopFilterChainAccelerationEnabled = false;
+    recoverAndQuarantineLoopFilterChainNoexcept(m_impl.get(), reconstructionHandle);
+    throw std::runtime_error("CUDA loop-filter chain execution failed after selection: unknown error");
+  }
+#else
+  (void) reconstructionHandle; (void) frame; (void) lmcsLut; (void) dbfTasks; (void) dbfTaskCount;
+  (void) saoCtus; (void) saoCtuCount; (void) alfFrame; (void) alfCtus; (void) alfCtuCount;
+  return CudaLoopFilterChainDispatchResult::NotEligible;
+#endif
+}
+
+LoopFilterChainAccelerationStats CudaContext::loopFilterChainStats() const noexcept
+{
+  LoopFilterChainAccelerationStats stats{};
+#if VTM_ENABLE_CUDA
+  stats = cuda_backend::loopFilterChainStats(m_impl->runtime);
+  stats.mirrorUploadBytes = m_impl->loopFilterChainMirrorUploadBytes;
+  stats.mirrorDownloadBytes = m_impl->loopFilterChainMirrorDownloadBytes;
+  stats.integrationSynchronizations = m_impl->loopFilterChainIntegrationSynchronizations;
+  stats.collectionNanoseconds = m_impl->loopFilterChainCollectionNanoseconds;
+  stats.integrationNanoseconds = m_impl->loopFilterChainIntegrationNanoseconds;
+  stats.failures = m_impl->loopFilterChainFailures;
+  stats.notEligible = m_impl->loopFilterChainNotEligible;
+  stats.enabled = m_impl->runtime != nullptr && m_impl->loopFilterChainAccelerationEnabled;
+  stats.poisoned = m_impl->runtime != nullptr && !m_impl->loopFilterChainAccelerationEnabled;
+#endif
+  return stats;
+}
+
+void CudaContext::recordLoopFilterChainCollection(const std::uint64_t nanoseconds) noexcept
+{
+#if VTM_ENABLE_CUDA
+  m_impl->loopFilterChainCollectionNanoseconds += nanoseconds;
+#else
+  (void) nanoseconds;
+#endif
+}
+
 bool CudaContext::computeQpaBatch(const CudaMirrorHandle sourceHandle, const CudaQpaTask *tasks,
                                   const std::uint32_t taskCount, CudaQpaResult *results)
 {
@@ -2580,6 +2830,21 @@ void CudaContext::injectDbfFailureForTesting(const CudaDbfTestFailurePoint failu
 #if VTM_ENABLE_CUDA
   requireRuntime(m_impl.get());
   cuda_backend::injectDbfFailure(m_impl->runtime, failurePoint);
+#else
+  (void) failurePoint;
+#endif
+}
+
+void CudaContext::injectLoopFilterChainFailureForTesting(
+  const CudaLoopFilterChainTestFailurePoint failurePoint)
+{
+#if VTM_ENABLE_CUDA
+  requireRuntime(m_impl.get());
+  if (failurePoint == CudaLoopFilterChainTestFailurePoint::Download
+      || failurePoint == CudaLoopFilterChainTestFailurePoint::Commit)
+    m_impl->loopFilterChainIntegrationFailure = failurePoint;
+  else
+    cuda_backend::injectLoopFilterChainFailure(m_impl->runtime, failurePoint);
 #else
   (void) failurePoint;
 #endif

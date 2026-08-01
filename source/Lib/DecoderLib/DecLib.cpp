@@ -722,6 +722,13 @@ vtm::DbfAccelerationStats DecLib::dbfAccelerationStats() const
   return stats;
 }
 
+vtm::LoopFilterChainAccelerationStats DecLib::loopFilterChainAccelerationStats() const
+{
+  vtm::LoopFilterChainAccelerationStats stats = m_computeState->cudaContext.loopFilterChainStats();
+  if (!m_computeState->config.enableExperimentalLoopFilterChain) stats.enabled = false;
+  return stats;
+}
+
 void DecLib::init(
 #if JVET_J0090_MEMORY_BANDWITH_MEASURE
   const std::string& cacheCfgFileName
@@ -945,6 +952,149 @@ void DecLib::executeLoopFilters()
   m_pcPic->cs->slice->startProcessingTimer();
 
   CodingStructure& cs = *m_pcPic->cs;
+
+  const PreCalcValues &chainPcv = *cs.pcv;
+  const std::uint64_t chainPixels = std::uint64_t(chainPcv.lumaWidth) * chainPcv.lumaHeight;
+  const bool chainLmcs = cs.sps->getUseLmcs() && cs.picHeader->getLmcsEnabledFlag();
+  const bool chainDbf = !cs.slice->getDeblockingFilterDisable();
+  const bool chainSao = cs.sps->getSAOEnabledFlag();
+  const bool chainAlf = cs.sps->getALFEnabledFlag() && cs.slice->getAlfEnabledFlag(COMPONENT_Y);
+  const bool chainCcAlf = cs.slice->m_ccAlfFilterParam.ccAlfFilterEnabled[0]
+                          || cs.slice->m_ccAlfFilterParam.ccAlfFilterEnabled[1];
+  const bool cudaChainEligible = m_computeState->config.backend == vtm::ComputeBackend::CUDA
+    && m_computeState->config.enableExperimentalLoopFilterChain
+    && m_computeState->cudaContext.isLoopFilterChainAccelerationAvailable()
+    && (chainLmcs || chainDbf || chainSao || chainAlf)
+    && cs.sps->getChromaFormatIdc() == ChromaFormat::_420
+    && (cs.sps->getBitDepth(ChannelType::LUMA) == 8 || cs.sps->getBitDepth(ChannelType::LUMA) == 10)
+    && cs.sps->getBitDepth(ChannelType::CHROMA) == cs.sps->getBitDepth(ChannelType::LUMA)
+    && (sizeof(Pel) == 2 || sizeof(Pel) == 4)
+    && chainPixels >= vtm::CUDA_LOOP_FILTER_CHAIN_MIN_FRAME_PIXELS
+    && chainPcv.sizeInCtus != 0 && chainPcv.sizeInCtus <= vtm::CUDA_LOOP_FILTER_CHAIN_MAX_CTUS
+    && cs.pps->getNumTiles() == 1 && cs.pps->getNumSubPics() == 1
+    && cs.pps->getNumSlicesInPic() == 1 && m_pcPic->numSlices == 1
+    && !cs.picHeader->getVirtualBoundariesPresentFlag() && !cs.sps->getLadfEnabled()
+    && !chainCcAlf
+    && (!chainAlf || ((chainPcv.lumaWidth & 3) == 0 && (chainPcv.lumaHeight & 3) == 0));
+
+  if (cudaChainEligible)
+  {
+    const auto collectionStart = std::chrono::steady_clock::now();
+    std::vector<std::int32_t> lmcsLut;
+    if (chainLmcs)
+    {
+      const std::vector<Pel> &sourceLut = m_cReshaper.getInvLUT();
+      CHECK(sourceLut.size() != (std::size_t{ 1 } << cs.sps->getBitDepth(ChannelType::LUMA)),
+            "CUDA loop-filter chain requires a complete inverse LMCS LUT");
+      lmcsLut.assign(sourceLut.begin(), sourceLut.end());
+      m_cSAO.setReshaper(&m_cReshaper);
+    }
+
+    std::vector<vtm::CudaDbfLumaTask> dbfTasks;
+    if (chainDbf)
+    {
+      dbfTasks.reserve(static_cast<std::size_t>(std::min<std::uint64_t>(chainPixels / 4,
+                                                                        vtm::CUDA_DBF_MAX_TASKS)));
+      m_deblockingFilter.deblockingFilterPic(cs, &dbfTasks);
+    }
+    CS::setRefinedMotionField(cs);
+
+    std::vector<vtm::CudaSaoLumaCtuParam> saoCtus;
+    if (chainSao)
+    {
+      m_cSAO.SAOProcess(cs, cs.picture->getSAO(), &saoCtus);
+    }
+
+    std::vector<vtm::CudaAlfCtuParam> alfCtus;
+    vtm::CudaAlfLumaFrame alfFrame{};
+    if (chainAlf)
+    {
+      m_cALF.getCcAlfFilterParam() = cs.slice->m_ccAlfFilterParam;
+      m_cALF.prepareLumaParameters(cs);
+      alfCtus.resize(chainPcv.sizeInCtus);
+      for (std::uint32_t ctu = 0; ctu < chainPcv.sizeInCtus; ++ctu)
+      {
+        vtm::CudaAlfCtuParam &dst = alfCtus[ctu];
+        dst.x = (ctu % chainPcv.widthInCtus) * chainPcv.maxCUWidth;
+        dst.y = (ctu / chainPcv.widthInCtus) * chainPcv.maxCUHeight;
+        dst.width = std::min<std::uint32_t>(chainPcv.maxCUWidth, chainPcv.lumaWidth - dst.x);
+        dst.height = std::min<std::uint32_t>(chainPcv.maxCUHeight, chainPcv.lumaHeight - dst.y);
+        const AlfMode mode = m_cALF.getLumaMode(ctu);
+        dst.enabled = mode != AlfMode::OFF;
+        if (!dst.enabled) continue;
+        const AlfCoeff *coeff = m_cALF.getLumaCoeff(mode);
+        const Pel *clip = m_cALF.getLumaClip(mode);
+        for (std::uint32_t i = 0; i < vtm::CUDA_ALF_CLASSES * vtm::CUDA_ALF_COEFFICIENTS; ++i)
+        {
+          dst.coefficients[i] = coeff[i];
+          dst.clipValues[i] = clip[i];
+        }
+      }
+      const ClpRng &range = m_cALF.getLumaClpRng();
+      alfFrame.width = chainPcv.lumaWidth;
+      alfFrame.height = chainPcv.lumaHeight;
+      alfFrame.ctuWidth = chainPcv.maxCUWidth;
+      alfFrame.ctuHeight = chainPcv.maxCUHeight;
+      alfFrame.ctusInWidth = chainPcv.widthInCtus;
+      alfFrame.ctusInHeight = chainPcv.heightInCtus;
+      alfFrame.minSample = range.min;
+      alfFrame.maxSample = range.max;
+      alfFrame.vbCtuHeight = m_cALF.getLumaVbCtuHeight();
+      alfFrame.vbPos = m_cALF.getLumaVbPos();
+      alfFrame.bitDepth = static_cast<std::uint8_t>(range.bd);
+      alfFrame.elementSize = sizeof(Pel);
+    }
+
+    m_computeState->cudaContext.recordLoopFilterChainCollection(static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - collectionStart).count()));
+    vtm::CudaLoopFilterChainFrame frame{};
+    frame.width = chainPcv.lumaWidth;
+    frame.height = chainPcv.lumaHeight;
+    frame.ctuWidth = chainPcv.maxCUWidth;
+    frame.ctuHeight = chainPcv.maxCUHeight;
+    frame.ctusInWidth = chainPcv.widthInCtus;
+    frame.ctusInHeight = chainPcv.heightInCtus;
+    frame.ctuCount = chainPcv.sizeInCtus;
+    frame.lmcsLutSize = chainLmcs ? static_cast<std::uint32_t>(lmcsLut.size()) : 0;
+    frame.minSample = 0;
+    frame.maxSample = (std::int32_t{ 1 } << cs.sps->getBitDepth(ChannelType::LUMA)) - 1;
+    frame.bitDepth = static_cast<std::uint8_t>(cs.sps->getBitDepth(ChannelType::LUMA));
+    frame.elementSize = sizeof(Pel);
+    frame.stages = (chainLmcs ? vtm::CUDA_LOOP_FILTER_LMCS : 0)
+                   | (chainDbf ? vtm::CUDA_LOOP_FILTER_DBF : 0)
+                   | (chainSao ? vtm::CUDA_LOOP_FILTER_SAO : 0)
+                   | (chainAlf ? vtm::CUDA_LOOP_FILTER_ALF : 0);
+
+    const vtm::CudaMirrorHandle mirror = m_computeState->cudaContext.pictureMirrorHandle(
+      m_pcPic, vtm::CudaPictureRole::Reconstruction);
+    m_computeState->cudaContext.markHostPlaneModified(mirror, 0);
+    const vtm::CudaLoopFilterChainDispatchResult dispatch =
+      m_computeState->cudaContext.filterLoopFilterChain(
+        mirror, frame, chainLmcs ? lmcsLut.data() : nullptr,
+        dbfTasks.empty() ? nullptr : dbfTasks.data(), static_cast<std::uint32_t>(dbfTasks.size()),
+        chainSao ? saoCtus.data() : nullptr, chainSao ? static_cast<std::uint32_t>(saoCtus.size()) : 0,
+        chainAlf ? &alfFrame : nullptr, chainAlf ? alfCtus.data() : nullptr,
+        chainAlf ? static_cast<std::uint32_t>(alfCtus.size()) : 0);
+    CHECK(dispatch == vtm::CudaLoopFilterChainDispatchResult::NotEligible,
+          "CUDA loop-filter chain rejected CPU-validated descriptors after selection");
+    if (chainLmcs) m_cReshaper.setRecReshaped(false);
+
+    const bool chromaAlf = cs.sps->getALFEnabledFlag()
+      && (cs.slice->getAlfEnabledFlag(COMPONENT_Cb) || cs.slice->getAlfEnabledFlag(COMPONENT_Cr));
+    if (chromaAlf) m_cALF.ALFProcess(cs, false, true);
+    if (isChromaEnabled(cs.sps->getChromaFormatIdc()))
+    {
+      m_computeState->cudaContext.markHostPlaneModified(mirror, 1);
+      m_computeState->cudaContext.markHostPlaneModified(mirror, 2);
+    }
+#if GREEN_METADATA_SEI_ENABLED
+    m_featureCounter.addSAO(cs.m_featureCounter);
+    m_featureCounter.addALF(cs.m_featureCounter);
+    m_featureCounter.addBoundaryStrengths(cs.m_featureCounter);
+#endif
+    m_pcPic->cs->slice->stopProcessingTimer();
+    return;
+  }
 
   if (cs.sps->getUseLmcs() && cs.picHeader->getLmcsEnabledFlag())
   {

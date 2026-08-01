@@ -74,14 +74,22 @@ void filterAlfLumaFrame(RuntimeContext *context, const CudaDevicePlaneDesc &plan
 void filterDbfLumaFrame(RuntimeContext *context, const CudaDevicePlaneDesc &plane,
                         const CudaDbfFrame &frame, const CudaDbfLumaTask *tasks,
                         std::uint32_t taskCount);
+void filterLoopFilterChain(RuntimeContext *context, const CudaDevicePlaneDesc &plane,
+                           const CudaLoopFilterChainFrame &frame, const std::int32_t *lmcsLut,
+                           const CudaDbfLumaTask *dbfTasks, std::uint32_t dbfTaskCount,
+                           const CudaSaoLumaCtuParam *saoCtus, std::uint32_t saoCtuCount,
+                           const CudaAlfLumaFrame *alfFrame, const CudaAlfCtuParam *alfCtus,
+                           std::uint32_t alfCtuCount);
 AlfAccelerationStats alfStats(const RuntimeContext *context) noexcept;
 DbfAccelerationStats dbfStats(const RuntimeContext *context) noexcept;
+LoopFilterChainAccelerationStats loopFilterChainStats(const RuntimeContext *context) noexcept;
 std::uint64_t qpaBatchDispatchCount(const RuntimeContext *context);
 std::uint64_t qpaTaskCount(const RuntimeContext *context);
 void recoverDistortionRuntime(RuntimeContext *context) noexcept;
 void recoverQpaRuntime(RuntimeContext *context) noexcept;
 void recoverAlfRuntime(RuntimeContext *context) noexcept;
 void recoverDbfRuntime(RuntimeContext *context) noexcept;
+void recoverLoopFilterChainRuntime(RuntimeContext *context) noexcept;
 void injectReleaseFailures(RuntimeContext *context, unsigned asyncFailures, unsigned immediateFailures);
 void injectDistortionFailures(RuntimeContext *context, unsigned allocationFailureStep, unsigned executionFailures);
 void injectQpaFailures(RuntimeContext *context, unsigned allocationFailureStep, unsigned executionFailures);
@@ -89,6 +97,7 @@ void injectDistortionFailurePoint(RuntimeContext *context, CudaBatchTestFailureP
 void injectQpaFailurePoint(RuntimeContext *context, CudaBatchTestFailurePoint failurePoint);
 void injectAlfFailure(RuntimeContext *context, CudaAlfTestFailurePoint failurePoint);
 void injectDbfFailure(RuntimeContext *context, CudaDbfTestFailurePoint failurePoint);
+void injectLoopFilterChainFailure(RuntimeContext *context, CudaLoopFilterChainTestFailurePoint failurePoint);
 void injectPinnedReleaseFailures(unsigned failures);
 std::uint64_t dbfLiveDeviceAllocationsForTesting() noexcept;
 std::uint64_t dbfLivePinnedAllocationsForTesting() noexcept;

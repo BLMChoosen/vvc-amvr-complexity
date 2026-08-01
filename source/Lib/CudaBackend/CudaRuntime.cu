@@ -72,6 +72,18 @@ struct DbfScratch
   std::size_t outputCapacity = 0;
 };
 
+struct LoopFilterChainScratch
+{
+  std::int32_t *lmcsLutDevice = nullptr;
+  std::int32_t *lmcsLutHost = nullptr;
+  CudaSaoLumaCtuParam *saoCtusDevice = nullptr;
+  CudaSaoLumaCtuParam *saoCtusHost = nullptr;
+  void *saoOutputDevice = nullptr;
+  std::size_t lutCapacity = 0;
+  std::size_t saoCtuCapacity = 0;
+  std::size_t outputCapacity = 0;
+};
+
 struct RuntimeContext
 {
   int                         device = -1;
@@ -112,6 +124,22 @@ struct RuntimeContext
   std::uint64_t              dbfSynchronizations = 0;
   std::uint64_t              dbfElapsedNanoseconds = 0;
   std::uint64_t              dbfPeakScratchBytes = 0;
+  LoopFilterChainScratch     chainScratch{};
+  LoopFilterChainScratch     chainRetiredScratch{};
+  std::uint64_t              chainDispatches = 0;
+  std::uint64_t              chainPixels = 0;
+  std::uint64_t              chainDbfTasks = 0;
+  std::uint64_t              chainSaoCtus = 0;
+  std::uint64_t              chainAlfCtus = 0;
+  std::uint64_t              chainParameterUploadBytes = 0;
+  std::uint64_t              chainInternalCopyBytes = 0;
+  std::uint64_t              chainSynchronizations = 0;
+  std::uint64_t              chainLmcsNanoseconds = 0;
+  std::uint64_t              chainDbfNanoseconds = 0;
+  std::uint64_t              chainSaoNanoseconds = 0;
+  std::uint64_t              chainAlfNanoseconds = 0;
+  std::uint64_t              chainElapsedNanoseconds = 0;
+  std::uint64_t              chainPeakScratchBytes = 0;
   CudaBatchTestFailurePoint   distortionFailurePoint = CudaBatchTestFailurePoint::None;
   CudaBatchTestFailurePoint   qpaFailurePoint = CudaBatchTestFailurePoint::None;
 #if VTM_CUDA_TESTING
@@ -123,6 +151,7 @@ struct RuntimeContext
   unsigned                    qpaExecutionFailures = 0;
   CudaAlfTestFailurePoint     alfFailurePoint = CudaAlfTestFailurePoint::None;
   CudaDbfTestFailurePoint     dbfFailurePoint = CudaDbfTestFailurePoint::None;
+  CudaLoopFilterChainTestFailurePoint chainFailurePoint = CudaLoopFilterChainTestFailurePoint::None;
 #endif
 };
 
@@ -173,6 +202,17 @@ std::uint64_t dbfScratchBytes(const DbfScratch &scratch) noexcept
   if (scratch.laneOffsetsDevice != nullptr) bytes += (scratch.laneCapacity + 1) * sizeof(std::uint32_t);
   if (scratch.laneOffsetsHost != nullptr) bytes += (scratch.laneCapacity + 1) * sizeof(std::uint32_t);
   if (scratch.outputDevice != nullptr) bytes += scratch.outputCapacity;
+  return bytes;
+}
+
+std::uint64_t chainScratchBytes(const LoopFilterChainScratch &scratch) noexcept
+{
+  std::uint64_t bytes = 0;
+  if (scratch.lmcsLutDevice != nullptr) bytes += scratch.lutCapacity * sizeof(std::int32_t);
+  if (scratch.lmcsLutHost != nullptr) bytes += scratch.lutCapacity * sizeof(std::int32_t);
+  if (scratch.saoCtusDevice != nullptr) bytes += scratch.saoCtuCapacity * sizeof(CudaSaoLumaCtuParam);
+  if (scratch.saoCtusHost != nullptr) bytes += scratch.saoCtuCapacity * sizeof(CudaSaoLumaCtuParam);
+  if (scratch.saoOutputDevice != nullptr) bytes += scratch.outputCapacity;
   return bytes;
 }
 
@@ -253,6 +293,13 @@ bool isEmpty(const DbfScratch &scratch) noexcept
          && scratch.outputDevice == nullptr;
 }
 
+bool isEmpty(const LoopFilterChainScratch &scratch) noexcept
+{
+  return scratch.lmcsLutDevice == nullptr && scratch.lmcsLutHost == nullptr
+         && scratch.saoCtusDevice == nullptr && scratch.saoCtusHost == nullptr
+         && scratch.saoOutputDevice == nullptr;
+}
+
 #if VTM_CUDA_TESTING
 bool consumeAlfFailure(RuntimeContext *context, const CudaAlfTestFailurePoint point) noexcept
 {
@@ -295,6 +342,17 @@ bool isDbfRecoveryReleaseFailure(const CudaDbfTestFailurePoint point) noexcept
 #else
 bool consumeDbfFailure(RuntimeContext *, CudaDbfTestFailurePoint) noexcept { return false; }
 bool isDbfRecoveryReleaseFailure(CudaDbfTestFailurePoint) noexcept { return false; }
+#endif
+
+#if VTM_CUDA_TESTING
+bool consumeChainFailure(RuntimeContext *context, const CudaLoopFilterChainTestFailurePoint point) noexcept
+{
+  if (context->chainFailurePoint != point) return false;
+  context->chainFailurePoint = CudaLoopFilterChainTestFailurePoint::None;
+  return true;
+}
+#else
+bool consumeChainFailure(RuntimeContext *, CudaLoopFilterChainTestFailurePoint) noexcept { return false; }
 #endif
 
 std::size_t queueIndex(const CudaQueue queue)
@@ -391,6 +449,20 @@ void releaseRuntimeContext(RuntimeContext *context, const bool checked, const bo
       }
     }
   }
+  for (LoopFilterChainScratch *scratch : { &context->chainScratch, &context->chainRetiredScratch })
+  {
+    for (void **allocation : { reinterpret_cast<void **>(&scratch->lmcsLutDevice),
+                               reinterpret_cast<void **>(&scratch->saoCtusDevice),
+                               &scratch->saoOutputDevice })
+    {
+      if (*allocation != nullptr)
+      {
+        const cudaError_t result = cudaFreeAsync(*allocation, context->streams[queueIndex(CudaQueue::Dbf)]);
+        rememberCudaError(firstError, firstOperation, result, "loop-filter chain scratch release");
+        if (result == cudaSuccess) *allocation = nullptr;
+      }
+    }
+  }
   for (cudaStream_t stream : context->streams)
   {
     if (synchronize && stream != nullptr)
@@ -459,6 +531,30 @@ void releaseRuntimeContext(RuntimeContext *context, const bool checked, const bo
       {
         const cudaError_t result = releaseDbfPinned(*allocation);
         rememberCudaError(firstError, firstOperation, result, "pinned DBF scratch release");
+      }
+    }
+  }
+  for (LoopFilterChainScratch *scratch : { &context->chainScratch, &context->chainRetiredScratch })
+  {
+    for (void **allocation : { reinterpret_cast<void **>(&scratch->lmcsLutDevice),
+                               reinterpret_cast<void **>(&scratch->saoCtusDevice),
+                               &scratch->saoOutputDevice })
+    {
+      if (*allocation != nullptr)
+      {
+        const cudaError_t result = cudaFree(*allocation);
+        rememberCudaError(firstError, firstOperation, result, "loop-filter chain scratch immediate release");
+        if (result == cudaSuccess) *allocation = nullptr;
+      }
+    }
+    for (void **allocation : { reinterpret_cast<void **>(&scratch->lmcsLutHost),
+                               reinterpret_cast<void **>(&scratch->saoCtusHost) })
+    {
+      if (*allocation != nullptr)
+      {
+        const cudaError_t result = cudaFreeHost(*allocation);
+        rememberCudaError(firstError, firstOperation, result, "pinned loop-filter chain scratch release");
+        if (result == cudaSuccess) *allocation = nullptr;
       }
     }
   }
@@ -886,6 +982,115 @@ void ensureDbfCapacity(RuntimeContext *context, const std::size_t tasks, const s
   releaseDbfScratchChecked(context, context->dbfRetiredScratch, stream);
 }
 
+void releaseChainScratchChecked(RuntimeContext *context, LoopFilterChainScratch &scratch,
+                                const cudaStream_t stream)
+{
+  if (isEmpty(scratch))
+  {
+    scratch = LoopFilterChainScratch{};
+    return;
+  }
+  if (consumeChainFailure(context, CudaLoopFilterChainTestFailurePoint::OldDeviceRelease))
+    throw std::runtime_error("Injected CUDA loop-filter chain old device release failure");
+  for (void **allocation : { reinterpret_cast<void **>(&scratch.lmcsLutDevice),
+                             reinterpret_cast<void **>(&scratch.saoCtusDevice),
+                             &scratch.saoOutputDevice })
+  {
+    if (*allocation != nullptr)
+    {
+      checkCuda(cudaFreeAsync(*allocation, stream), "old loop-filter chain device scratch release");
+      *allocation = nullptr;
+    }
+  }
+  checkCuda(cudaStreamSynchronize(stream), "old loop-filter chain scratch release completion");
+  ++context->chainSynchronizations;
+  if (consumeChainFailure(context, CudaLoopFilterChainTestFailurePoint::OldPinnedRelease))
+    throw std::runtime_error("Injected CUDA loop-filter chain old pinned release failure");
+  for (void **allocation : { reinterpret_cast<void **>(&scratch.lmcsLutHost),
+                             reinterpret_cast<void **>(&scratch.saoCtusHost) })
+  {
+    if (*allocation != nullptr)
+    {
+      checkCuda(cudaFreeHost(*allocation), "old pinned loop-filter chain scratch release");
+      *allocation = nullptr;
+    }
+  }
+  scratch = LoopFilterChainScratch{};
+}
+
+void ensureChainCapacity(RuntimeContext *context, const std::size_t lutCount,
+                         const std::size_t saoCtuCount, const std::size_t outputBytes)
+{
+  LoopFilterChainScratch &current = context->chainScratch;
+  if (lutCount <= current.lutCapacity && saoCtuCount <= current.saoCtuCapacity
+      && outputBytes <= current.outputCapacity)
+    return;
+  if (!isEmpty(context->chainRetiredScratch))
+    throw std::runtime_error("CUDA loop-filter chain retired scratch was not recovered before growth");
+  constexpr std::size_t budget = std::size_t{ 256 } * 1024 * 1024;
+  const std::size_t lutBytes = lutCount * sizeof(std::int32_t);
+  const std::size_t saoBytes = saoCtuCount * sizeof(CudaSaoLumaCtuParam);
+  const std::size_t requested = 2 * lutBytes + 2 * saoBytes + outputBytes;
+  if (lutCount > CUDA_LOOP_FILTER_CHAIN_MAX_LMCS_LUT
+      || saoCtuCount > CUDA_LOOP_FILTER_CHAIN_MAX_CTUS || requested > budget
+      || chainScratchBytes(current) > budget - requested)
+    throw std::runtime_error("CUDA loop-filter chain scratch budget exceeded");
+
+  cudaStream_t stream = context->streams[queueIndex(CudaQueue::Dbf)];
+  checkCuda(cudaStreamSynchronize(stream), "loop-filter chain scratch synchronization");
+  ++context->chainSynchronizations;
+  LoopFilterChainScratch candidate{};
+  candidate.lutCapacity = lutCount;
+  candidate.saoCtuCapacity = saoCtuCount;
+  candidate.outputCapacity = outputBytes;
+  try
+  {
+    if (lutBytes != 0)
+    {
+      if (consumeChainFailure(context, CudaLoopFilterChainTestFailurePoint::GrowLutDevice))
+        throw std::runtime_error("Injected CUDA loop-filter chain LUT device allocation failure");
+      checkCuda(cudaMallocFromPoolAsync(reinterpret_cast<void **>(&candidate.lmcsLutDevice), lutBytes,
+                                        context->memoryPool, stream), "loop-filter chain LUT allocation");
+      if (consumeChainFailure(context, CudaLoopFilterChainTestFailurePoint::GrowLutPinned))
+        throw std::runtime_error("Injected CUDA loop-filter chain LUT pinned allocation failure");
+      checkCuda(cudaHostAlloc(reinterpret_cast<void **>(&candidate.lmcsLutHost), lutBytes,
+                              cudaHostAllocPortable), "pinned loop-filter chain LUT allocation");
+    }
+    if (saoBytes != 0)
+    {
+      if (consumeChainFailure(context, CudaLoopFilterChainTestFailurePoint::GrowSaoDevice))
+        throw std::runtime_error("Injected CUDA loop-filter chain SAO device allocation failure");
+      checkCuda(cudaMallocFromPoolAsync(reinterpret_cast<void **>(&candidate.saoCtusDevice), saoBytes,
+                                        context->memoryPool, stream), "loop-filter chain SAO allocation");
+      if (consumeChainFailure(context, CudaLoopFilterChainTestFailurePoint::GrowSaoPinned))
+        throw std::runtime_error("Injected CUDA loop-filter chain SAO pinned allocation failure");
+      checkCuda(cudaHostAlloc(reinterpret_cast<void **>(&candidate.saoCtusHost), saoBytes,
+                              cudaHostAllocPortable), "pinned loop-filter chain SAO allocation");
+    }
+    if (outputBytes != 0)
+    {
+      if (consumeChainFailure(context, CudaLoopFilterChainTestFailurePoint::GrowSaoOutput))
+        throw std::runtime_error("Injected CUDA loop-filter chain SAO output allocation failure");
+      checkCuda(cudaMallocFromPoolAsync(&candidate.saoOutputDevice, outputBytes, context->memoryPool, stream),
+                "loop-filter chain SAO output allocation");
+    }
+    checkCuda(cudaStreamSynchronize(stream), "loop-filter chain scratch allocation completion");
+    ++context->chainSynchronizations;
+  }
+  catch (...)
+  {
+    context->chainRetiredScratch = candidate;
+    context->chainPeakScratchBytes = std::max(context->chainPeakScratchBytes,
+      chainScratchBytes(current) + chainScratchBytes(context->chainRetiredScratch));
+    throw;
+  }
+  std::swap(current, candidate);
+  context->chainRetiredScratch = candidate;
+  context->chainPeakScratchBytes = std::max(context->chainPeakScratchBytes,
+    chainScratchBytes(current) + chainScratchBytes(context->chainRetiredScratch));
+  releaseChainScratchChecked(context, context->chainRetiredScratch, stream);
+}
+
 __device__ __forceinline__ int dbfAbs(const int x) { return x < 0 ? -x : x; }
 __device__ __forceinline__ int dbfClip(const int lo, const int hi, const int x)
 {
@@ -1111,6 +1316,77 @@ __global__ void dbfLaneKernel(Sample *base, const std::size_t pitchBytes,
   if(lane>=lanes)return;
   const std::size_t stride=pitchBytes/sizeof(Sample);
   for(std::uint32_t i=offsets[lane];i<offsets[lane+1];++i) dbfApplyTask(base,stride,tasks[i]);
+}
+
+template<typename Sample>
+__global__ void inverseLmcsKernel(Sample *base, const std::size_t pitchBytes,
+                                  const std::uint32_t width, const std::uint32_t height,
+                                  const std::int32_t *lut, const std::uint32_t lutSize)
+{
+  const std::uint32_t x = blockIdx.x * blockDim.x + threadIdx.x;
+  const std::uint32_t y = blockIdx.y * blockDim.y + threadIdx.y;
+  if (x >= width || y >= height) return;
+  const std::size_t stride = pitchBytes / sizeof(Sample);
+  Sample &sample = base[std::size_t(y) * stride + x];
+  const std::uint32_t index = static_cast<std::uint32_t>(sample);
+  if (index < lutSize) sample = static_cast<Sample>(lut[index]);
+}
+
+__device__ __forceinline__ int saoSign(const int value)
+{
+  return (value > 0) - (value < 0);
+}
+
+template<typename Sample>
+__global__ void saoLumaKernel(const Sample *source, const std::size_t sourcePitchBytes,
+                              Sample *destination, const std::size_t destinationPitchBytes,
+                              const CudaLoopFilterChainFrame frame,
+                              const CudaSaoLumaCtuParam *ctus)
+{
+  const std::uint32_t x = blockIdx.x * blockDim.x + threadIdx.x;
+  const std::uint32_t y = blockIdx.y * blockDim.y + threadIdx.y;
+  if (x >= frame.width || y >= frame.height) return;
+  const std::size_t sourceStride = sourcePitchBytes / sizeof(Sample);
+  const std::size_t destinationStride = destinationPitchBytes / sizeof(Sample);
+  const int current = int(source[std::size_t(y) * sourceStride + x]);
+  int value = current;
+  const std::uint32_t ctuX = x / frame.ctuWidth;
+  const std::uint32_t ctuY = y / frame.ctuHeight;
+  const CudaSaoLumaCtuParam &ctu = ctus[ctuY * frame.ctusInWidth + ctuX];
+  if (ctu.enabled != 0)
+  {
+    int offset = 0;
+    switch (ctu.type)
+    {
+    case 0: // EO_0
+      if (x > 0 && x + 1 < frame.width)
+        offset = ctu.offsets[saoSign(current - int(source[std::size_t(y) * sourceStride + x - 1]))
+                             + saoSign(current - int(source[std::size_t(y) * sourceStride + x + 1])) + 2];
+      break;
+    case 1: // EO_90
+      if (y > 0 && y + 1 < frame.height)
+        offset = ctu.offsets[saoSign(current - int(source[std::size_t(y - 1) * sourceStride + x]))
+                             + saoSign(current - int(source[std::size_t(y + 1) * sourceStride + x])) + 2];
+      break;
+    case 2: // EO_135
+      if (x > 0 && y > 0 && x + 1 < frame.width && y + 1 < frame.height)
+        offset = ctu.offsets[saoSign(current - int(source[std::size_t(y - 1) * sourceStride + x - 1]))
+                             + saoSign(current - int(source[std::size_t(y + 1) * sourceStride + x + 1])) + 2];
+      break;
+    case 3: // EO_45
+      if (x + 1 < frame.width && y > 0 && x > 0 && y + 1 < frame.height)
+        offset = ctu.offsets[saoSign(current - int(source[std::size_t(y - 1) * sourceStride + x + 1]))
+                             + saoSign(current - int(source[std::size_t(y + 1) * sourceStride + x - 1])) + 2];
+      break;
+    case 4: // BO
+      offset = ctu.offsets[static_cast<unsigned>(current) >> (frame.bitDepth - 5)];
+      break;
+    default:
+      break;
+    }
+    value = dbfClip(frame.minSample, frame.maxSample, current + offset);
+  }
+  destination[std::size_t(y) * destinationStride + x] = static_cast<Sample>(value);
 }
 
 template<typename Sample>
@@ -1956,6 +2232,139 @@ void filterDbfLumaFrame(RuntimeContext *context, const CudaDevicePlaneDesc &plan
     std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
 }
 
+void filterLoopFilterChain(RuntimeContext *context, const CudaDevicePlaneDesc &plane,
+                           const CudaLoopFilterChainFrame &frame, const std::int32_t *lmcsLut,
+                           const CudaDbfLumaTask *dbfTasks, const std::uint32_t dbfTaskCount,
+                           const CudaSaoLumaCtuParam *saoCtus, const std::uint32_t saoCtuCount,
+                           const CudaAlfLumaFrame *alfFrame, const CudaAlfCtuParam *alfCtus,
+                           const std::uint32_t alfCtuCount)
+{
+  const auto chainStart = std::chrono::steady_clock::now();
+  checkCuda(cudaSetDevice(context->device), "device selection");
+  const bool runLmcs = (frame.stages & CUDA_LOOP_FILTER_LMCS) != 0;
+  const bool runDbf = (frame.stages & CUDA_LOOP_FILTER_DBF) != 0 && dbfTaskCount != 0;
+  const bool runSao = (frame.stages & CUDA_LOOP_FILTER_SAO) != 0;
+  const bool runAlf = (frame.stages & CUDA_LOOP_FILTER_ALF) != 0 && alfCtuCount != 0;
+  const std::size_t rowBytes = std::size_t(frame.width) * frame.elementSize;
+  const std::size_t outputBytes = runSao ? rowBytes * frame.height : 0;
+  ensureChainCapacity(context, runLmcs ? frame.lmcsLutSize : 0, runSao ? saoCtuCount : 0, outputBytes);
+  LoopFilterChainScratch &scratch = context->chainScratch;
+  cudaStream_t stream = context->streams[queueIndex(CudaQueue::Dbf)];
+
+  std::uint64_t uploaded = 0;
+  if (runLmcs)
+  {
+    const std::size_t lutBytes = std::size_t(frame.lmcsLutSize) * sizeof(std::int32_t);
+    std::memcpy(scratch.lmcsLutHost, lmcsLut, lutBytes);
+    if (consumeChainFailure(context, CudaLoopFilterChainTestFailurePoint::Upload))
+      throw std::runtime_error("Injected CUDA loop-filter chain upload failure");
+    checkCuda(cudaMemcpyAsync(scratch.lmcsLutDevice, scratch.lmcsLutHost, lutBytes,
+                              cudaMemcpyHostToDevice, stream), "loop-filter chain LMCS LUT upload");
+    uploaded += lutBytes;
+    if (consumeChainFailure(context, CudaLoopFilterChainTestFailurePoint::LmcsLaunch))
+      throw std::runtime_error("Injected CUDA loop-filter chain LMCS launch failure");
+    const auto stageStart = std::chrono::steady_clock::now();
+    const dim3 threads(32, 8);
+    const dim3 blocks((frame.width + threads.x - 1) / threads.x,
+                      (frame.height + threads.y - 1) / threads.y);
+    if (frame.elementSize == 2)
+      inverseLmcsKernel<std::int16_t><<<blocks, threads, 0, stream>>>(
+        static_cast<std::int16_t *>(plane.data), plane.pitchBytes, frame.width, frame.height,
+        scratch.lmcsLutDevice, frame.lmcsLutSize);
+    else
+      inverseLmcsKernel<std::int32_t><<<blocks, threads, 0, stream>>>(
+        static_cast<std::int32_t *>(plane.data), plane.pitchBytes, frame.width, frame.height,
+        scratch.lmcsLutDevice, frame.lmcsLutSize);
+    checkCuda(cudaGetLastError(), "loop-filter chain LMCS launch");
+    if (consumeChainFailure(context, CudaLoopFilterChainTestFailurePoint::LmcsCompletion))
+      throw std::runtime_error("Injected CUDA loop-filter chain LMCS completion failure");
+    checkCuda(cudaStreamSynchronize(stream), "loop-filter chain LMCS completion");
+    ++context->chainSynchronizations;
+    context->chainLmcsNanoseconds += static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - stageStart).count());
+  }
+
+  if (runDbf)
+  {
+    if (consumeChainFailure(context, CudaLoopFilterChainTestFailurePoint::DbfStage))
+      throw std::runtime_error("Injected CUDA loop-filter chain DBF stage failure");
+    const auto stageStart = std::chrono::steady_clock::now();
+    const DbfAccelerationStats before = dbfStats(context);
+    const CudaDbfFrame dbfFrame{ frame.width, frame.height, frame.bitDepth, frame.elementSize, { 0, 0 } };
+    filterDbfLumaFrame(context, plane, dbfFrame, dbfTasks, dbfTaskCount);
+    const DbfAccelerationStats after = dbfStats(context);
+    uploaded += after.parameterUploadBytes - before.parameterUploadBytes;
+    context->chainSynchronizations += after.runtimeSynchronizations - before.runtimeSynchronizations;
+    context->chainInternalCopyBytes += after.commitBytes - before.commitBytes;
+    context->chainDbfNanoseconds += static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - stageStart).count());
+  }
+
+  if (runSao)
+  {
+    const std::size_t saoBytes = std::size_t(saoCtuCount) * sizeof(CudaSaoLumaCtuParam);
+    std::memcpy(scratch.saoCtusHost, saoCtus, saoBytes);
+    if (consumeChainFailure(context, CudaLoopFilterChainTestFailurePoint::Upload))
+      throw std::runtime_error("Injected CUDA loop-filter chain upload failure");
+    checkCuda(cudaMemcpyAsync(scratch.saoCtusDevice, scratch.saoCtusHost, saoBytes,
+                              cudaMemcpyHostToDevice, stream), "loop-filter chain SAO parameter upload");
+    uploaded += saoBytes;
+    if (consumeChainFailure(context, CudaLoopFilterChainTestFailurePoint::SaoSnapshot))
+      throw std::runtime_error("Injected CUDA loop-filter chain SAO snapshot failure");
+    checkCuda(cudaMemcpy2DAsync(scratch.saoOutputDevice, rowBytes, plane.data, plane.pitchBytes,
+                                rowBytes, frame.height, cudaMemcpyDeviceToDevice, stream),
+              "loop-filter chain SAO snapshot");
+    if (consumeChainFailure(context, CudaLoopFilterChainTestFailurePoint::SaoLaunch))
+      throw std::runtime_error("Injected CUDA loop-filter chain SAO launch failure");
+    const auto stageStart = std::chrono::steady_clock::now();
+    const dim3 threads(32, 8);
+    const dim3 blocks((frame.width + threads.x - 1) / threads.x,
+                      (frame.height + threads.y - 1) / threads.y);
+    if (frame.elementSize == 2)
+      saoLumaKernel<std::int16_t><<<blocks, threads, 0, stream>>>(
+        static_cast<const std::int16_t *>(plane.data), plane.pitchBytes,
+        static_cast<std::int16_t *>(scratch.saoOutputDevice), rowBytes, frame, scratch.saoCtusDevice);
+    else
+      saoLumaKernel<std::int32_t><<<blocks, threads, 0, stream>>>(
+        static_cast<const std::int32_t *>(plane.data), plane.pitchBytes,
+        static_cast<std::int32_t *>(scratch.saoOutputDevice), rowBytes, frame, scratch.saoCtusDevice);
+    checkCuda(cudaGetLastError(), "loop-filter chain SAO launch");
+    if (consumeChainFailure(context, CudaLoopFilterChainTestFailurePoint::SaoCompletion))
+      throw std::runtime_error("Injected CUDA loop-filter chain SAO completion failure");
+    checkCuda(cudaMemcpy2DAsync(plane.data, plane.pitchBytes, scratch.saoOutputDevice, rowBytes,
+                                rowBytes, frame.height, cudaMemcpyDeviceToDevice, stream),
+              "loop-filter chain SAO commit");
+    checkCuda(cudaStreamSynchronize(stream), "loop-filter chain SAO completion");
+    ++context->chainSynchronizations;
+    context->chainInternalCopyBytes += 2 * outputBytes;
+    context->chainSaoNanoseconds += static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - stageStart).count());
+  }
+
+  if (runAlf)
+  {
+    if (consumeChainFailure(context, CudaLoopFilterChainTestFailurePoint::AlfStage))
+      throw std::runtime_error("Injected CUDA loop-filter chain ALF stage failure");
+    const auto stageStart = std::chrono::steady_clock::now();
+    const AlfAccelerationStats before = alfStats(context);
+    filterAlfLumaFrame(context, plane, *alfFrame, alfCtus, alfCtuCount, nullptr);
+    const AlfAccelerationStats after = alfStats(context);
+    uploaded += after.parameterUploadBytes - before.parameterUploadBytes;
+    context->chainSynchronizations += after.runtimeSynchronizations - before.runtimeSynchronizations;
+    context->chainInternalCopyBytes += after.commitBytes - before.commitBytes;
+    context->chainAlfNanoseconds += static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - stageStart).count());
+  }
+  ++context->chainDispatches;
+  context->chainPixels += std::uint64_t(frame.width) * frame.height;
+  context->chainDbfTasks += dbfTaskCount;
+  context->chainSaoCtus += runSao ? saoCtuCount : 0;
+  context->chainAlfCtus += runAlf ? alfCtuCount : 0;
+  context->chainParameterUploadBytes += uploaded;
+  context->chainElapsedNanoseconds += static_cast<std::uint64_t>(
+    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - chainStart).count());
+}
+
 std::uint64_t distortionBatchDispatchCount(const RuntimeContext *context)
 {
   return context->distortionDispatches;
@@ -2004,6 +2413,31 @@ DbfAccelerationStats dbfStats(const RuntimeContext *context) noexcept
   stats.scratchBytes = dbfScratchBytes(context->dbfScratch) + dbfScratchBytes(context->dbfRetiredScratch);
   stats.retiredScratchBytes = dbfScratchBytes(context->dbfRetiredScratch);
   stats.peakScratchBytes = context->dbfPeakScratchBytes;
+  stats.enabled = true;
+  return stats;
+}
+
+LoopFilterChainAccelerationStats loopFilterChainStats(const RuntimeContext *context) noexcept
+{
+  LoopFilterChainAccelerationStats stats{};
+  if (context == nullptr) return stats;
+  stats.dispatches = context->chainDispatches;
+  stats.pixels = context->chainPixels;
+  stats.dbfTasks = context->chainDbfTasks;
+  stats.saoCtus = context->chainSaoCtus;
+  stats.alfCtus = context->chainAlfCtus;
+  stats.parameterUploadBytes = context->chainParameterUploadBytes;
+  stats.internalCopyBytes = context->chainInternalCopyBytes;
+  stats.runtimeSynchronizations = context->chainSynchronizations;
+  stats.lmcsNanoseconds = context->chainLmcsNanoseconds;
+  stats.dbfNanoseconds = context->chainDbfNanoseconds;
+  stats.saoNanoseconds = context->chainSaoNanoseconds;
+  stats.alfNanoseconds = context->chainAlfNanoseconds;
+  stats.runtimeNanoseconds = context->chainElapsedNanoseconds;
+  stats.scratchBytes = chainScratchBytes(context->chainScratch)
+                       + chainScratchBytes(context->chainRetiredScratch);
+  stats.retiredScratchBytes = chainScratchBytes(context->chainRetiredScratch);
+  stats.peakScratchBytes = context->chainPeakScratchBytes;
   stats.enabled = true;
   return stats;
 }
@@ -2235,6 +2669,63 @@ void recoverDbfRuntime(RuntimeContext *context) noexcept
   (void) cudaStreamCreateWithFlags(&context->streams[index], cudaStreamNonBlocking);
 }
 
+void recoverLoopFilterChainRuntime(RuntimeContext *context) noexcept
+{
+  if (context == nullptr) return;
+  (void) cudaSetDevice(context->device);
+  const std::size_t index = queueIndex(CudaQueue::Dbf);
+  if (context->streams[index] != nullptr) (void) cudaStreamSynchronize(context->streams[index]);
+  for (LoopFilterChainScratch *scratch : { &context->chainScratch, &context->chainRetiredScratch })
+  {
+    bool deferDevice = consumeChainFailure(context, CudaLoopFilterChainTestFailurePoint::RecoveryDeviceRelease);
+    for (void **allocation : { reinterpret_cast<void **>(&scratch->lmcsLutDevice),
+                               reinterpret_cast<void **>(&scratch->saoCtusDevice),
+                               &scratch->saoOutputDevice })
+    {
+      if (*allocation == nullptr) continue;
+      if (deferDevice)
+      {
+        deferDevice = false;
+        continue;
+      }
+      if (context->streams[index] != nullptr
+          && cudaFreeAsync(*allocation, context->streams[index]) == cudaSuccess)
+        *allocation = nullptr;
+      else
+        (void) cudaGetLastError();
+    }
+  }
+  if (context->streams[index] != nullptr) (void) cudaStreamSynchronize(context->streams[index]);
+  for (LoopFilterChainScratch *scratch : { &context->chainScratch, &context->chainRetiredScratch })
+  {
+    for (void **allocation : { reinterpret_cast<void **>(&scratch->lmcsLutDevice),
+                               reinterpret_cast<void **>(&scratch->saoCtusDevice),
+                               &scratch->saoOutputDevice })
+    {
+      if (*allocation != nullptr && cudaFree(*allocation) == cudaSuccess) *allocation = nullptr;
+      else if (*allocation != nullptr) (void) cudaGetLastError();
+    }
+    bool deferPinned = consumeChainFailure(context, CudaLoopFilterChainTestFailurePoint::RecoveryPinnedRelease);
+    for (void **allocation : { reinterpret_cast<void **>(&scratch->lmcsLutHost),
+                               reinterpret_cast<void **>(&scratch->saoCtusHost) })
+    {
+      if (*allocation == nullptr) continue;
+      if (deferPinned)
+      {
+        deferPinned = false;
+        continue;
+      }
+      if (cudaFreeHost(*allocation) == cudaSuccess) *allocation = nullptr;
+      else (void) cudaGetLastError();
+    }
+    if (isEmpty(*scratch)) *scratch = LoopFilterChainScratch{};
+  }
+#if VTM_CUDA_TESTING
+  context->chainFailurePoint = CudaLoopFilterChainTestFailurePoint::None;
+#endif
+  (void) cudaGetLastError();
+}
+
 void injectReleaseFailures(RuntimeContext *context, const unsigned asyncFailures, const unsigned immediateFailures)
 {
 #if VTM_CUDA_TESTING
@@ -2307,6 +2798,17 @@ void injectDbfFailure(RuntimeContext *context, const CudaDbfTestFailurePoint fai
 {
 #if VTM_CUDA_TESTING
   context->dbfFailurePoint = failurePoint;
+#else
+  (void) context;
+  (void) failurePoint;
+#endif
+}
+
+void injectLoopFilterChainFailure(RuntimeContext *context,
+                                  const CudaLoopFilterChainTestFailurePoint failurePoint)
+{
+#if VTM_CUDA_TESTING
+  context->chainFailurePoint = failurePoint;
 #else
   (void) context;
   (void) failurePoint;

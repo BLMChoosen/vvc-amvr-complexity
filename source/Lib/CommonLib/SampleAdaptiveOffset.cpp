@@ -539,7 +539,7 @@ void SampleAdaptiveOffset::offsetBlock(const int channelBitDepth, const ClpRng &
 }
 
 void SampleAdaptiveOffset::offsetCTU(const UnitArea &area, const CPelUnitBuf &src, PelUnitBuf &res,
-                                     SAOBlkParam &saoblkParam, CodingStructure &cs)
+                                     SAOBlkParam &saoblkParam, CodingStructure &cs, const bool processLuma)
 {
   const uint32_t numberOfComponents = getNumberValidComponents( area.chromaFormat );
 
@@ -579,6 +579,10 @@ void SampleAdaptiveOffset::offsetCTU(const UnitArea &area, const CPelUnitBuf &sr
                                  numVerVirBndry, horVirBndryPos, verVirBndryPos, cs.picHeader);
   for(int compIdx = 0; compIdx < numberOfComponents; compIdx++)
   {
+    if (compIdx == COMPONENT_Y && !processLuma)
+    {
+      continue;
+    }
     const ComponentID compID = ComponentID(compIdx);
     const CompArea& compArea = area.block(compID);
     SAOOffset& ctbOffset     = saoblkParam[compIdx];
@@ -635,12 +639,18 @@ void SampleAdaptiveOffset::offsetCTU(const UnitArea &area, const CPelUnitBuf &sr
   } //compIdx
 }
 
-void SampleAdaptiveOffset::SAOProcess( CodingStructure& cs, SAOBlkParam* saoBlkParams
-                                      )
+void SampleAdaptiveOffset::SAOProcess(CodingStructure &cs, SAOBlkParam *saoBlkParams,
+                                      std::vector<vtm::CudaSaoLumaCtuParam> *cudaLumaCtus)
 {
   CHECK(!saoBlkParams, "No parameters present");
 
   xReconstructBlkSAOParams(cs, saoBlkParams);
+
+  if (cudaLumaCtus != nullptr)
+  {
+    cudaLumaCtus->clear();
+    cudaLumaCtus->reserve(cs.pcv->sizeInCtus);
+  }
 
   const uint32_t numberOfComponents = getNumberValidComponents(cs.area.chromaFormat);
 
@@ -670,7 +680,36 @@ void SampleAdaptiveOffset::SAOProcess( CodingStructure& cs, SAOBlkParam* saoBlkP
       const uint32_t height = (yPos + pcv.maxCUHeight > pcv.lumaHeight) ? (pcv.lumaHeight - yPos) : pcv.maxCUHeight;
       const UnitArea area( cs.area.chromaFormat, Area(xPos , yPos, width, height) );
 
-      offsetCTU(area, m_tempBuf, rec, cs.picture->getSAO()[ctuRsAddr], cs);
+      SAOBlkParam &ctuParam = cs.picture->getSAO()[ctuRsAddr];
+      if (cudaLumaCtus != nullptr)
+      {
+        const SAOOffset &luma = ctuParam[COMPONENT_Y];
+        vtm::CudaSaoLumaCtuParam task{};
+        task.x = xPos;
+        task.y = yPos;
+        task.width = width;
+        task.height = height;
+        task.enabled = luma.modeIdc != SAOMode::OFF;
+        task.type = task.enabled ? static_cast<std::int8_t>(luma.typeIdc.newType) : -1;
+        if (task.enabled)
+        {
+          std::copy_n(luma.offset, vtm::CUDA_SAO_NUM_OFFSETS, task.offsets);
+#if GREEN_METADATA_SEI_ENABLED
+          if (luma.typeIdc.newType == SAOModeNewTypes::BO)
+          {
+            cs.m_featureCounter.saoLumaBO++;
+            cs.m_featureCounter.saoLumaPels += area.lumaSize().width * area.lumaSize().height;
+          }
+          else
+          {
+            cs.m_featureCounter.saoLumaEO++;
+            cs.m_featureCounter.saoLumaPels += area.lumaSize().width * area.lumaSize().height;
+          }
+#endif
+        }
+        cudaLumaCtus->push_back(task);
+      }
+      offsetCTU(area, m_tempBuf, rec, ctuParam, cs, cudaLumaCtus == nullptr);
     }
   }
 

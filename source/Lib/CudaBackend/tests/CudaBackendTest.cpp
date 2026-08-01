@@ -35,6 +35,7 @@
 #include "CudaBackend/CudaContext.h"
 #include "CommonLib/AdaptiveLoopFilter.h"
 #include "CommonLib/DeblockingFilter.h"
+#include "CommonLib/SampleAdaptiveOffset.h"
 
 #include <cstdlib>
 #include <algorithm>
@@ -315,7 +316,7 @@ bool validatePictureDescriptorFormats()
   return true;
 }
 
-bool writeAlfBenchmarkYuv(const std::string &path)
+bool writeLoopFilterBenchmarkYuv(const std::string &path)
 {
   constexpr int width = 1920;
   constexpr int height = 1080;
@@ -2057,6 +2058,287 @@ bool runAlfFailureCase(const int device, const vtm::CudaAlfTestFailurePoint fail
 }
 #endif
 
+struct SaoReferenceAccess : SampleAdaptiveOffset
+{
+  void apply(const int bitDepth, const ClpRng &range, const vtm::CudaSaoLumaCtuParam &ctu,
+             const Pel *source, Pel *destination, const ptrdiff_t stride,
+             const bool left, const bool right, const bool above, const bool below)
+  {
+    int horizontalBoundaries[] = { -1, -1, -1 };
+    int verticalBoundaries[] = { -1, -1, -1 };
+    int offsets[vtm::CUDA_SAO_NUM_OFFSETS]{};
+    std::copy_n(ctu.offsets, vtm::CUDA_SAO_NUM_OFFSETS, offsets);
+    offsetBlock(bitDepth, range, static_cast<SAOModeNewTypes>(ctu.type), offsets,
+                source, destination, stride, stride, ctu.width, ctu.height,
+                left, right, above, below, left && above, right && above,
+                left && below, right && below, false, horizontalBoundaries,
+                verticalBoundaries, 0, 0);
+  }
+};
+
+vtm::CudaLoopFilterChainFrame makeChainFrame(const std::uint32_t width, const std::uint32_t height,
+                                              const std::uint8_t bitDepth, const std::uint8_t stages)
+{
+  constexpr std::uint32_t ctuSize = 64;
+  vtm::CudaLoopFilterChainFrame frame{};
+  frame.width = width;
+  frame.height = height;
+  frame.ctuWidth = frame.ctuHeight = ctuSize;
+  frame.ctusInWidth = (width + ctuSize - 1) / ctuSize;
+  frame.ctusInHeight = (height + ctuSize - 1) / ctuSize;
+  frame.ctuCount = frame.ctusInWidth * frame.ctusInHeight;
+  frame.lmcsLutSize = (stages & vtm::CUDA_LOOP_FILTER_LMCS) ? (1u << bitDepth) : 0;
+  frame.minSample = 0;
+  frame.maxSample = (1 << bitDepth) - 1;
+  frame.bitDepth = bitDepth;
+  frame.elementSize = sizeof(Pel);
+  frame.stages = stages;
+  return frame;
+}
+
+std::vector<vtm::CudaSaoLumaCtuParam> makeSaoCtus(const vtm::CudaLoopFilterChainFrame &frame,
+                                                   const bool includeDisabled)
+{
+  std::vector<vtm::CudaSaoLumaCtuParam> ctus(frame.ctuCount);
+  const int maximumOffset = (1 << (frame.bitDepth - 5)) - 1;
+  for (std::uint32_t index = 0; index < frame.ctuCount; ++index)
+  {
+    auto &ctu = ctus[index];
+    ctu.x = (index % frame.ctusInWidth) * frame.ctuWidth;
+    ctu.y = (index / frame.ctusInWidth) * frame.ctuHeight;
+    ctu.width = std::min(frame.ctuWidth, frame.width - ctu.x);
+    ctu.height = std::min(frame.ctuHeight, frame.height - ctu.y);
+    ctu.enabled = !includeDisabled || index % 11 != 0;
+    ctu.type = static_cast<std::int8_t>(index % 5);
+    if (!ctu.enabled)
+    {
+      ctu.type = -1;
+      continue;
+    }
+    for (std::uint32_t offset = 0; offset < vtm::CUDA_SAO_NUM_OFFSETS; ++offset)
+    {
+      const int magnitude = int((index * 7 + offset * 3) % (maximumOffset + 1));
+      ctu.offsets[offset] = ((index + offset) & 1) == 0 ? magnitude : -magnitude;
+    }
+    if (ctu.type != static_cast<std::int8_t>(SAOModeNewTypes::BO))
+      ctu.offsets[SAO_CLASS_EO_PLAIN] = 0;
+  }
+  return ctus;
+}
+
+void applySaoReference(const vtm::CudaLoopFilterChainFrame &frame,
+                       const std::vector<vtm::CudaSaoLumaCtuParam> &ctus,
+                       const Pel *source, Pel *destination, const ptrdiff_t stride)
+{
+  SaoReferenceAccess reference;
+  reference.create(frame.width, frame.height, ChromaFormat::_400, frame.ctuWidth, frame.ctuHeight, 0, 0, 0);
+  const ClpRng range{ frame.minSample, frame.maxSample, frame.bitDepth, 0 };
+  for (const auto &ctu : ctus)
+  {
+    if (!ctu.enabled) continue;
+    const bool left = ctu.x != 0;
+    const bool above = ctu.y != 0;
+    const bool right = ctu.x + ctu.width != frame.width;
+    const bool below = ctu.y + ctu.height != frame.height;
+    reference.apply(frame.bitDepth, range, ctu,
+                    source + std::size_t(ctu.y) * stride + ctu.x,
+                    destination + std::size_t(ctu.y) * stride + ctu.x,
+                    stride, left, right, above, below);
+  }
+  reference.destroy();
+}
+
+std::vector<Pel> applyAlfReferenceFrame(const vtm::CudaAlfLumaFrame &frame,
+                                        const std::vector<vtm::CudaAlfCtuParam> &ctus,
+                                        const Pel *source, const ptrdiff_t sourceStride)
+{
+  constexpr int margin = 4;
+  const int extendedStride = int(frame.width) + 2 * margin;
+  std::vector<Pel> extended((frame.height + 2 * margin) * extendedStride);
+  Pel *extendedActive = extended.data() + margin * extendedStride + margin;
+  for (int y = -margin; y < int(frame.height) + margin; ++y)
+    for (int x = -margin; x < int(frame.width) + margin; ++x)
+      extendedActive[y * extendedStride + x] = source[
+        std::size_t(std::max(0, std::min(y, int(frame.height) - 1))) * sourceStride
+        + std::max(0, std::min(x, int(frame.width) - 1))];
+
+  std::vector<AlfClassifier> classifiers(std::size_t(frame.width) * frame.height);
+  std::vector<AlfClassifier *> classifierRows(frame.height);
+  for (std::uint32_t y = 0; y < frame.height; ++y)
+    classifierRows[y] = classifiers.data() + std::size_t(y) * frame.width;
+  int lapData[NUM_DIRECTIONS][AdaptiveLoopFilter::m_CLASSIFICATION_BLK_SIZE + 5]
+             [AdaptiveLoopFilter::m_CLASSIFICATION_BLK_SIZE + 5]{};
+  int *lapRows[NUM_DIRECTIONS][AdaptiveLoopFilter::m_CLASSIFICATION_BLK_SIZE + 5]{};
+  int **lap[NUM_DIRECTIONS]{};
+  for (int direction = 0; direction < NUM_DIRECTIONS; ++direction)
+  {
+    for (int y = 0; y < AdaptiveLoopFilter::m_CLASSIFICATION_BLK_SIZE + 5; ++y)
+      lapRows[direction][y] = lapData[direction][y];
+    lap[direction] = lapRows[direction];
+  }
+  const CPelBuf sourceBuffer(extendedActive, extendedStride, frame.width, frame.height);
+  for (std::uint32_t y = 0; y < frame.height; y += AdaptiveLoopFilter::m_CLASSIFICATION_BLK_SIZE)
+    for (std::uint32_t x = 0; x < frame.width; x += AdaptiveLoopFilter::m_CLASSIFICATION_BLK_SIZE)
+    {
+      const Area block(x, y, std::min<std::uint32_t>(AdaptiveLoopFilter::m_CLASSIFICATION_BLK_SIZE,
+                                                     frame.width - x),
+                       std::min<std::uint32_t>(AdaptiveLoopFilter::m_CLASSIFICATION_BLK_SIZE,
+                                               frame.height - y));
+      AdaptiveLoopFilter::deriveClassificationBlk(classifierRows.data(), lap, sourceBuffer, block, block,
+                                                   frame.bitDepth + 4, frame.vbCtuHeight, frame.vbPos);
+    }
+
+  std::vector<Pel> output(std::size_t(frame.width) * frame.height);
+  for (std::uint32_t y = 0; y < frame.height; ++y)
+    std::copy_n(source + std::size_t(y) * sourceStride, frame.width,
+                output.data() + std::size_t(y) * frame.width);
+  PelUnitBuf destination(ChromaFormat::_400, PelBuf(output.data(), frame.width, frame.width, frame.height));
+  const CPelUnitBuf sourceUnit(ChromaFormat::_400, sourceBuffer);
+  XuPool pool;
+  CodingStructure cs(pool);
+  std::array<Pel, MAX_NUM_ALF_CLASSES * MAX_NUM_ALF_LUMA_COEFF> clips{};
+  const ClpRng range{ frame.minSample, frame.maxSample, frame.bitDepth, 0 };
+  for (const auto &ctu : ctus)
+  {
+    if (!ctu.enabled) continue;
+    for (std::size_t i = 0; i < clips.size(); ++i) clips[i] = static_cast<Pel>(ctu.clipValues[i]);
+    const Area block(ctu.x, ctu.y, ctu.width, ctu.height);
+    AdaptiveLoopFilter::filterBlk<ALF_FILTER_7>(classifierRows.data(), destination, sourceUnit,
+      block, block, COMPONENT_Y, reinterpret_cast<const AlfCoeff *>(ctu.coefficients), clips.data(),
+      range, cs, frame.vbCtuHeight, frame.vbPos);
+  }
+  return output;
+}
+
+bool activePlaneEquals(const TestPicture &picture, const Pel *expected, const ptrdiff_t expectedStride)
+{
+  const auto &host = picture.descriptor.planes[0];
+  for (std::uint32_t y = 0; y < host.height; ++y)
+    for (std::uint32_t x = 0; x < host.width; ++x)
+      if (readSample(static_cast<const std::uint8_t *>(host.data) + std::size_t(y) * host.strideBytes
+                       + std::size_t(x) * host.elementSize, host.elementSize)
+          != expected[std::size_t(y) * expectedStride + x])
+        return false;
+  return true;
+}
+
+bool runSaoChainCase(vtm::CudaContext &context, const std::uint8_t bitDepth)
+{
+  constexpr std::uint32_t width = 1924;
+  constexpr std::uint32_t height = 1084;
+  TestPicture picture(width, height, sizeof(Pel), bitDepth, 43, 1, 0, 0, 8, 8);
+  fillDbfPattern(picture, bitDepth);
+  const auto frame = makeChainFrame(width, height, bitDepth, vtm::CUDA_LOOP_FILTER_SAO);
+  const auto sao = makeSaoCtus(frame, true);
+  constexpr ptrdiff_t margin = 1;
+  const ptrdiff_t stride = width + 2 * margin;
+  std::vector<Pel> source((height + 2 * margin) * stride);
+  Pel *sourceActive = source.data() + margin * stride + margin;
+  for (std::uint32_t y = 0; y < height; ++y)
+    for (std::uint32_t x = 0; x < width; ++x)
+      sourceActive[std::size_t(y) * stride + x] = static_cast<Pel>(readSample(
+        static_cast<const std::uint8_t *>(picture.descriptor.planes[0].data)
+          + std::size_t(y) * picture.descriptor.planes[0].strideBytes + std::size_t(x) * sizeof(Pel), sizeof(Pel)));
+  std::vector<Pel> expected = source;
+  Pel *expectedActive = expected.data() + margin * stride + margin;
+  applySaoReference(frame, sao, sourceActive, expectedActive, stride);
+
+  int owner = 0;
+  const auto mirror = context.registerPictureMirror(&owner, vtm::CudaPictureRole::Reconstruction,
+                                                     picture.descriptor);
+  const auto before = context.loopFilterChainStats();
+  if (context.filterLoopFilterChain(mirror, frame, nullptr, nullptr, 0, sao.data(),
+                                    static_cast<std::uint32_t>(sao.size()), nullptr, nullptr, 0)
+      != vtm::CudaLoopFilterChainDispatchResult::Executed)
+    return false;
+  const auto after = context.loopFilterChainStats();
+  if (!activePlaneEquals(picture, expectedActive, stride) || after.dispatches != before.dispatches + 1
+      || after.saoCtus != before.saoCtus + frame.ctuCount
+      || after.mirrorUploadBytes <= before.mirrorUploadBytes
+      || after.mirrorDownloadBytes <= before.mirrorDownloadBytes)
+    return false;
+
+  // A second execution from the exact same source proves deterministic reuse of persistent scratch.
+  for (std::uint32_t y = 0; y < height; ++y)
+    for (std::uint32_t x = 0; x < width; ++x)
+      writeSample(static_cast<std::uint8_t *>(picture.descriptor.planes[0].data)
+                    + std::size_t(y) * picture.descriptor.planes[0].strideBytes + std::size_t(x) * sizeof(Pel),
+                  sizeof(Pel), sourceActive[std::size_t(y) * stride + x]);
+  context.markHostPlaneModified(mirror, 0);
+  if (context.filterLoopFilterChain(mirror, frame, nullptr, nullptr, 0, sao.data(),
+                                    static_cast<std::uint32_t>(sao.size()), nullptr, nullptr, 0)
+        != vtm::CudaLoopFilterChainDispatchResult::Executed
+      || !activePlaneEquals(picture, expectedActive, stride))
+    return false;
+  context.releasePictureMirror(mirror);
+  return true;
+}
+
+bool runFullLoopFilterChainCase(vtm::CudaContext &context, const std::uint8_t bitDepth)
+{
+  constexpr std::uint32_t width = 1924;
+  constexpr std::uint32_t height = 1084;
+  const std::uint8_t stages = vtm::CUDA_LOOP_FILTER_LMCS | vtm::CUDA_LOOP_FILTER_DBF
+                              | vtm::CUDA_LOOP_FILTER_SAO | vtm::CUDA_LOOP_FILTER_ALF;
+  TestPicture picture(width, height, sizeof(Pel), bitDepth, 61, 1, 0, 0, 8, 8);
+  fillDbfPattern(picture, bitDepth);
+  const auto frame = makeChainFrame(width, height, bitDepth, stages);
+  std::vector<std::int32_t> lut(frame.lmcsLutSize);
+  for (std::uint32_t i = 0; i < frame.lmcsLutSize; ++i)
+    lut[i] = (i * 3 + (i >> 2) + 17) & frame.maxSample;
+  const auto dbf = makeDbfTasks(bitDepth);
+  const auto sao = makeSaoCtus(frame, true);
+  const vtm::CudaAlfLumaFrame alfFrame = makeAlfFrame(width, height, bitDepth);
+  auto alf = makeAlfCtus(alfFrame, true);
+
+  constexpr ptrdiff_t margin = 8;
+  const ptrdiff_t stride = width + 2 * margin;
+  std::vector<Pel> expected((height + 2 * margin) * stride);
+  Pel *active = expected.data() + margin * stride + margin;
+  for (std::uint32_t y = 0; y < height; ++y)
+    for (std::uint32_t x = 0; x < width; ++x)
+    {
+      const int input = readSample(static_cast<const std::uint8_t *>(picture.descriptor.planes[0].data)
+        + std::size_t(y) * picture.descriptor.planes[0].strideBytes + std::size_t(x) * sizeof(Pel), sizeof(Pel));
+      active[std::size_t(y) * stride + x] = static_cast<Pel>(lut[input]);
+    }
+  DeblockingFilter::filterLumaTasksCpu(active, stride, dbf.data(), static_cast<std::uint32_t>(dbf.size()));
+  const std::vector<Pel> saoSource = expected;
+  applySaoReference(frame, sao, saoSource.data() + margin * stride + margin, active, stride);
+  const std::vector<Pel> finalExpected = applyAlfReferenceFrame(alfFrame, alf, active, stride);
+
+  int owner = 0;
+  const auto mirror = context.registerPictureMirror(&owner, vtm::CudaPictureRole::Reconstruction,
+                                                     picture.descriptor);
+  const auto before = context.loopFilterChainStats();
+  if (context.filterLoopFilterChain(mirror, frame, lut.data(), dbf.data(), static_cast<std::uint32_t>(dbf.size()),
+                                    sao.data(), static_cast<std::uint32_t>(sao.size()), &alfFrame, alf.data(),
+                                    static_cast<std::uint32_t>(alf.size()))
+      != vtm::CudaLoopFilterChainDispatchResult::Executed)
+    return false;
+  const auto after = context.loopFilterChainStats();
+  if (!activePlaneEquals(picture, finalExpected.data(), width) || after.dispatches != before.dispatches + 1
+      || after.dbfTasks != before.dbfTasks + dbf.size() || after.saoCtus != before.saoCtus + sao.size()
+      || after.alfCtus != before.alfCtus + alf.size())
+    return false;
+
+  // CCALF is represented as an unsupported preflight feature: zero host mutation and zero dispatch.
+  std::vector<std::uint8_t> committed = picture.planes[0].storage;
+  auto rejected = frame;
+  rejected.unsupportedFeatures = vtm::CUDA_LOOP_FILTER_UNSUPPORTED_CCALF;
+  const auto beforeReject = context.loopFilterChainStats();
+  if (context.filterLoopFilterChain(mirror, rejected, lut.data(), dbf.data(),
+                                    static_cast<std::uint32_t>(dbf.size()), sao.data(),
+                                    static_cast<std::uint32_t>(sao.size()), &alfFrame, alf.data(),
+                                    static_cast<std::uint32_t>(alf.size()))
+        != vtm::CudaLoopFilterChainDispatchResult::NotEligible
+      || picture.planes[0].storage != committed
+      || context.loopFilterChainStats().dispatches != beforeReject.dispatches)
+    return false;
+  context.releasePictureMirror(mirror);
+  return true;
+}
+
 }   // namespace
 
 int main(const int argc, char *argv[])
@@ -2064,7 +2346,7 @@ int main(const int argc, char *argv[])
   vtm::ComputeConfig config;
   if (config.backend != vtm::ComputeBackend::CPU || config.device != 0
       || config.enableExperimentalSad || config.enableExperimentalQpa || config.enableExperimentalAlf
-      || config.enableExperimentalDbf)
+      || config.enableExperimentalDbf || config.enableExperimentalLoopFilterChain)
   {
     return fail("ComputeConfig defaults are invalid");
   }
@@ -2072,9 +2354,11 @@ int main(const int argc, char *argv[])
   {
     return fail("CUDA DBF production collector serializer changed fields or emission order");
   }
-  if (argc == 3 && std::string(argv[1]) == "--write-alf-yuv")
+  if (argc == 3 && (std::string(argv[1]) == "--write-alf-yuv"
+                    || std::string(argv[1]) == "--write-dbf-yuv"))
   {
-    return writeAlfBenchmarkYuv(argv[2]) ? EXIT_SUCCESS : fail("Could not write ALF benchmark YUV");
+    return writeLoopFilterBenchmarkYuv(argv[2]) ? EXIT_SUCCESS
+                                                 : fail("Could not write loop-filter benchmark YUV");
   }
   if (argc == 5 && std::string(argv[1]) == "--repeat-access-unit")
   {
@@ -2133,9 +2417,10 @@ int main(const int argc, char *argv[])
     return EXIT_SUCCESS;
   }
   const bool runBenchmark = argc == 3 && std::string(argv[1]) == "--cuda-benchmark";
-  if (argc != 3 || (std::string(argv[1]) != "--cuda" && !runBenchmark))
+  const bool runChainOnly = argc == 3 && std::string(argv[1]) == "--cuda-loop-chain";
+  if (argc != 3 || (std::string(argv[1]) != "--cuda" && !runBenchmark && !runChainOnly))
   {
-    return fail("Usage: CudaBackendTest [--cuda device | --cuda-benchmark device]");
+    return fail("Usage: CudaBackendTest [--cuda device | --cuda-benchmark device | --cuda-loop-chain device]");
   }
   if (!vtm::CudaContext::isCompiled())
   {
@@ -2168,6 +2453,17 @@ int main(const int argc, char *argv[])
     if (!throws([&context, argv]() { context.create(std::stoi(argv[2])); }))
     {
       return fail("Double CUDA context creation was accepted");
+    }
+    if (runChainOnly)
+    {
+      std::cerr << "chain-test sao-8\n";
+      bool passed = runSaoChainCase(context, 8);
+      if (passed) { std::cerr << "chain-test sao-10\n"; passed = runSaoChainCase(context, 10); }
+      if (passed) { std::cerr << "chain-test full-8\n"; passed = runFullLoopFilterChainCase(context, 8); }
+      if (passed) { std::cerr << "chain-test full-10\n"; passed = runFullLoopFilterChainCase(context, 10); }
+      context.shutdown();
+      return passed ? EXIT_SUCCESS
+                    : fail("CUDA resident loop-filter chain differed from normative stage references");
     }
 
     bool crossThreadSyncRejected = false;
@@ -2477,6 +2773,11 @@ int main(const int argc, char *argv[])
         || !runDbfGeometryCase(context, 8) || !runDbfGeometryCase(context, 10))
     {
       return fail("CUDA luma DBF differed from the scalar DeblockingFilter reference");
+    }
+    if (!runSaoChainCase(context, 8) || !runSaoChainCase(context, 10)
+        || !runFullLoopFilterChainCase(context, 8) || !runFullLoopFilterChainCase(context, 10))
+    {
+      return fail("CUDA resident loop-filter chain differed from normative stage references");
     }
 #if VTM_CUDA_TESTING
     if (!runBatchOperationalPreflightExceptionCase(std::stoi(argv[2])))

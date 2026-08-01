@@ -83,7 +83,7 @@ public:
   virtual ~AdaptiveLoopFilter() {}
   void reconstructCoeffAPSs(CodingStructure& cs, bool luma, bool chroma, bool isRdo);
   void reconstructCoeff(AlfParam& alfParam, ChannelType channel, const bool isRdo, const bool isRedo = false);
-  void ALFProcess(CodingStructure& cs);
+  void ALFProcess(CodingStructure& cs, bool processLuma = true, bool processChroma = true);
   void prepareLumaParameters(CodingStructure& cs);
   AlfMode getLumaMode(int ctuIdx) const { return m_modes[COMPONENT_Y][ctuIdx]; }
   const AlfCoeff* getLumaCoeff(AlfMode mode) const { return getCoeffVals(mode); }

@@ -66,6 +66,7 @@ namespace vtm
 struct ComputeConfig;
 struct AlfAccelerationStats;
 struct DbfAccelerationStats;
+struct LoopFilterChainAccelerationStats;
 }
 
 #if JVET_AJ0151_DSC_SEI
@@ -285,6 +286,7 @@ public:
   void  releasePictureComputeResources(Picture *picture);
   vtm::AlfAccelerationStats alfAccelerationStats() const;
   vtm::DbfAccelerationStats dbfAccelerationStats() const;
+  vtm::LoopFilterChainAccelerationStats loopFilterChainAccelerationStats() const;
 
   void  setDecodedPictureHashSEIEnabled(int enabled) { m_decodedPictureHashSEIEnabled=enabled; }
 
