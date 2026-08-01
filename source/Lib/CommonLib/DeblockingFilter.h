@@ -227,6 +227,13 @@ public:
   // Scalar normative reference for CUDA descriptor tests. Tasks are applied in their emitted CPU order.
   static void filterLumaTasksCpu(Pel *base, ptrdiff_t stride,
                                  const vtm::CudaDbfLumaTask *tasks, std::uint32_t taskCount);
+
+  // Single production serializer used by the real picture collector and focused field/order tests.
+  static vtm::CudaDbfLumaTask makeCudaLumaTask(std::uint32_t x, std::uint32_t y, EdgeDir edgeDir,
+                                                std::uint8_t maxFilterLenP, std::uint8_t maxFilterLenQ,
+                                                int tc, int beta, const ClpRng &clpRng,
+                                                bool sidePisLarge, bool sideQisLarge,
+                                                bool partPNoFilter, bool partQNoFilter);
 };
 
 //! \}

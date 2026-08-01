@@ -1560,7 +1560,9 @@ std::vector<vtm::CudaDbfLumaTask> makeDbfTasks(const std::uint8_t bitDepth)
   const auto add = [&](const std::uint32_t x, const std::uint32_t y, const std::uint8_t direction,
                        const std::uint8_t p, const std::uint8_t q, const std::uint8_t flags,
                        const int tc, const int beta) {
-    tasks.push_back({ x, y, tc, beta, 0, (1 << bitDepth) - 1, direction, p, q, flags });
+    const int bitDepthScale = 1 << (bitDepth - 8);
+    tasks.push_back({ x, y, tc * bitDepthScale / 4, beta * bitDepthScale / 4,
+                      0, (1 << bitDepth) - 1, direction, p, q, flags });
   };
   // Several edges share a lane and therefore prove serial edge ordering inside a CUDA lane.
   for (std::uint32_t y : { 0u, 4u, 64u, 1076u, 1080u })
@@ -1593,7 +1595,9 @@ std::vector<vtm::CudaDbfLumaTask> makeDenseDbfTasks(const std::uint8_t bitDepth)
     const bool longFilter = ordinal % 5 == 0;
     const std::uint8_t flags = longFilter
       ? std::uint8_t(vtm::CUDA_DBF_SIDE_P_LARGE | vtm::CUDA_DBF_SIDE_Q_LARGE) : 0;
-    tasks.push_back({ x, y, 12 + int(ordinal & 7), 96 + int(ordinal & 31), 0,
+    const int bitDepthScale = 1 << (bitDepth - 8);
+    tasks.push_back({ x, y, (12 + int(ordinal & 7)) * bitDepthScale / 4,
+                      (96 + int(ordinal & 31)) * bitDepthScale / 4, 0,
                       (1 << bitDepth) - 1, direction,
                       std::uint8_t(longFilter ? 7 : 3), std::uint8_t(longFilter ? 5 : 3), flags });
   };
@@ -1603,6 +1607,54 @@ std::vector<vtm::CudaDbfLumaTask> makeDenseDbfTasks(const std::uint8_t bitDepth)
   for (std::uint32_t x = 0; x + 4 <= 1924; x += 4)
     for (std::uint32_t y = 8; y <= 1080; y += 8) add(x, y, 1, ordinal++);
   return tasks;
+}
+
+bool runDbfCollectorSerializationCase(const std::uint8_t bitDepth)
+{
+  const ClpRng range{ 0, (1 << bitDepth) - 1, bitDepth, 0 };
+  std::vector<vtm::CudaDbfLumaTask> collected;
+  collected.push_back(DeblockingFilter::makeCudaLumaTask(
+    8, 12, DeblockingFilter::EdgeDir::VER, 1, 1, 0, 0, range, false, false, false, false));
+  collected.push_back(DeblockingFilter::makeCudaLumaTask(
+    16, 20, DeblockingFilter::EdgeDir::HOR, 3, 3, 7, 64, range, false, false, false, false));
+  collected.push_back(DeblockingFilter::makeCudaLumaTask(
+    24, 28, DeblockingFilter::EdgeDir::VER, 5, 7,
+    vtm::cudaDbfMaximumTc(bitDepth), vtm::cudaDbfMaximumBeta(bitDepth), range,
+    true, true, false, false));
+  collected.push_back(DeblockingFilter::makeCudaLumaTask(
+    32, 36, DeblockingFilter::EdgeDir::HOR, 7, 5, 11, 80, range,
+    true, true, true, true));
+  collected.push_back(DeblockingFilter::makeCudaLumaTask(
+    40, 128, DeblockingFilter::EdgeDir::HOR, 7, 7, 8, 56, range,
+    false, true, false, false));
+  if (collected.size() != 5) return false;
+  const auto validCommon = [&](const vtm::CudaDbfLumaTask &task) {
+    return task.minSample == 0 && task.maxSample == (1 << bitDepth) - 1;
+  };
+  return validCommon(collected[0]) && collected[0].x == 8 && collected[0].y == 12
+         && collected[0].direction == 0 && collected[0].maxFilterLenP == 1
+         && collected[0].maxFilterLenQ == 1 && collected[0].tc == 0 && collected[0].beta == 0
+         && collected[0].flags == 0
+         && validCommon(collected[1]) && collected[1].x == 16 && collected[1].y == 20
+         && collected[1].direction == 1 && collected[1].maxFilterLenP == 3
+         && collected[1].maxFilterLenQ == 3 && collected[1].tc == 7 && collected[1].beta == 64
+         && collected[1].flags == 0
+         && validCommon(collected[2]) && collected[2].x == 24 && collected[2].y == 28
+         && collected[2].direction == 0 && collected[2].maxFilterLenP == 5
+         && collected[2].maxFilterLenQ == 7
+         && collected[2].tc == vtm::cudaDbfMaximumTc(bitDepth)
+         && collected[2].beta == vtm::cudaDbfMaximumBeta(bitDepth)
+         && collected[2].flags == (vtm::CUDA_DBF_SIDE_P_LARGE | vtm::CUDA_DBF_SIDE_Q_LARGE)
+         && validCommon(collected[3]) && collected[3].x == 32 && collected[3].y == 36
+         && collected[3].direction == 1 && collected[3].maxFilterLenP == 7
+         && collected[3].maxFilterLenQ == 5
+         && collected[3].flags == (vtm::CUDA_DBF_SIDE_P_LARGE | vtm::CUDA_DBF_SIDE_Q_LARGE
+                                    | vtm::CUDA_DBF_PART_P_NO_FILTER
+                                    | vtm::CUDA_DBF_PART_Q_NO_FILTER)
+         && validCommon(collected[4]) && collected[4].x == 40 && collected[4].y == 128
+         && collected[4].direction == 1 && collected[4].maxFilterLenP == 3
+         && collected[4].maxFilterLenQ == 7 && collected[4].tc == 8 && collected[4].beta == 56
+         && collected[4].flags == vtm::CUDA_DBF_SIDE_Q_LARGE;
 }
 
 void fillDbfPattern(TestPicture &picture, const std::uint8_t bitDepth)
@@ -1656,13 +1708,22 @@ bool runDbfLumaCase(vtm::CudaContext &context, const std::uint8_t bitDepth,
                                                   static_cast<std::uint32_t>(tasks.size()));
   const auto gpuEnd = std::chrono::steady_clock::now();
   const vtm::DbfAccelerationStats after = context.dbfStats();
+  const std::uint64_t runtimeSynchronizations =
+    after.runtimeSynchronizations - before.runtimeSynchronizations;
+  const std::uint64_t mirrorSynchronizations =
+    after.mirrorSynchronizations - before.mirrorSynchronizations;
+  const std::uint64_t integrationSynchronizations =
+    after.integrationSynchronizations - before.integrationSynchronizations;
   if (result != vtm::CudaDbfDispatchResult::Executed || picture.planes[0].storage != expected
       || after.dispatches != before.dispatches + 1 || after.tasks != before.tasks + tasks.size()
       || after.parameterUploadBytes <= before.parameterUploadBytes
       || after.commitBytes != before.commitBytes + std::uint64_t(width) * height * sizeof(Pel)
       || after.mirrorUploadBytes <= before.mirrorUploadBytes
       || after.mirrorDownloadBytes <= before.mirrorDownloadBytes
-      || after.runtimeSynchronizations < before.runtimeSynchronizations + 3)
+      || runtimeSynchronizations < 3 || mirrorSynchronizations < 1
+      || integrationSynchronizations != runtimeSynchronizations + mirrorSynchronizations + 1
+      || after.scratchBytes == 0 || after.retiredScratchBytes != 0
+      || after.peakScratchBytes < after.scratchBytes)
   {
     if (picture.planes[0].storage != expected)
     {
@@ -1670,7 +1731,9 @@ bool runDbfLumaCase(vtm::CudaContext &context, const std::uint8_t bitDepth,
         if (picture.planes[0].storage[i] != expected[i])
         {
           std::cerr << "DBF first byte mismatch at storage offset " << i << " for " << unsigned(bitDepth)
-                    << "-bit Pel" << sizeof(Pel) * 8 << '\n';
+                    << "-bit Pel" << sizeof(Pel) * 8
+                    << ": actual=" << unsigned(picture.planes[0].storage[i])
+                    << ", expected=" << unsigned(expected[i]) << '\n';
           break;
         }
     }
@@ -1700,15 +1763,15 @@ bool benchmarkDbfFrame(vtm::CudaContext &context)
   return true;
 }
 
-bool runDbfGeometryCase(vtm::CudaContext &context)
+bool runDbfGeometryCase(vtm::CudaContext &context, const std::uint8_t bitDepth)
 {
-  TestPicture picture(1924, 1084, sizeof(Pel), 10, 77, 1, 0, 0, 8, 8);
-  fillDbfPattern(picture, 10);
+  TestPicture picture(1924, 1084, sizeof(Pel), bitDepth, 77, 1, 0, 0, 8, 8);
+  fillDbfPattern(picture, bitDepth);
   int owner = 0;
   const auto mirror = context.registerPictureMirror(&owner, vtm::CudaPictureRole::Reconstruction,
                                                      picture.descriptor);
-  const vtm::CudaDbfFrame frame{ 1924, 1084, 10, sizeof(Pel), {0,0} };
-  auto task = makeDbfTasks(10).front();
+  const vtm::CudaDbfFrame frame{ 1924, 1084, bitDepth, sizeof(Pel), {0,0} };
+  auto task = makeDbfTasks(bitDepth).front();
   const auto rejected = [&](const vtm::CudaDbfFrame &f, const vtm::CudaDbfLumaTask &t) {
     return context.filterDbfLumaFrame(mirror, f, &t, 1) == vtm::CudaDbfDispatchResult::NotEligible;
   };
@@ -1722,6 +1785,22 @@ bool runDbfGeometryCase(vtm::CudaContext &context)
   if (!rejected(frame, alteredTask)) return false;
   alteredTask = task; alteredTask.flags = 0x80;
   if (!rejected(frame, alteredTask)) return false;
+  alteredTask = task; alteredTask.tc = std::numeric_limits<std::int32_t>::max();
+  if (!rejected(frame, alteredTask)) return false;
+  alteredTask = task; alteredTask.beta = std::numeric_limits<std::int32_t>::max();
+  if (!rejected(frame, alteredTask)) return false;
+  alteredTask = task; alteredTask.tc = vtm::cudaDbfMaximumTc(frame.bitDepth) + 1;
+  if (!rejected(frame, alteredTask)) return false;
+  alteredTask = task; alteredTask.beta = vtm::cudaDbfMaximumBeta(frame.bitDepth) + 1;
+  if (!rejected(frame, alteredTask)) return false;
+  alteredTask = task; alteredTask.maxFilterLenP = 5;
+  if (!rejected(frame, alteredTask)) return false;
+  alteredTask = task; alteredTask.maxFilterLenQ = 7;
+  if (!rejected(frame, alteredTask)) return false;
+  alteredTask = task; alteredTask.flags = vtm::CUDA_DBF_SIDE_P_LARGE;
+  if (!rejected(frame, alteredTask)) return false;
+  alteredTask = task; alteredTask.flags = vtm::CUDA_DBF_SIDE_Q_LARGE;
+  if (!rejected(frame, alteredTask)) return false;
   const auto beforeNoOp = context.dbfStats();
   if (context.filterDbfLumaFrame(mirror, frame, nullptr, 0) != vtm::CudaDbfDispatchResult::NoOp)
     return false;
@@ -1730,6 +1809,16 @@ bool runDbfGeometryCase(vtm::CudaContext &context)
       || afterNoOp.dispatches != beforeNoOp.dispatches || afterNoOp.tasks != beforeNoOp.tasks
       || context.pictureMirrorPlaneState(mirror, 0) != vtm::CudaMirrorState::HostValid)
     return false;
+  std::array<vtm::CudaDbfLumaTask, 2> boundaryTasks{ task, task };
+  boundaryTasks[0].tc = 0;
+  boundaryTasks[0].beta = 0;
+  boundaryTasks[1].x = 16;
+  boundaryTasks[1].tc = vtm::cudaDbfMaximumTc(frame.bitDepth);
+  boundaryTasks[1].beta = vtm::cudaDbfMaximumBeta(frame.bitDepth);
+  if (context.filterDbfLumaFrame(mirror, frame, boundaryTasks.data(),
+                                 static_cast<std::uint32_t>(boundaryTasks.size()))
+      != vtm::CudaDbfDispatchResult::Executed)
+    return false;
   context.releasePictureMirror(mirror);
   return true;
 }
@@ -1737,6 +1826,8 @@ bool runDbfGeometryCase(vtm::CudaContext &context)
 #if VTM_CUDA_TESTING
 bool runDbfFailureCase(const int device, const vtm::CudaDbfTestFailurePoint point)
 {
+  const std::uint64_t liveDeviceBefore = vtm::CudaContext::dbfLiveDeviceAllocationsForTesting();
+  const std::uint64_t livePinnedBefore = vtm::CudaContext::dbfLivePinnedAllocationsForTesting();
   vtm::CudaContext context;
   context.create(device);
   TestPicture picture(1924, 1084, sizeof(Pel), 10, 81, 1, 0, 0, 8, 8);
@@ -1756,10 +1847,78 @@ bool runDbfFailureCase(const int device, const vtm::CudaDbfTestFailurePoint poin
   const bool rejected = context.filterDbfLumaFrame(mirror, frame, tasks.data(),
     static_cast<std::uint32_t>(tasks.size())) == vtm::CudaDbfDispatchResult::NotEligible;
   const bool valid = threw && rejected && picture.planes[0].storage == untouched
-                     && !context.isDbfAccelerationAvailable() && stats.failures == 1 && stats.poisoned;
+                     && !context.isDbfAccelerationAvailable() && stats.failures == 1 && stats.poisoned
+                     && stats.scratchBytes == 0 && stats.retiredScratchBytes == 0;
   context.releasePictureMirror(mirror);
   context.shutdown();
-  return valid;
+  return valid
+         && vtm::CudaContext::dbfLiveDeviceAllocationsForTesting() == liveDeviceBefore
+         && vtm::CudaContext::dbfLivePinnedAllocationsForTesting() == livePinnedBefore;
+}
+
+bool runDbfScratchFailureCase(const int device, const vtm::CudaDbfTestFailurePoint point)
+{
+  const auto isOldRelease = [](const vtm::CudaDbfTestFailurePoint value) {
+    return value >= vtm::CudaDbfTestFailurePoint::OldTasksDeviceRelease
+           && value <= vtm::CudaDbfTestFailurePoint::OldLaneOffsetsPinnedRelease;
+  };
+  const auto isRecoveryRelease = [](const vtm::CudaDbfTestFailurePoint value) {
+    return value >= vtm::CudaDbfTestFailurePoint::RecoveryTasksDeviceRelease
+           && value <= vtm::CudaDbfTestFailurePoint::RecoveryLaneOffsetsPinnedRelease;
+  };
+  const auto isPinnedRecovery = [](const vtm::CudaDbfTestFailurePoint value) {
+    return value == vtm::CudaDbfTestFailurePoint::RecoveryTasksPinnedRelease
+           || value == vtm::CudaDbfTestFailurePoint::RecoveryLaneOffsetsPinnedRelease;
+  };
+  const std::uint64_t liveDeviceBefore = vtm::CudaContext::dbfLiveDeviceAllocationsForTesting();
+  const std::uint64_t livePinnedBefore = vtm::CudaContext::dbfLivePinnedAllocationsForTesting();
+  vtm::CudaContext context;
+  context.create(device);
+  const auto allTasks = makeDbfTasks(10);
+  const vtm::CudaDbfFrame frame{ 1924, 1084, 10, sizeof(Pel), {0,0} };
+
+  TestPicture warm(1924, 1084, sizeof(Pel), 10, 83, 1, 0, 0, 8, 8);
+  fillDbfPattern(warm, 10);
+  int warmOwner = 0;
+  const auto warmMirror = context.registerPictureMirror(&warmOwner, vtm::CudaPictureRole::Reconstruction,
+                                                         warm.descriptor);
+  if (isOldRelease(point)
+      && context.filterDbfLumaFrame(warmMirror, frame, allTasks.data(), 1)
+           != vtm::CudaDbfDispatchResult::Executed)
+    return false;
+
+  TestPicture failing(1924, 1084, sizeof(Pel), 10, 89, 1, 0, 0, 8, 8);
+  fillDbfPattern(failing, 10);
+  const auto untouched = failing.planes[0].storage;
+  int failingOwner = 0;
+  const auto failingMirror = context.registerPictureMirror(
+    &failingOwner, vtm::CudaPictureRole::Reconstruction, failing.descriptor);
+  context.injectDbfFailureForTesting(point);
+  const bool threw = throwsWithText([&]() {
+    (void) context.filterDbfLumaFrame(failingMirror, frame, allTasks.data(),
+                                      static_cast<std::uint32_t>(allTasks.size()));
+  }, "CUDA DBF execution failed after selection:");
+  const vtm::DbfAccelerationStats stats = context.dbfStats();
+  const bool recoveryRelease = isRecoveryRelease(point);
+  const bool retainedExactlyOne = recoveryRelease
+    && vtm::CudaContext::dbfLiveDeviceAllocationsForTesting()
+         == liveDeviceBefore + (isPinnedRecovery(point) ? 0u : 1u)
+    && vtm::CudaContext::dbfLivePinnedAllocationsForTesting()
+         == livePinnedBefore + (isPinnedRecovery(point) ? 1u : 0u);
+  const bool recoveredAll = !recoveryRelease
+    && vtm::CudaContext::dbfLiveDeviceAllocationsForTesting() == liveDeviceBefore
+    && vtm::CudaContext::dbfLivePinnedAllocationsForTesting() == livePinnedBefore;
+  bool valid = threw && failing.planes[0].storage == untouched
+               && !context.isDbfAccelerationAvailable() && stats.failures == 1 && stats.poisoned
+               && stats.dispatches == (isOldRelease(point) ? 1u : 0u)
+               && stats.peakScratchBytes >= stats.scratchBytes
+               && (recoveryRelease ? stats.scratchBytes > 0 : stats.scratchBytes == 0)
+               && (recoveryRelease ? retainedExactlyOne : recoveredAll);
+  if (!recoveryRelease) valid = valid && stats.retiredScratchBytes == 0;
+  context.shutdown();
+  return valid
+         && vtm::CudaContext::dbfLiveDeviceAllocationsForTesting() == liveDeviceBefore
+         && vtm::CudaContext::dbfLivePinnedAllocationsForTesting() == livePinnedBefore;
 }
 #endif
 
@@ -1908,6 +2067,10 @@ int main(const int argc, char *argv[])
       || config.enableExperimentalDbf)
   {
     return fail("ComputeConfig defaults are invalid");
+  }
+  if (!runDbfCollectorSerializationCase(8) || !runDbfCollectorSerializationCase(10))
+  {
+    return fail("CUDA DBF production collector serializer changed fields or emission order");
   }
   if (argc == 3 && std::string(argv[1]) == "--write-alf-yuv")
   {
@@ -2311,7 +2474,7 @@ int main(const int argc, char *argv[])
       return fail("CUDA luma ALF classifier/filter differed from the scalar VTM reference");
     }
     if (!runDbfLumaCase(context, 8) || !runDbfLumaCase(context, 10)
-        || !runDbfGeometryCase(context))
+        || !runDbfGeometryCase(context, 8) || !runDbfGeometryCase(context, 10))
     {
       return fail("CUDA luma DBF differed from the scalar DeblockingFilter reference");
     }
@@ -2376,6 +2539,26 @@ int main(const int argc, char *argv[])
     {
       if (!runDbfFailureCase(std::stoi(argv[2]), point))
         return fail("CUDA DBF rollback or permanent poisoning is invalid");
+    }
+    for (const auto point : {
+           vtm::CudaDbfTestFailurePoint::GrowTasksDevice,
+           vtm::CudaDbfTestFailurePoint::GrowTasksPinned,
+           vtm::CudaDbfTestFailurePoint::GrowLaneOffsetsDevice,
+           vtm::CudaDbfTestFailurePoint::GrowLaneOffsetsPinned,
+           vtm::CudaDbfTestFailurePoint::GrowOutputDevice,
+           vtm::CudaDbfTestFailurePoint::OldTasksDeviceRelease,
+           vtm::CudaDbfTestFailurePoint::OldLaneOffsetsDeviceRelease,
+           vtm::CudaDbfTestFailurePoint::OldOutputDeviceRelease,
+           vtm::CudaDbfTestFailurePoint::OldTasksPinnedRelease,
+           vtm::CudaDbfTestFailurePoint::OldLaneOffsetsPinnedRelease,
+           vtm::CudaDbfTestFailurePoint::RecoveryTasksDeviceRelease,
+           vtm::CudaDbfTestFailurePoint::RecoveryLaneOffsetsDeviceRelease,
+           vtm::CudaDbfTestFailurePoint::RecoveryOutputDeviceRelease,
+           vtm::CudaDbfTestFailurePoint::RecoveryTasksPinnedRelease,
+           vtm::CudaDbfTestFailurePoint::RecoveryLaneOffsetsPinnedRelease })
+    {
+      if (!runDbfScratchFailureCase(std::stoi(argv[2]), point))
+        return fail("CUDA DBF scratch ownership, accounting, recovery, or teardown retry is invalid");
     }
     if (!runRecoveryIsolationCase(std::stoi(argv[2]), true)
         || !runRecoveryIsolationCase(std::stoi(argv[2]), false))

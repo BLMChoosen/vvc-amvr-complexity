@@ -936,7 +936,8 @@ uint32_t DecApp::decode()
         stats.enabled ? 1 : 0, stats.poisoned ? 1 : 0, m_computeConfig.enableExperimentalAlf ? 0 : 1);
     const vtm::DbfAccelerationStats dbf = m_cDecLib.dbfAccelerationStats();
     msg(INFO, "CUDA DBF frames/no-op/tasks/pixels: %llu/%llu/%llu/%llu, params/commit: %llu/%llu bytes, "
-              "mirror upload/download: %llu/%llu bytes, scratch current/peak: %llu/%llu bytes, syncs: %llu, "
+              "mirror upload/download: %llu/%llu bytes, scratch current/retired/peak: %llu/%llu/%llu bytes, "
+              "runtime/mirror/integration syncs: %llu/%llu/%llu, "
               "time collection/runtime/integration: %.3f/%.3f/%.3f ms, "
               "failures: %llu, enabled: %d, poisoned: %d, disabled-by-flag: %d\n",
         static_cast<unsigned long long>(dbf.dispatches), static_cast<unsigned long long>(dbf.noOpFrames),
@@ -947,8 +948,11 @@ uint32_t DecApp::decode()
         static_cast<unsigned long long>(dbf.mirrorUploadBytes),
         static_cast<unsigned long long>(dbf.mirrorDownloadBytes),
         static_cast<unsigned long long>(dbf.scratchBytes),
+        static_cast<unsigned long long>(dbf.retiredScratchBytes),
         static_cast<unsigned long long>(dbf.peakScratchBytes),
         static_cast<unsigned long long>(dbf.runtimeSynchronizations),
+        static_cast<unsigned long long>(dbf.mirrorSynchronizations),
+        static_cast<unsigned long long>(dbf.integrationSynchronizations),
         static_cast<double>(dbf.descriptorCollectionNanoseconds) / 1000000.0,
         static_cast<double>(dbf.runtimeNanoseconds) / 1000000.0,
         static_cast<double>(dbf.integrationNanoseconds) / 1000000.0,

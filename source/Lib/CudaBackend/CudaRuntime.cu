@@ -2322,4 +2322,22 @@ void injectPinnedReleaseFailures(const unsigned failures)
 #endif
 }
 
+std::uint64_t dbfLiveDeviceAllocationsForTesting() noexcept
+{
+#if VTM_CUDA_TESTING
+  return dbfLiveDeviceAllocations.load(std::memory_order_relaxed);
+#else
+  return 0;
+#endif
+}
+
+std::uint64_t dbfLivePinnedAllocationsForTesting() noexcept
+{
+#if VTM_CUDA_TESTING
+  return dbfLivePinnedAllocations.load(std::memory_order_relaxed);
+#else
+  return 0;
+#endif
+}
+
 }   // namespace vtm::cuda_backend

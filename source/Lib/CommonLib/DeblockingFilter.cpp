@@ -1120,21 +1120,12 @@ void DeblockingFilter::xEdgeFilterLuma(const CodingUnit &cu, const EdgeDir edgeD
         if (m_cudaLumaTasks != nullptr)
         {
           static constexpr std::uint8_t filterLenValue[] = { 1, 2, 3, 5, 7 };
-          vtm::CudaDbfLumaTask task{};
-          task.x = static_cast<std::uint32_t>(pos.x + (edgeDir == EdgeDir::HOR ? blkIdx * GRID_SIZE : 0));
-          task.y = static_cast<std::uint32_t>(pos.y + (edgeDir == EdgeDir::VER ? blkIdx * GRID_SIZE : 0));
-          task.tc = tc;
-          task.beta = beta;
-          task.minSample = clpRng.min;
-          task.maxSample = clpRng.max;
-          task.direction = edgeDir == EdgeDir::VER ? 0 : 1;
-          task.maxFilterLenP = filterLenValue[static_cast<unsigned>(maxFilterLen.p)];
-          task.maxFilterLenQ = filterLenValue[static_cast<unsigned>(maxFilterLen.q)];
-          task.flags = (sidePisLarge ? vtm::CUDA_DBF_SIDE_P_LARGE : 0)
-                       | (sideQisLarge ? vtm::CUDA_DBF_SIDE_Q_LARGE : 0)
-                       | (partPNoFilter ? vtm::CUDA_DBF_PART_P_NO_FILTER : 0)
-                       | (partQNoFilter ? vtm::CUDA_DBF_PART_Q_NO_FILTER : 0);
-          m_cudaLumaTasks->push_back(task);
+          m_cudaLumaTasks->push_back(makeCudaLumaTask(
+            static_cast<std::uint32_t>(pos.x + (edgeDir == EdgeDir::HOR ? blkIdx * GRID_SIZE : 0)),
+            static_cast<std::uint32_t>(pos.y + (edgeDir == EdgeDir::VER ? blkIdx * GRID_SIZE : 0)),
+            edgeDir, filterLenValue[static_cast<unsigned>(maxFilterLen.p)],
+            filterLenValue[static_cast<unsigned>(maxFilterLen.q)], tc, beta, clpRng,
+            sidePisLarge, sideQisLarge, partPNoFilter, partQNoFilter));
           continue;
         }
         Pel *src0 = tmpSrc + srcStep * (idx * pelsInPart + blkIdx * GRID_SIZE);
@@ -1606,6 +1597,33 @@ void DeblockingFilter::xPelFilterLuma(Pel *src, const ptrdiff_t offset, const in
       src[offset * 6] = m10;
     }
   }
+}
+
+vtm::CudaDbfLumaTask DeblockingFilter::makeCudaLumaTask(
+  const std::uint32_t x, const std::uint32_t y, const EdgeDir edgeDir,
+  const std::uint8_t maxFilterLenP, const std::uint8_t maxFilterLenQ,
+  const int tc, const int beta, const ClpRng &clpRng,
+  const bool sidePisLarge, const bool sideQisLarge,
+  const bool partPNoFilter, const bool partQNoFilter)
+{
+  vtm::CudaDbfLumaTask task{};
+  task.x = x;
+  task.y = y;
+  task.tc = tc;
+  task.beta = beta;
+  task.minSample = clpRng.min;
+  task.maxSample = clpRng.max;
+  task.direction = edgeDir == EdgeDir::VER ? 0 : 1;
+  // At horizontal CTU boundaries VTM intentionally disables the long P side while the
+  // derived maximum remains 5/7. Serialize the effective lengths consumed by the filter,
+  // so each long-side flag and descriptor length remain equivalent and self-contained.
+  task.maxFilterLenP = sidePisLarge ? maxFilterLenP : std::min<std::uint8_t>(maxFilterLenP, 3);
+  task.maxFilterLenQ = sideQisLarge ? maxFilterLenQ : std::min<std::uint8_t>(maxFilterLenQ, 3);
+  task.flags = (sidePisLarge ? vtm::CUDA_DBF_SIDE_P_LARGE : 0)
+               | (sideQisLarge ? vtm::CUDA_DBF_SIDE_Q_LARGE : 0)
+               | (partPNoFilter ? vtm::CUDA_DBF_PART_P_NO_FILTER : 0)
+               | (partQNoFilter ? vtm::CUDA_DBF_PART_Q_NO_FILTER : 0);
+  return task;
 }
 
 void DeblockingFilter::filterLumaTasksCpu(Pel *base, const ptrdiff_t stride,

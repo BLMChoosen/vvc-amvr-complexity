@@ -224,6 +224,8 @@ struct CudaContext::Impl
   std::uint64_t dbfNoOpFrames = 0;
   std::uint64_t dbfMirrorUploadBytes = 0;
   std::uint64_t dbfMirrorDownloadBytes = 0;
+  std::uint64_t dbfMirrorSynchronizations = 0;
+  std::uint64_t dbfIntegrationSynchronizations = 0;
   std::uint64_t dbfDescriptorCollectionNanoseconds = 0;
   std::uint64_t dbfIntegrationNanoseconds = 0;
   std::uint64_t mirrorSynchronizationOperations = 0;
@@ -973,6 +975,8 @@ void CudaContext::create(const int device)
   m_impl->dbfNoOpFrames = 0;
   m_impl->dbfMirrorUploadBytes = 0;
   m_impl->dbfMirrorDownloadBytes = 0;
+  m_impl->dbfMirrorSynchronizations = 0;
+  m_impl->dbfIntegrationSynchronizations = 0;
   m_impl->dbfDescriptorCollectionNanoseconds = 0;
   m_impl->dbfIntegrationNanoseconds = 0;
   m_impl->mirrorSynchronizationOperations = 0;
@@ -2222,13 +2226,16 @@ CudaDbfDispatchResult CudaContext::filterDbfLumaFrame(const CudaMirrorHandle rec
     const bool segmentInside = t.direction == 0
       ? t.x < frame.width && std::uint64_t(t.y) + 4 <= frame.height
       : t.y < frame.height && std::uint64_t(t.x) + 4 <= frame.width;
+    const bool pLarge = (t.flags & CUDA_DBF_SIDE_P_LARGE) != 0;
+    const bool qLarge = (t.flags & CUDA_DBF_SIDE_Q_LARGE) != 0;
     if (t.direction > 1 || !validLenP || !validLenQ || !segmentInside
-        || (t.x & 3) != 0 || (t.y & 3) != 0 || t.tc < 0 || t.beta < 0
+        || (t.x & 3) != 0 || (t.y & 3) != 0
+        || t.tc < 0 || t.tc > cudaDbfMaximumTc(frame.bitDepth)
+        || t.beta < 0 || t.beta > cudaDbfMaximumBeta(frame.bitDepth)
         || t.minSample != 0 || t.maxSample != (std::int32_t{1} << frame.bitDepth) - 1
         || (t.flags & ~(CUDA_DBF_SIDE_P_LARGE | CUDA_DBF_SIDE_Q_LARGE
                         | CUDA_DBF_PART_P_NO_FILTER | CUDA_DBF_PART_Q_NO_FILTER)) != 0
-        || ((t.flags & CUDA_DBF_SIDE_P_LARGE) != 0 && t.maxFilterLenP <= 3)
-        || ((t.flags & CUDA_DBF_SIDE_Q_LARGE) != 0 && t.maxFilterLenQ <= 3))
+        || pLarge != (t.maxFilterLenP > 3) || qLarge != (t.maxFilterLenQ > 3))
       return CudaDbfDispatchResult::NotEligible;
   }
   requireRuntime(m_impl.get());
@@ -2246,6 +2253,7 @@ CudaDbfDispatchResult CudaContext::filterDbfLumaFrame(const CudaMirrorHandle rec
     return CudaDbfDispatchResult::NoOp;
   }
   const CudaMirrorMemoryUsage before = m_impl->mirrorMemory.total;
+  const std::uint64_t mirrorSynchronizationsBefore = m_impl->mirrorSynchronizationOperations;
   const auto integrationStart = std::chrono::steady_clock::now();
   try
   {
@@ -2268,13 +2276,22 @@ CudaDbfDispatchResult CudaContext::filterDbfLumaFrame(const CudaMirrorHandle rec
 #endif
     ensureDevicePlane(reconstructionHandle, 0);
     cuda_backend::waitFence(m_impl->runtime, CudaQueue::Dbf, CudaFence::UploadComplete);
+    const DbfAccelerationStats runtimeBefore = cuda_backend::dbfStats(m_impl->runtime);
     cuda_backend::filterDbfLumaFrame(m_impl->runtime, mirror.planes[0].device, frame, tasks, taskCount);
+    const DbfAccelerationStats runtimeAfter = cuda_backend::dbfStats(m_impl->runtime);
     mirror.planes[0].state = CudaMirrorState::DeviceValid;
     mirror.planes[0].uploadPending = false;
     ensureHostPlane(reconstructionHandle, 0);
     const CudaMirrorMemoryUsage after = m_impl->mirrorMemory.total;
     m_impl->dbfMirrorUploadBytes += after.uploadedBytes - before.uploadedBytes;
     m_impl->dbfMirrorDownloadBytes += after.downloadedBytes - before.downloadedBytes;
+    const std::uint64_t mirrorSynchronizations =
+      m_impl->mirrorSynchronizationOperations - mirrorSynchronizationsBefore;
+    const std::uint64_t runtimeSynchronizations =
+      runtimeAfter.runtimeSynchronizations - runtimeBefore.runtimeSynchronizations;
+    m_impl->dbfMirrorSynchronizations += mirrorSynchronizations;
+    // Runtime host synchronizations, actual mirror synchronizations, and the upload-to-DBF stream dependency.
+    m_impl->dbfIntegrationSynchronizations += runtimeSynchronizations + mirrorSynchronizations + 1;
     m_impl->dbfIntegrationNanoseconds += static_cast<std::uint64_t>(
       std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - integrationStart).count());
     return CudaDbfDispatchResult::Executed;
@@ -2306,6 +2323,8 @@ DbfAccelerationStats CudaContext::dbfStats() const noexcept
   stats = cuda_backend::dbfStats(m_impl->runtime);
   stats.mirrorUploadBytes = m_impl->dbfMirrorUploadBytes;
   stats.mirrorDownloadBytes = m_impl->dbfMirrorDownloadBytes;
+  stats.mirrorSynchronizations = m_impl->dbfMirrorSynchronizations;
+  stats.integrationSynchronizations = m_impl->dbfIntegrationSynchronizations;
   stats.failures = m_impl->dbfFailures;
   stats.noOpFrames = m_impl->dbfNoOpFrames;
   stats.descriptorCollectionNanoseconds = m_impl->dbfDescriptorCollectionNanoseconds;
@@ -2563,6 +2582,24 @@ void CudaContext::injectDbfFailureForTesting(const CudaDbfTestFailurePoint failu
   cuda_backend::injectDbfFailure(m_impl->runtime, failurePoint);
 #else
   (void) failurePoint;
+#endif
+}
+
+std::uint64_t CudaContext::dbfLiveDeviceAllocationsForTesting() noexcept
+{
+#if VTM_ENABLE_CUDA
+  return cuda_backend::dbfLiveDeviceAllocationsForTesting();
+#else
+  return 0;
+#endif
+}
+
+std::uint64_t CudaContext::dbfLivePinnedAllocationsForTesting() noexcept
+{
+#if VTM_ENABLE_CUDA
+  return cuda_backend::dbfLivePinnedAllocationsForTesting();
+#else
+  return 0;
 #endif
 }
 

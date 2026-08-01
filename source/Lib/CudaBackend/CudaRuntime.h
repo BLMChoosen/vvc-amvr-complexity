@@ -90,6 +90,8 @@ void injectQpaFailurePoint(RuntimeContext *context, CudaBatchTestFailurePoint fa
 void injectAlfFailure(RuntimeContext *context, CudaAlfTestFailurePoint failurePoint);
 void injectDbfFailure(RuntimeContext *context, CudaDbfTestFailurePoint failurePoint);
 void injectPinnedReleaseFailures(unsigned failures);
+std::uint64_t dbfLiveDeviceAllocationsForTesting() noexcept;
+std::uint64_t dbfLivePinnedAllocationsForTesting() noexcept;
 
 }   // namespace vtm::cuda_backend
 

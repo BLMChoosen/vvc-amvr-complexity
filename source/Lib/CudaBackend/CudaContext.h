@@ -187,6 +187,8 @@ public:
   void injectQpaFailurePointForTesting(CudaBatchTestFailurePoint failurePoint);
   void injectAlfFailureForTesting(CudaAlfTestFailurePoint failurePoint);
   void injectDbfFailureForTesting(CudaDbfTestFailurePoint failurePoint);
+  static std::uint64_t dbfLiveDeviceAllocationsForTesting() noexcept;
+  static std::uint64_t dbfLivePinnedAllocationsForTesting() noexcept;
   void injectMirrorPlaneFailuresForTesting(std::uint8_t plane, unsigned allocationFailureStep,
                                            unsigned uploadFailures, unsigned downloadFailures);
   void injectPinnedReleaseFailuresForTesting(unsigned failures);
