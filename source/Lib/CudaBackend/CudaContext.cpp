@@ -2389,7 +2389,7 @@ bool CudaContext::isLoopFilterChainAccelerationAvailable() const noexcept
 #endif
 }
 
-CudaLoopFilterChainDispatchResult CudaContext::filterLoopFilterChain(
+CudaLoopFilterChainDispatchResult CudaContext::preflightLoopFilterChain(
   const CudaMirrorHandle reconstructionHandle, const CudaLoopFilterChainFrame &frame,
   const std::int32_t *lmcsLut, const CudaDbfLumaTask *dbfTasks, const std::uint32_t dbfTaskCount,
   const CudaSaoLumaCtuParam *saoCtus, const std::uint32_t saoCtuCount,
@@ -2397,12 +2397,7 @@ CudaLoopFilterChainDispatchResult CudaContext::filterLoopFilterChain(
 {
 #if VTM_ENABLE_CUDA
   const auto reject = [this](const char *reason = "unspecified") {
-#if VTM_CUDA_TESTING
-    if (std::getenv("VTM_CUDA_LOOP_FILTER_CHAIN_DIAGNOSTIC") != nullptr)
-      throw std::runtime_error(std::string("CUDA loop-filter chain preflight rejection: ") + reason);
-#else
     (void) reason;
-#endif
     ++m_impl->loopFilterChainNotEligible;
     return CudaLoopFilterChainDispatchResult::NotEligible;
   };
@@ -2421,7 +2416,7 @@ CudaLoopFilterChainDispatchResult CudaContext::filterLoopFilterChain(
       || (frame.bitDepth != 8 && frame.bitDepth != 10)
       || (frame.elementSize != 2 && frame.elementSize != 4)
       || frame.minSample != 0 || frame.maxSample != (std::int32_t{ 1 } << frame.bitDepth) - 1
-      || frame.stages == 0 || (frame.stages & ~validStages) != 0 || frame.unsupportedFeatures != 0)
+      || (frame.stages & ~validStages) != 0 || frame.unsupportedFeatures != 0)
     return reject("frame descriptor or unsupported feature");
 
   const bool runLmcs = (frame.stages & CUDA_LOOP_FILTER_LMCS) != 0;
@@ -2514,13 +2509,16 @@ CudaLoopFilterChainDispatchResult CudaContext::filterLoopFilterChain(
     }
   }
 
-  // A DBF-enabled picture can legitimately serialize no luma edges. With no other stage enabled,
-  // complete the chain as a no-op before touching the reconstruction mirror or allocating device data.
-  if (frame.stages == CUDA_LOOP_FILTER_DBF && dbfTaskCount == 0)
+  // A signalled stage set can collapse to no luma work after normative parameter reconstruction.
+  // Complete before resolving the mirror or touching the runtime.
+  if (frame.stages == 0 || (frame.stages == CUDA_LOOP_FILTER_DBF && dbfTaskCount == 0))
     return CudaLoopFilterChainDispatchResult::NoOp;
 
   requireRuntime(m_impl.get());
-  PictureMirror &mirror = findMirror(m_impl.get(), reconstructionHandle);
+  const auto mirrorFound = m_impl->mirrors.find(reconstructionHandle);
+  if (reconstructionHandle == 0 || mirrorFound == m_impl->mirrors.end())
+    return reject("reconstruction mirror handle");
+  PictureMirror &mirror = *mirrorFound->second;
   if (mirror.role != CudaPictureRole::Reconstruction || mirror.host.planeCount == 0)
     return reject("reconstruction mirror role or plane count");
   const CudaHostPlaneDesc &host = mirror.host.planes[0];
@@ -2529,6 +2527,33 @@ CudaLoopFilterChainDispatchResult CudaContext::filterLoopFilterChain(
       || (runDbf && dbfTaskCount != 0
           && (host.marginLeft < 8 || host.marginRight < 8 || host.marginTop < 8 || host.marginBottom < 8)))
     return reject("host plane descriptor or DBF margins");
+
+  return CudaLoopFilterChainDispatchResult::Executed;
+#else
+  (void) reconstructionHandle; (void) frame; (void) lmcsLut; (void) dbfTasks; (void) dbfTaskCount;
+  (void) saoCtus; (void) saoCtuCount; (void) alfFrame; (void) alfCtus; (void) alfCtuCount;
+  return CudaLoopFilterChainDispatchResult::NotEligible;
+#endif
+}
+
+CudaLoopFilterChainDispatchResult CudaContext::filterLoopFilterChain(
+  const CudaMirrorHandle reconstructionHandle, const CudaLoopFilterChainFrame &frame,
+  const std::int32_t *lmcsLut, const CudaDbfLumaTask *dbfTasks, const std::uint32_t dbfTaskCount,
+  const CudaSaoLumaCtuParam *saoCtus, const std::uint32_t saoCtuCount,
+  const CudaAlfLumaFrame *alfFrame, const CudaAlfCtuParam *alfCtus, const std::uint32_t alfCtuCount)
+{
+#if VTM_ENABLE_CUDA
+  const CudaLoopFilterChainDispatchResult preflight = preflightLoopFilterChain(
+    reconstructionHandle, frame, lmcsLut, dbfTasks, dbfTaskCount, saoCtus, saoCtuCount,
+    alfFrame, alfCtus, alfCtuCount);
+  if (preflight != CudaLoopFilterChainDispatchResult::Executed)
+  {
+    return preflight;
+  }
+  const bool runLmcs = (frame.stages & CUDA_LOOP_FILTER_LMCS) != 0;
+  const bool runDbf = (frame.stages & CUDA_LOOP_FILTER_DBF) != 0;
+  const bool runSao = (frame.stages & CUDA_LOOP_FILTER_SAO) != 0;
+  PictureMirror &mirror = findMirror(m_impl.get(), reconstructionHandle);
 
   const auto integrationStart = std::chrono::steady_clock::now();
   const CudaMirrorMemoryUsage before = m_impl->mirrorMemory.total;
@@ -2559,7 +2584,9 @@ CudaLoopFilterChainDispatchResult CudaContext::filterLoopFilterChain(
     }
 #endif
     ensureDevicePlane(reconstructionHandle, 0);
-    cuda_backend::waitFence(m_impl->runtime, CudaQueue::Dbf, CudaFence::UploadComplete);
+    const CudaQueue firstConsumer = runLmcs || (runDbf && dbfTaskCount != 0) || runSao
+      ? CudaQueue::Dbf : CudaQueue::Alf;
+    cuda_backend::waitFence(m_impl->runtime, firstConsumer, CudaFence::UploadComplete);
     const LoopFilterChainAccelerationStats runtimeBefore = cuda_backend::loopFilterChainStats(m_impl->runtime);
     cuda_backend::filterLoopFilterChain(m_impl->runtime, mirror.planes[0].device, frame, lmcsLut,
                                          dbfTasks, dbfTaskCount, saoCtus, saoCtuCount,
@@ -2886,6 +2913,13 @@ void CudaContext::injectLoopFilterChainFailureForTesting(
   if (failurePoint == CudaLoopFilterChainTestFailurePoint::Download
       || failurePoint == CudaLoopFilterChainTestFailurePoint::Commit)
     m_impl->loopFilterChainIntegrationFailure = failurePoint;
+  else if (failurePoint == CudaLoopFilterChainTestFailurePoint::RecoveryDeviceRelease
+           || failurePoint == CudaLoopFilterChainTestFailurePoint::RecoveryPinnedRelease)
+  {
+    // Force entry into recovery while preserving the requested release fault for that recovery pass.
+    cuda_backend::injectLoopFilterChainFailure(m_impl->runtime, failurePoint);
+    m_impl->loopFilterChainIntegrationFailure = CudaLoopFilterChainTestFailurePoint::Download;
+  }
   else
     cuda_backend::injectLoopFilterChainFailure(m_impl->runtime, failurePoint);
 #else
@@ -2906,6 +2940,24 @@ std::uint64_t CudaContext::dbfLivePinnedAllocationsForTesting() noexcept
 {
 #if VTM_ENABLE_CUDA
   return cuda_backend::dbfLivePinnedAllocationsForTesting();
+#else
+  return 0;
+#endif
+}
+
+std::uint64_t CudaContext::chainLiveDeviceAllocationsForTesting() noexcept
+{
+#if VTM_ENABLE_CUDA
+  return cuda_backend::chainLiveDeviceAllocationsForTesting();
+#else
+  return 0;
+#endif
+}
+
+std::uint64_t CudaContext::chainLivePinnedAllocationsForTesting() noexcept
+{
+#if VTM_ENABLE_CUDA
+  return cuda_backend::chainLivePinnedAllocationsForTesting();
 #else
   return 0;
 #endif

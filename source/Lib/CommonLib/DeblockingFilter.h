@@ -104,6 +104,13 @@ public:
     NUM
   };
 
+  enum class PictureProcessing : std::uint8_t
+  {
+    All,
+    CollectLumaOnly,
+    ChromaOnly
+  };
+
 private:
   EnumArray<static_vector<EdgeStrengths, MAX_NUM_PARTS_IN_CTU>, EdgeDir> m_edgeStrengths;
 
@@ -151,6 +158,7 @@ private:
   PelStorage                   m_encPicYuvBuffer;
   bool                         m_enc;
   std::vector<vtm::CudaDbfLumaTask> *m_cudaLumaTasks = nullptr;
+  PictureProcessing            m_pictureProcessing = PictureProcessing::All;
 private:
   static PosType getPos(const Position &p, EdgeDir dir) { return dir == EdgeDir::VER ? p.x : p.y; }
 
@@ -213,7 +221,8 @@ public:
 
   /// picture-level deblocking filter
   void deblockingFilterPic        ( CodingStructure& cs,
-                                    std::vector<vtm::CudaDbfLumaTask> *cudaLumaTasks = nullptr );
+                                    std::vector<vtm::CudaDbfLumaTask> *cudaLumaTasks = nullptr,
+                                    PictureProcessing processing = PictureProcessing::All );
 
   static int getBeta              ( const int qp )
   {

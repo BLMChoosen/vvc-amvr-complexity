@@ -181,6 +181,13 @@ public:
   DbfAccelerationStats dbfStats() const noexcept;
   void recordDbfDescriptorCollection(std::uint64_t nanoseconds) noexcept;
   bool isLoopFilterChainAccelerationAvailable() const noexcept;
+  // Executed means every backend, mirror, and POD contract is valid and execution may be selected.
+  // NoOp and NotEligible never allocate, transfer, synchronize, or mutate the picture.
+  CudaLoopFilterChainDispatchResult preflightLoopFilterChain(
+    CudaMirrorHandle reconstructionMirror, const CudaLoopFilterChainFrame &frame,
+    const std::int32_t *lmcsLut, const CudaDbfLumaTask *dbfTasks, std::uint32_t dbfTaskCount,
+    const CudaSaoLumaCtuParam *saoCtus, std::uint32_t saoCtuCount,
+    const CudaAlfLumaFrame *alfFrame, const CudaAlfCtuParam *alfCtus, std::uint32_t alfCtuCount);
   CudaLoopFilterChainDispatchResult filterLoopFilterChain(
     CudaMirrorHandle reconstructionMirror, const CudaLoopFilterChainFrame &frame,
     const std::int32_t *lmcsLut, const CudaDbfLumaTask *dbfTasks, std::uint32_t dbfTaskCount,
@@ -199,6 +206,8 @@ public:
   void injectLoopFilterChainFailureForTesting(CudaLoopFilterChainTestFailurePoint failurePoint);
   static std::uint64_t dbfLiveDeviceAllocationsForTesting() noexcept;
   static std::uint64_t dbfLivePinnedAllocationsForTesting() noexcept;
+  static std::uint64_t chainLiveDeviceAllocationsForTesting() noexcept;
+  static std::uint64_t chainLivePinnedAllocationsForTesting() noexcept;
   void injectMirrorPlaneFailuresForTesting(std::uint8_t plane, unsigned allocationFailureStep,
                                            unsigned uploadFailures, unsigned downloadFailures);
   void injectPinnedReleaseFailuresForTesting(unsigned failures);

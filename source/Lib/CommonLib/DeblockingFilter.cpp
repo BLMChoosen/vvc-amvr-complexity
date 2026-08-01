@@ -137,15 +137,26 @@ void DeblockingFilter::destroy()
 }
 
 void DeblockingFilter::deblockingFilterPic(CodingStructure &cs,
-                                            std::vector<vtm::CudaDbfLumaTask> *cudaLumaTasks)
+                                            std::vector<vtm::CudaDbfLumaTask> *cudaLumaTasks,
+                                            const PictureProcessing processing)
 {
   CHECK(m_cudaLumaTasks != nullptr, "Nested CUDA deblocking collection is not supported");
+  CHECK(processing == PictureProcessing::CollectLumaOnly && cudaLumaTasks == nullptr,
+        "CUDA luma-only deblocking collection requires an output vector");
+  CHECK(processing != PictureProcessing::CollectLumaOnly && cudaLumaTasks != nullptr,
+        "CUDA deblocking descriptors may only be requested in collect-only mode");
   m_cudaLumaTasks = cudaLumaTasks;
+  m_pictureProcessing = processing;
   struct CollectionReset
   {
     std::vector<vtm::CudaDbfLumaTask> *&tasks;
-    ~CollectionReset() { tasks = nullptr; }
-  } collectionReset{ m_cudaLumaTasks };
+    PictureProcessing &processing;
+    ~CollectionReset()
+    {
+      tasks = nullptr;
+      processing = PictureProcessing::All;
+    }
+  } collectionReset{ m_cudaLumaTasks, m_pictureProcessing };
   if (m_cudaLumaTasks != nullptr)
   {
     m_cudaLumaTasks->clear();
@@ -153,15 +164,21 @@ void DeblockingFilter::deblockingFilterPic(CodingStructure &cs,
   }
   const PreCalcValues &pcv = *cs.pcv;
 
-  DTRACE_UPDATE( g_trace_ctx, ( std::make_pair( "poc", cs.slice->getPOC() ) ) );
-#if ENABLE_TRACING
-  for( int y = 0; y < pcv.heightInCtus; y++ )
+  if (processing != PictureProcessing::CollectLumaOnly)
   {
-    for( int x = 0; x < pcv.widthInCtus; x++ )
+    DTRACE_UPDATE( g_trace_ctx, ( std::make_pair( "poc", cs.slice->getPOC() ) ) );
+  }
+#if ENABLE_TRACING
+  if (processing != PictureProcessing::CollectLumaOnly)
+  {
+    for( int y = 0; y < pcv.heightInCtus; y++ )
     {
-      const UnitArea ctuArea( pcv.chrFormat, Area( x << pcv.maxCUWidthLog2, y << pcv.maxCUHeightLog2, pcv.maxCUWidth, pcv.maxCUWidth ) );
-      DTRACE    ( g_trace_ctx, D_CRC, "CTU %d %d", ctuArea.Y().x, ctuArea.Y().y );
-      DTRACE_CRC( g_trace_ctx, D_CRC, cs, cs.picture->getRecoBuf( clipArea( ctuArea, *cs.picture ) ), &ctuArea.Y() );
+      for( int x = 0; x < pcv.widthInCtus; x++ )
+      {
+        const UnitArea ctuArea( pcv.chrFormat, Area( x << pcv.maxCUWidthLog2, y << pcv.maxCUHeightLog2, pcv.maxCUWidth, pcv.maxCUWidth ) );
+        DTRACE    ( g_trace_ctx, D_CRC, "CTU %d %d", ctuArea.Y().x, ctuArea.Y().y );
+        DTRACE_CRC( g_trace_ctx, D_CRC, cs, cs.picture->getRecoBuf( clipArea( ctuArea, *cs.picture ) ), &ctuArea.Y() );
+      }
     }
   }
 #endif
@@ -259,14 +276,22 @@ void DeblockingFilter::deblockingFilterPic(CodingStructure &cs,
   }
 
 #if GREEN_METADATA_SEI_ENABLED
-  cs.m_featureCounter.addBoundaryStrengths(tempFeatureCounter);
+  if (processing != PictureProcessing::ChromaOnly)
+  {
+    cs.m_featureCounter.addBoundaryStrengths(tempFeatureCounter);
+  }
 #endif
-  DTRACE_PIC_COMP(D_REC_CB_LUMA_LF,   cs, cs.getRecoBuf(), COMPONENT_Y);
-  DTRACE_PIC_COMP(D_REC_CB_CHROMA_LF, cs, cs.getRecoBuf(), COMPONENT_Cb);
-  DTRACE_PIC_COMP(D_REC_CB_CHROMA_LF, cs, cs.getRecoBuf(), COMPONENT_Cr);
-
-  DTRACE    ( g_trace_ctx, D_CRC, "DeblockingFilter" );
-  DTRACE_CRC( g_trace_ctx, D_CRC, cs, cs.getRecoBuf() );
+  if (processing != PictureProcessing::CollectLumaOnly)
+  {
+    if (processing != PictureProcessing::ChromaOnly)
+    {
+      DTRACE_PIC_COMP(D_REC_CB_LUMA_LF, cs, cs.getRecoBuf(), COMPONENT_Y);
+    }
+    DTRACE_PIC_COMP(D_REC_CB_CHROMA_LF, cs, cs.getRecoBuf(), COMPONENT_Cb);
+    DTRACE_PIC_COMP(D_REC_CB_CHROMA_LF, cs, cs.getRecoBuf(), COMPONENT_Cr);
+    DTRACE    ( g_trace_ctx, D_CRC, "DeblockingFilter" );
+    DTRACE_CRC( g_trace_ctx, D_CRC, cs, cs.getRecoBuf() );
+  }
 }
 
 void DeblockingFilter::resetBsAndEdgeFilter(const EdgeDir edgeDir)
@@ -470,12 +495,13 @@ void DeblockingFilter::deblockCu(CodingUnit &cu, const EdgeDir edgeDir)
     }
     prevEdgeIdx = edge;
 
-    if ( cu.blocks[COMPONENT_Y].valid() )
+    if (cu.blocks[COMPONENT_Y].valid() && m_pictureProcessing != PictureProcessing::ChromaOnly)
     {
       xEdgeFilterLuma( cu, edgeDir, edge );
     }
 
-    if (isChromaEnabled(pcv.chrFormat) && cu.blocks[COMPONENT_Cb].valid())
+    if (isChromaEnabled(pcv.chrFormat) && cu.blocks[COMPONENT_Cb].valid()
+        && m_pictureProcessing != PictureProcessing::CollectLumaOnly)
     {
       if (cu.ispMode == ISPType::NONE || edge == 0)
       {

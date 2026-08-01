@@ -162,6 +162,8 @@ namespace
 std::atomic<unsigned> pinnedReleaseFailures{ 0 };
 std::atomic<std::uint64_t> dbfLiveDeviceAllocations{ 0 };
 std::atomic<std::uint64_t> dbfLivePinnedAllocations{ 0 };
+std::atomic<std::uint64_t> chainLiveDeviceAllocations{ 0 };
+std::atomic<std::uint64_t> chainLivePinnedAllocations{ 0 };
 #endif
 
 void checkCuda(const cudaError_t result, const char *operation)
@@ -214,6 +216,19 @@ std::uint64_t chainScratchBytes(const LoopFilterChainScratch &scratch) noexcept
   if (scratch.saoCtusHost != nullptr) bytes += scratch.saoCtuCapacity * sizeof(CudaSaoLumaCtuParam);
   if (scratch.saoOutputDevice != nullptr) bytes += scratch.outputCapacity;
   return bytes;
+}
+
+std::uint64_t combinedLoopFilterScratchBytes(const RuntimeContext *context) noexcept
+{
+  return chainScratchBytes(context->chainScratch) + chainScratchBytes(context->chainRetiredScratch)
+         + dbfScratchBytes(context->dbfScratch) + dbfScratchBytes(context->dbfRetiredScratch)
+         + alfScratchBytes(context->alfScratch) + alfScratchBytes(context->alfRetiredScratch);
+}
+
+void noteCombinedLoopFilterScratchPeak(RuntimeContext *context) noexcept
+{
+  context->chainPeakScratchBytes = std::max(context->chainPeakScratchBytes,
+                                            combinedLoopFilterScratchBytes(context));
 }
 
 void noteDbfDeviceAllocation() noexcept
@@ -276,6 +291,62 @@ cudaError_t releaseDbfPinned(void *&allocation) noexcept
   {
     allocation = nullptr;
     noteDbfPinnedRelease();
+  }
+  return result;
+}
+
+void noteChainDeviceAllocation() noexcept
+{
+#if VTM_CUDA_TESTING
+  ++chainLiveDeviceAllocations;
+#endif
+}
+
+void noteChainPinnedAllocation() noexcept
+{
+#if VTM_CUDA_TESTING
+  ++chainLivePinnedAllocations;
+#endif
+}
+
+cudaError_t releaseChainDeviceAsync(void *&allocation, const cudaStream_t stream) noexcept
+{
+  if (allocation == nullptr) return cudaSuccess;
+  const cudaError_t result = cudaFreeAsync(allocation, stream);
+  if (result == cudaSuccess)
+  {
+    allocation = nullptr;
+#if VTM_CUDA_TESTING
+    --chainLiveDeviceAllocations;
+#endif
+  }
+  return result;
+}
+
+cudaError_t releaseChainDeviceImmediate(void *&allocation) noexcept
+{
+  if (allocation == nullptr) return cudaSuccess;
+  const cudaError_t result = cudaFree(allocation);
+  if (result == cudaSuccess)
+  {
+    allocation = nullptr;
+#if VTM_CUDA_TESTING
+    --chainLiveDeviceAllocations;
+#endif
+  }
+  return result;
+}
+
+cudaError_t releaseChainPinned(void *&allocation) noexcept
+{
+  if (allocation == nullptr) return cudaSuccess;
+  const cudaError_t result = cudaFreeHost(allocation);
+  if (result == cudaSuccess)
+  {
+    allocation = nullptr;
+#if VTM_CUDA_TESTING
+    --chainLivePinnedAllocations;
+#endif
   }
   return result;
 }
@@ -457,9 +528,9 @@ void releaseRuntimeContext(RuntimeContext *context, const bool checked, const bo
     {
       if (*allocation != nullptr)
       {
-        const cudaError_t result = cudaFreeAsync(*allocation, context->streams[queueIndex(CudaQueue::Dbf)]);
+        const cudaError_t result = releaseChainDeviceAsync(
+          *allocation, context->streams[queueIndex(CudaQueue::Dbf)]);
         rememberCudaError(firstError, firstOperation, result, "loop-filter chain scratch release");
-        if (result == cudaSuccess) *allocation = nullptr;
       }
     }
   }
@@ -542,9 +613,8 @@ void releaseRuntimeContext(RuntimeContext *context, const bool checked, const bo
     {
       if (*allocation != nullptr)
       {
-        const cudaError_t result = cudaFree(*allocation);
+        const cudaError_t result = releaseChainDeviceImmediate(*allocation);
         rememberCudaError(firstError, firstOperation, result, "loop-filter chain scratch immediate release");
-        if (result == cudaSuccess) *allocation = nullptr;
       }
     }
     for (void **allocation : { reinterpret_cast<void **>(&scratch->lmcsLutHost),
@@ -552,9 +622,8 @@ void releaseRuntimeContext(RuntimeContext *context, const bool checked, const bo
     {
       if (*allocation != nullptr)
       {
-        const cudaError_t result = cudaFreeHost(*allocation);
+        const cudaError_t result = releaseChainPinned(*allocation);
         rememberCudaError(firstError, firstOperation, result, "pinned loop-filter chain scratch release");
-        if (result == cudaSuccess) *allocation = nullptr;
       }
     }
   }
@@ -998,8 +1067,8 @@ void releaseChainScratchChecked(RuntimeContext *context, LoopFilterChainScratch 
   {
     if (*allocation != nullptr)
     {
-      checkCuda(cudaFreeAsync(*allocation, stream), "old loop-filter chain device scratch release");
-      *allocation = nullptr;
+      checkCuda(releaseChainDeviceAsync(*allocation, stream),
+                "old loop-filter chain device scratch release");
     }
   }
   checkCuda(cudaStreamSynchronize(stream), "old loop-filter chain scratch release completion");
@@ -1011,8 +1080,7 @@ void releaseChainScratchChecked(RuntimeContext *context, LoopFilterChainScratch 
   {
     if (*allocation != nullptr)
     {
-      checkCuda(cudaFreeHost(*allocation), "old pinned loop-filter chain scratch release");
-      *allocation = nullptr;
+      checkCuda(releaseChainPinned(*allocation), "old pinned loop-filter chain scratch release");
     }
   }
   scratch = LoopFilterChainScratch{};
@@ -1051,10 +1119,12 @@ void ensureChainCapacity(RuntimeContext *context, const std::size_t lutCount,
         throw std::runtime_error("Injected CUDA loop-filter chain LUT device allocation failure");
       checkCuda(cudaMallocFromPoolAsync(reinterpret_cast<void **>(&candidate.lmcsLutDevice), lutBytes,
                                         context->memoryPool, stream), "loop-filter chain LUT allocation");
+      noteChainDeviceAllocation();
       if (consumeChainFailure(context, CudaLoopFilterChainTestFailurePoint::GrowLutPinned))
         throw std::runtime_error("Injected CUDA loop-filter chain LUT pinned allocation failure");
       checkCuda(cudaHostAlloc(reinterpret_cast<void **>(&candidate.lmcsLutHost), lutBytes,
                               cudaHostAllocPortable), "pinned loop-filter chain LUT allocation");
+      noteChainPinnedAllocation();
     }
     if (saoBytes != 0)
     {
@@ -1062,10 +1132,12 @@ void ensureChainCapacity(RuntimeContext *context, const std::size_t lutCount,
         throw std::runtime_error("Injected CUDA loop-filter chain SAO device allocation failure");
       checkCuda(cudaMallocFromPoolAsync(reinterpret_cast<void **>(&candidate.saoCtusDevice), saoBytes,
                                         context->memoryPool, stream), "loop-filter chain SAO allocation");
+      noteChainDeviceAllocation();
       if (consumeChainFailure(context, CudaLoopFilterChainTestFailurePoint::GrowSaoPinned))
         throw std::runtime_error("Injected CUDA loop-filter chain SAO pinned allocation failure");
       checkCuda(cudaHostAlloc(reinterpret_cast<void **>(&candidate.saoCtusHost), saoBytes,
                               cudaHostAllocPortable), "pinned loop-filter chain SAO allocation");
+      noteChainPinnedAllocation();
     }
     if (outputBytes != 0)
     {
@@ -1073,6 +1145,7 @@ void ensureChainCapacity(RuntimeContext *context, const std::size_t lutCount,
         throw std::runtime_error("Injected CUDA loop-filter chain SAO output allocation failure");
       checkCuda(cudaMallocFromPoolAsync(&candidate.saoOutputDevice, outputBytes, context->memoryPool, stream),
                 "loop-filter chain SAO output allocation");
+      noteChainDeviceAllocation();
     }
     checkCuda(cudaStreamSynchronize(stream), "loop-filter chain scratch allocation completion");
     ++context->chainSynchronizations;
@@ -1080,15 +1153,14 @@ void ensureChainCapacity(RuntimeContext *context, const std::size_t lutCount,
   catch (...)
   {
     context->chainRetiredScratch = candidate;
-    context->chainPeakScratchBytes = std::max(context->chainPeakScratchBytes,
-      chainScratchBytes(current) + chainScratchBytes(context->chainRetiredScratch));
+    noteCombinedLoopFilterScratchPeak(context);
     throw;
   }
   std::swap(current, candidate);
   context->chainRetiredScratch = candidate;
-  context->chainPeakScratchBytes = std::max(context->chainPeakScratchBytes,
-    chainScratchBytes(current) + chainScratchBytes(context->chainRetiredScratch));
+  noteCombinedLoopFilterScratchPeak(context);
   releaseChainScratchChecked(context, context->chainRetiredScratch, stream);
+  noteCombinedLoopFilterScratchPeak(context);
 }
 
 __device__ __forceinline__ int dbfAbs(const int x) { return x < 0 ? -x : x; }
@@ -2248,6 +2320,7 @@ void filterLoopFilterChain(RuntimeContext *context, const CudaDevicePlaneDesc &p
   const std::size_t rowBytes = std::size_t(frame.width) * frame.elementSize;
   const std::size_t outputBytes = runSao ? rowBytes * frame.height : 0;
   ensureChainCapacity(context, runLmcs ? frame.lmcsLutSize : 0, runSao ? saoCtuCount : 0, outputBytes);
+  noteCombinedLoopFilterScratchPeak(context);
   LoopFilterChainScratch &scratch = context->chainScratch;
   cudaStream_t stream = context->streams[queueIndex(CudaQueue::Dbf)];
 
@@ -2292,6 +2365,7 @@ void filterLoopFilterChain(RuntimeContext *context, const CudaDevicePlaneDesc &p
     const DbfAccelerationStats before = dbfStats(context);
     const CudaDbfFrame dbfFrame{ frame.width, frame.height, frame.bitDepth, frame.elementSize, { 0, 0 } };
     filterDbfLumaFrame(context, plane, dbfFrame, dbfTasks, dbfTaskCount);
+    noteCombinedLoopFilterScratchPeak(context);
     const DbfAccelerationStats after = dbfStats(context);
     uploaded += after.parameterUploadBytes - before.parameterUploadBytes;
     context->chainSynchronizations += after.runtimeSynchronizations - before.runtimeSynchronizations;
@@ -2356,6 +2430,7 @@ void filterLoopFilterChain(RuntimeContext *context, const CudaDevicePlaneDesc &p
     const auto stageStart = std::chrono::steady_clock::now();
     const AlfAccelerationStats before = alfStats(context);
     filterAlfLumaFrame(context, plane, *alfFrame, alfCtus, alfCtuCount, nullptr);
+    noteCombinedLoopFilterScratchPeak(context);
     const AlfAccelerationStats after = alfStats(context);
     uploaded += after.parameterUploadBytes - before.parameterUploadBytes;
     context->chainSynchronizations += after.runtimeSynchronizations - before.runtimeSynchronizations;
@@ -2451,9 +2526,10 @@ LoopFilterChainAccelerationStats loopFilterChainStats(const RuntimeContext *cont
   stats.saoNanoseconds = context->chainSaoNanoseconds;
   stats.alfNanoseconds = context->chainAlfNanoseconds;
   stats.runtimeNanoseconds = context->chainElapsedNanoseconds;
-  stats.scratchBytes = chainScratchBytes(context->chainScratch)
-                       + chainScratchBytes(context->chainRetiredScratch);
-  stats.retiredScratchBytes = chainScratchBytes(context->chainRetiredScratch);
+  stats.scratchBytes = combinedLoopFilterScratchBytes(context);
+  stats.retiredScratchBytes = chainScratchBytes(context->chainRetiredScratch)
+                              + dbfScratchBytes(context->dbfRetiredScratch)
+                              + alfScratchBytes(context->alfRetiredScratch);
   stats.peakScratchBytes = context->chainPeakScratchBytes;
   stats.enabled = true;
   return stats;
@@ -2689,8 +2765,11 @@ void recoverDbfRuntime(RuntimeContext *context) noexcept
 void recoverLoopFilterChainRuntime(RuntimeContext *context) noexcept
 {
   if (context == nullptr) return;
+  noteCombinedLoopFilterScratchPeak(context);
   (void) cudaSetDevice(context->device);
   const std::size_t index = queueIndex(CudaQueue::Dbf);
+  void **deferredDevice = nullptr;
+  void **deferredPinned = nullptr;
   if (context->streams[index] != nullptr) (void) cudaStreamSynchronize(context->streams[index]);
   for (LoopFilterChainScratch *scratch : { &context->chainScratch, &context->chainRetiredScratch })
   {
@@ -2703,11 +2782,13 @@ void recoverLoopFilterChainRuntime(RuntimeContext *context) noexcept
       if (deferDevice)
       {
         deferDevice = false;
+        deferredDevice = allocation;
         continue;
       }
       if (context->streams[index] != nullptr
-          && cudaFreeAsync(*allocation, context->streams[index]) == cudaSuccess)
-        *allocation = nullptr;
+          && releaseChainDeviceAsync(*allocation, context->streams[index]) == cudaSuccess)
+      {
+      }
       else
         (void) cudaGetLastError();
     }
@@ -2719,7 +2800,10 @@ void recoverLoopFilterChainRuntime(RuntimeContext *context) noexcept
                                reinterpret_cast<void **>(&scratch->saoCtusDevice),
                                &scratch->saoOutputDevice })
     {
-      if (*allocation != nullptr && cudaFree(*allocation) == cudaSuccess) *allocation = nullptr;
+      if (*allocation != nullptr && allocation != deferredDevice
+          && releaseChainDeviceImmediate(*allocation) == cudaSuccess)
+      {
+      }
       else if (*allocation != nullptr) (void) cudaGetLastError();
     }
     bool deferPinned = consumeChainFailure(context, CudaLoopFilterChainTestFailurePoint::RecoveryPinnedRelease);
@@ -2730,9 +2814,12 @@ void recoverLoopFilterChainRuntime(RuntimeContext *context) noexcept
       if (deferPinned)
       {
         deferPinned = false;
+        deferredPinned = allocation;
         continue;
       }
-      if (cudaFreeHost(*allocation) == cudaSuccess) *allocation = nullptr;
+      if (allocation != deferredPinned && releaseChainPinned(*allocation) == cudaSuccess)
+      {
+      }
       else (void) cudaGetLastError();
     }
     if (isEmpty(*scratch)) *scratch = LoopFilterChainScratch{};
@@ -2854,6 +2941,24 @@ std::uint64_t dbfLivePinnedAllocationsForTesting() noexcept
 {
 #if VTM_CUDA_TESTING
   return dbfLivePinnedAllocations.load(std::memory_order_relaxed);
+#else
+  return 0;
+#endif
+}
+
+std::uint64_t chainLiveDeviceAllocationsForTesting() noexcept
+{
+#if VTM_CUDA_TESTING
+  return chainLiveDeviceAllocations.load(std::memory_order_relaxed);
+#else
+  return 0;
+#endif
+}
+
+std::uint64_t chainLivePinnedAllocationsForTesting() noexcept
+{
+#if VTM_CUDA_TESTING
+  return chainLivePinnedAllocations.load(std::memory_order_relaxed);
 #else
   return 0;
 #endif

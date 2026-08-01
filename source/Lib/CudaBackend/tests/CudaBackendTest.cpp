@@ -2344,6 +2344,108 @@ bool runFullLoopFilterChainCase(vtm::CudaContext &context, const std::uint8_t bi
   return true;
 }
 
+bool runLoopFilterChainStageSubsetCase(vtm::CudaContext &context, const std::uint8_t bitDepth,
+                                       const std::uint8_t stages, const bool zeroDbfTasks)
+{
+  constexpr std::uint32_t width = 1924;
+  constexpr std::uint32_t height = 1084;
+  TestPicture picture(width, height, sizeof(Pel), bitDepth, 97 + stages, 1, 0, 0, 8, 8);
+  fillDbfPattern(picture, bitDepth);
+  const std::vector<std::uint8_t> originalStorage = picture.planes[0].storage;
+  const auto frame = makeChainFrame(width, height, bitDepth, stages);
+  std::vector<std::int32_t> lut(frame.lmcsLutSize);
+  for (std::uint32_t i = 0; i < frame.lmcsLutSize; ++i)
+    lut[i] = (i * 5 + (i >> 3) + 11) & frame.maxSample;
+  std::vector<vtm::CudaDbfLumaTask> dbf;
+  if ((stages & vtm::CUDA_LOOP_FILTER_DBF) != 0 && !zeroDbfTasks) dbf = makeDbfTasks(bitDepth);
+  std::vector<vtm::CudaSaoLumaCtuParam> sao;
+  if ((stages & vtm::CUDA_LOOP_FILTER_SAO) != 0) sao = makeSaoCtus(frame, true);
+  vtm::CudaAlfLumaFrame alfFrame{};
+  std::vector<vtm::CudaAlfCtuParam> alf;
+  if ((stages & vtm::CUDA_LOOP_FILTER_ALF) != 0)
+  {
+    alfFrame = makeAlfFrame(width, height, bitDepth);
+    alf = makeAlfCtus(alfFrame, true);
+  }
+
+  constexpr ptrdiff_t margin = 8;
+  const ptrdiff_t stride = width + 2 * margin;
+  std::vector<Pel> expected((height + 2 * margin) * stride);
+  Pel *active = expected.data() + margin * stride + margin;
+  for (std::uint32_t y = 0; y < height; ++y)
+    for (std::uint32_t x = 0; x < width; ++x)
+    {
+      int sample = readSample(static_cast<const std::uint8_t *>(picture.descriptor.planes[0].data)
+        + std::size_t(y) * picture.descriptor.planes[0].strideBytes + std::size_t(x) * sizeof(Pel), sizeof(Pel));
+      if ((stages & vtm::CUDA_LOOP_FILTER_LMCS) != 0) sample = lut[sample];
+      active[std::size_t(y) * stride + x] = static_cast<Pel>(sample);
+    }
+  if (!dbf.empty())
+    DeblockingFilter::filterLumaTasksCpu(active, stride, dbf.data(), static_cast<std::uint32_t>(dbf.size()));
+  if (!sao.empty())
+  {
+    const std::vector<Pel> source = expected;
+    applySaoReference(frame, sao, source.data() + margin * stride + margin, active, stride);
+  }
+  std::vector<Pel> alfExpected;
+  if (!alf.empty()) alfExpected = applyAlfReferenceFrame(alfFrame, alf, active, stride);
+  const Pel *finalExpected = alf.empty() ? active : alfExpected.data();
+  const ptrdiff_t finalStride = alf.empty() ? stride : width;
+
+  int owner = 0;
+  const auto mirror = context.registerPictureMirror(&owner, vtm::CudaPictureRole::Reconstruction,
+                                                     picture.descriptor);
+  const auto invoke = [&]() {
+    return context.filterLoopFilterChain(
+      mirror, frame, lut.empty() ? nullptr : lut.data(), dbf.empty() ? nullptr : dbf.data(),
+      static_cast<std::uint32_t>(dbf.size()), sao.empty() ? nullptr : sao.data(),
+      static_cast<std::uint32_t>(sao.size()), alf.empty() ? nullptr : &alfFrame,
+      alf.empty() ? nullptr : alf.data(), static_cast<std::uint32_t>(alf.size()));
+  };
+  const auto before = context.loopFilterChainStats();
+  bool valid = context.preflightLoopFilterChain(
+                 mirror, frame, lut.empty() ? nullptr : lut.data(), dbf.empty() ? nullptr : dbf.data(),
+                 static_cast<std::uint32_t>(dbf.size()), sao.empty() ? nullptr : sao.data(),
+                 static_cast<std::uint32_t>(sao.size()), alf.empty() ? nullptr : &alfFrame,
+                 alf.empty() ? nullptr : alf.data(), static_cast<std::uint32_t>(alf.size()))
+                 == vtm::CudaLoopFilterChainDispatchResult::Executed
+               && invoke() == vtm::CudaLoopFilterChainDispatchResult::Executed
+               && activePlaneEquals(picture, finalExpected, finalStride);
+  std::copy(originalStorage.begin(), originalStorage.end(), picture.planes[0].storage.begin());
+  context.markHostPlaneModified(mirror, 0);
+  valid = valid && invoke() == vtm::CudaLoopFilterChainDispatchResult::Executed
+          && activePlaneEquals(picture, finalExpected, finalStride);
+  const auto after = context.loopFilterChainStats();
+  valid = valid && after.dispatches == before.dispatches + 2
+          && after.integrationSynchronizations >= before.integrationSynchronizations + 2
+          && after.scratchBytes >= after.retiredScratchBytes
+          && after.peakScratchBytes >= after.scratchBytes;
+  context.releasePictureMirror(mirror);
+  return valid;
+}
+
+bool runLoopFilterChainStageSubsetMatrix(vtm::CudaContext &context, const std::uint8_t bitDepth)
+{
+  struct Case
+  {
+    std::uint8_t stages;
+    bool zeroDbfTasks;
+  };
+  const Case cases[] = {
+    { vtm::CUDA_LOOP_FILTER_LMCS, false },
+    { vtm::CUDA_LOOP_FILTER_DBF, false },
+    { vtm::CUDA_LOOP_FILTER_SAO, false },
+    { vtm::CUDA_LOOP_FILTER_ALF, false },
+    { std::uint8_t(vtm::CUDA_LOOP_FILTER_LMCS | vtm::CUDA_LOOP_FILTER_ALF), false },
+    { std::uint8_t(vtm::CUDA_LOOP_FILTER_DBF | vtm::CUDA_LOOP_FILTER_ALF), true },
+    { std::uint8_t(vtm::CUDA_LOOP_FILTER_DBF | vtm::CUDA_LOOP_FILTER_ALF), false },
+    { std::uint8_t(vtm::CUDA_LOOP_FILTER_SAO | vtm::CUDA_LOOP_FILTER_ALF), false }
+  };
+  for (const Case &test : cases)
+    if (!runLoopFilterChainStageSubsetCase(context, bitDepth, test.stages, test.zeroDbfTasks)) return false;
+  return true;
+}
+
 bool runLoopFilterChainDisabledStageContractCase(vtm::CudaContext &context)
 {
   constexpr std::uint32_t width = 1924;
@@ -2353,6 +2455,13 @@ bool runLoopFilterChainDisabledStageContractCase(vtm::CudaContext &context)
   const auto original = picture.planes[0].storage;
   const vtm::CudaLoopFilterChainFrame frame =
     makeChainFrame(width, height, 10, vtm::CUDA_LOOP_FILTER_DBF);
+  auto emptyFrame = frame;
+  emptyFrame.stages = 0;
+  const auto beforeNoOp = context.loopFilterChainStats();
+  if (context.filterLoopFilterChain(0, emptyFrame, nullptr, nullptr, 0, nullptr, 0, nullptr, nullptr, 0)
+        != vtm::CudaLoopFilterChainDispatchResult::NoOp
+      || context.loopFilterChainStats().dispatches != beforeNoOp.dispatches)
+    return false;
   int owner = 0;
   const auto mirror = context.registerPictureMirror(&owner, vtm::CudaPictureRole::Reconstruction,
                                                      picture.descriptor);
@@ -2385,6 +2494,34 @@ bool runLoopFilterChainFailureCase(const int device,
                               | vtm::CUDA_LOOP_FILTER_SAO | vtm::CUDA_LOOP_FILTER_ALF;
   vtm::CudaContext context;
   context.create(device);
+  const std::uint64_t liveDeviceBefore = vtm::CudaContext::chainLiveDeviceAllocationsForTesting();
+  const std::uint64_t livePinnedBefore = vtm::CudaContext::chainLivePinnedAllocationsForTesting();
+  const bool needsExistingScratch = point == vtm::CudaLoopFilterChainTestFailurePoint::OldDeviceRelease
+                                    || point == vtm::CudaLoopFilterChainTestFailurePoint::OldPinnedRelease;
+  if (needsExistingScratch)
+  {
+    constexpr std::uint32_t warmWidth = width;
+    constexpr std::uint32_t warmHeight = height;
+    constexpr std::uint8_t warmStages = vtm::CUDA_LOOP_FILTER_LMCS;
+    TestPicture warmPicture(warmWidth, warmHeight, sizeof(Pel), 10, 73, 1, 0, 0, 8, 8);
+    fillDbfPattern(warmPicture, 10);
+    const auto warmFrame = makeChainFrame(warmWidth, warmHeight, 10, warmStages);
+    std::vector<std::int32_t> warmLut(warmFrame.lmcsLutSize);
+    for (std::uint32_t i = 0; i < warmFrame.lmcsLutSize; ++i) warmLut[i] = i;
+    int warmOwner = 0;
+    const auto warmMirror = context.registerPictureMirror(
+      &warmOwner, vtm::CudaPictureRole::Reconstruction, warmPicture.descriptor);
+    const auto warmResult = context.filterLoopFilterChain(
+      warmMirror, warmFrame, warmLut.data(), nullptr, 0, nullptr, 0, nullptr, nullptr, 0);
+    context.releasePictureMirror(warmMirror);
+    if (warmResult != vtm::CudaLoopFilterChainDispatchResult::Executed)
+    {
+      std::cerr << "chain fault warm-up rejected point=" << static_cast<int>(point)
+                << " result=" << static_cast<int>(warmResult) << '\n';
+      context.shutdown();
+      return false;
+    }
+  }
   TestPicture picture(width, height, sizeof(Pel), 10, 79, 1, 0, 0, 8, 8);
   fillDbfPattern(picture, 10);
   const auto original = picture.planes[0].storage;
@@ -2405,16 +2542,42 @@ bool runLoopFilterChainFailureCase(const int device,
       &alfFrame, alf.data(), static_cast<std::uint32_t>(alf.size()));
   });
   const auto stats = context.loopFilterChainStats();
+  const std::uint64_t liveDeviceDuring = vtm::CudaContext::chainLiveDeviceAllocationsForTesting();
+  const std::uint64_t livePinnedDuring = vtm::CudaContext::chainLivePinnedAllocationsForTesting();
   const bool quarantined = context.pictureMirrorPlaneState(mirror, 0) == vtm::CudaMirrorState::HostValid;
   const auto retry = context.filterLoopFilterChain(mirror, frame, lut.data(), dbf.data(),
     static_cast<std::uint32_t>(dbf.size()), sao.data(), static_cast<std::uint32_t>(sao.size()),
     &alfFrame, alf.data(), static_cast<std::uint32_t>(alf.size()));
   const bool valid = failed && picture.planes[0].storage == original && quarantined
                      && stats.failures == 1 && stats.poisoned && !stats.enabled
-                     && retry == vtm::CudaLoopFilterChainDispatchResult::NotEligible;
+                     && retry == vtm::CudaLoopFilterChainDispatchResult::NotEligible
+                     && stats.scratchBytes >= stats.retiredScratchBytes
+                     && stats.peakScratchBytes >= stats.scratchBytes;
   context.releasePictureMirror(mirror);
+  const bool mirrorReleased = context.pictureMirrorMemoryStats().total.currentDeviceBytes == 0
+                              && context.pictureMirrorMemoryStats().total.currentPinnedBytes == 0;
   context.shutdown();
-  return valid;
+  const bool teardownClean = vtm::CudaContext::chainLiveDeviceAllocationsForTesting() == liveDeviceBefore
+                             && vtm::CudaContext::chainLivePinnedAllocationsForTesting() == livePinnedBefore;
+  const bool retainedAsInjected = point == vtm::CudaLoopFilterChainTestFailurePoint::RecoveryDeviceRelease
+    ? liveDeviceDuring > liveDeviceBefore && stats.scratchBytes != 0
+    : point == vtm::CudaLoopFilterChainTestFailurePoint::RecoveryPinnedRelease
+      ? livePinnedDuring > livePinnedBefore && stats.scratchBytes != 0 : true;
+  if (!(valid && mirrorReleased && teardownClean && retainedAsInjected))
+  {
+    std::cerr << "chain fault diagnostics point=" << static_cast<int>(point)
+              << " failed=" << failed << " unchanged=" << (picture.planes[0].storage == original)
+              << " quarantined=" << quarantined << " failures=" << stats.failures
+              << " poisoned=" << stats.poisoned << " enabled=" << stats.enabled
+              << " retry=" << static_cast<int>(retry) << " scratch=" << stats.scratchBytes
+              << " retired=" << stats.retiredScratchBytes << " peak=" << stats.peakScratchBytes
+              << " liveDevice=" << liveDeviceBefore << '/' << liveDeviceDuring << '/'
+              << vtm::CudaContext::chainLiveDeviceAllocationsForTesting()
+              << " livePinned=" << livePinnedBefore << '/' << livePinnedDuring << '/'
+              << vtm::CudaContext::chainLivePinnedAllocationsForTesting()
+              << " mirrorReleased=" << mirrorReleased << " retained=" << retainedAsInjected << '\n';
+  }
+  return valid && mirrorReleased && teardownClean && retainedAsInjected;
 }
 
 
@@ -2426,6 +2589,8 @@ bool runLoopFilterChainFailureMatrix(const int device)
          vtm::CudaLoopFilterChainTestFailurePoint::GrowSaoDevice,
          vtm::CudaLoopFilterChainTestFailurePoint::GrowSaoPinned,
          vtm::CudaLoopFilterChainTestFailurePoint::GrowSaoOutput,
+         vtm::CudaLoopFilterChainTestFailurePoint::OldDeviceRelease,
+         vtm::CudaLoopFilterChainTestFailurePoint::OldPinnedRelease,
          vtm::CudaLoopFilterChainTestFailurePoint::Upload,
          vtm::CudaLoopFilterChainTestFailurePoint::LmcsLaunch,
          vtm::CudaLoopFilterChainTestFailurePoint::LmcsCompletion,
@@ -2435,8 +2600,14 @@ bool runLoopFilterChainFailureMatrix(const int device)
          vtm::CudaLoopFilterChainTestFailurePoint::SaoCompletion,
          vtm::CudaLoopFilterChainTestFailurePoint::AlfStage,
          vtm::CudaLoopFilterChainTestFailurePoint::Download,
-         vtm::CudaLoopFilterChainTestFailurePoint::Commit })
-    if (!runLoopFilterChainFailureCase(device, point)) return false;
+         vtm::CudaLoopFilterChainTestFailurePoint::Commit,
+         vtm::CudaLoopFilterChainTestFailurePoint::RecoveryDeviceRelease,
+         vtm::CudaLoopFilterChainTestFailurePoint::RecoveryPinnedRelease })
+    if (!runLoopFilterChainFailureCase(device, point))
+    {
+      std::cerr << "loop-filter chain failure point failed: " << static_cast<int>(point) << '\n';
+      return false;
+    }
   return true;
 }
 #endif
@@ -2563,6 +2734,8 @@ int main(const int argc, char *argv[])
       if (passed) { std::cerr << "chain-test sao-10\n"; passed = runSaoChainCase(context, 10); }
       if (passed) { std::cerr << "chain-test full-8\n"; passed = runFullLoopFilterChainCase(context, 8); }
       if (passed) { std::cerr << "chain-test full-10\n"; passed = runFullLoopFilterChainCase(context, 10); }
+      if (passed) { std::cerr << "chain-test subsets-8\n"; passed = runLoopFilterChainStageSubsetMatrix(context, 8); }
+      if (passed) { std::cerr << "chain-test subsets-10\n"; passed = runLoopFilterChainStageSubsetMatrix(context, 10); }
       if (passed) { std::cerr << "chain-test disabled-stage-contract\n"; passed = runLoopFilterChainDisabledStageContractCase(context); }
       context.shutdown();
 #if VTM_CUDA_TESTING
@@ -2882,6 +3055,8 @@ int main(const int argc, char *argv[])
     }
     if (!runSaoChainCase(context, 8) || !runSaoChainCase(context, 10)
         || !runFullLoopFilterChainCase(context, 8) || !runFullLoopFilterChainCase(context, 10)
+        || !runLoopFilterChainStageSubsetMatrix(context, 8)
+        || !runLoopFilterChainStageSubsetMatrix(context, 10)
         || !runLoopFilterChainDisabledStageContractCase(context))
     {
       return fail("CUDA resident loop-filter chain differed from normative stage references");
