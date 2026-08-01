@@ -30,3 +30,6 @@ CLAUDE.md
 /build-phase1-review-cuda-b
 /build-phase1-review-cuda
 /build-phase1-review-cpu
+/build-alf-cpu
+/build-alf-pel32
+/build-alf-benchmark

@@ -84,6 +84,13 @@ public:
   void reconstructCoeffAPSs(CodingStructure& cs, bool luma, bool chroma, bool isRdo);
   void reconstructCoeff(AlfParam& alfParam, ChannelType channel, const bool isRdo, const bool isRedo = false);
   void ALFProcess(CodingStructure& cs);
+  void prepareLumaParameters(CodingStructure& cs);
+  AlfMode getLumaMode(int ctuIdx) const { return m_modes[COMPONENT_Y][ctuIdx]; }
+  const AlfCoeff* getLumaCoeff(AlfMode mode) const { return getCoeffVals(mode); }
+  const Pel* getLumaClip(AlfMode mode) const { return getClipVals(mode); }
+  const ClpRng& getLumaClpRng() const { return m_clpRngs.comp[COMPONENT_Y]; }
+  int getLumaVbCtuHeight() const { return m_alfVBLumaCTUHeight; }
+  int getLumaVbPos() const { return m_alfVBLumaPos; }
   void        create(const int picWidth, const int picHeight, const ChromaFormat format, const int maxCUWidth,
                      const int maxCUHeight, const int maxCUDepth, const BitDepths &inputBitDepth);
   void destroy();

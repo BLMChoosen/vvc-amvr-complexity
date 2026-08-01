@@ -52,6 +52,7 @@ struct ComputeConfig
   int            device  = 0;
   bool           enableExperimentalSad = false;
   bool           enableExperimentalQpa = false;
+  bool           enableExperimentalAlf = false;
 };
 
 struct CudaSadStats
@@ -59,6 +60,26 @@ struct CudaSadStats
   std::uint64_t dispatches = 0;
   std::uint64_t failures = 0;
   bool disabled = false;
+};
+
+// Backend-neutral decoder telemetry.  Keeping this type here prevents DecoderLib's
+// public API from depending on CUDA ALF implementation headers.
+struct AlfAccelerationStats
+{
+  std::uint64_t dispatches = 0;
+  std::uint64_t ctus = 0;
+  std::uint64_t pixels = 0;
+  std::uint64_t parameterUploadBytes = 0;
+  std::uint64_t diagnosticDownloadBytes = 0;
+  std::uint64_t commitBytes = 0;
+  std::uint64_t synchronizations = 0;
+  std::uint64_t elapsedNanoseconds = 0;
+  std::uint64_t scratchBytes = 0;
+  std::uint64_t retiredScratchBytes = 0;
+  std::uint64_t peakScratchBytes = 0;
+  std::uint64_t failures = 0;
+  bool enabled = false;
+  bool poisoned = false;
 };
 
 const char *computeBackendName(ComputeBackend backend) noexcept;

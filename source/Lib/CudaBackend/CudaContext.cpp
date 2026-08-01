@@ -35,6 +35,7 @@
 
 #include <array>
 #include <atomic>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <algorithm>
@@ -207,6 +208,8 @@ struct CudaContext::Impl
   std::uint64_t distortionFailures = 0;
   bool qpaAccelerationEnabled = true;
   std::uint64_t qpaFailures = 0;
+  bool alfAccelerationEnabled = true;
+  std::uint64_t alfFailures = 0;
   CudaMirrorMemoryStats mirrorMemory{};
 #if VTM_CUDA_TESTING
   std::uint8_t mirrorFailurePlane = 0xff;
@@ -868,6 +871,8 @@ void CudaContext::create(const int device)
   m_impl->distortionFailures = 0;
   m_impl->qpaAccelerationEnabled = true;
   m_impl->qpaFailures = 0;
+  m_impl->alfAccelerationEnabled = true;
+  m_impl->alfFailures = 0;
   m_impl->mirrorMemory = CudaMirrorMemoryStats{};
   m_impl->mirrorMemory.budgetBytes = CUDA_DEFAULT_MIRROR_MEMORY_BUDGET_BYTES;
   m_impl->ownerThread = std::this_thread::get_id();
@@ -1874,6 +1879,142 @@ bool CudaContext::isQpaAccelerationAvailable() const noexcept
 #endif
 }
 
+bool CudaContext::isAlfAccelerationAvailable() const noexcept
+{
+#if VTM_ENABLE_CUDA
+  return m_impl->runtime != nullptr && m_impl->alfAccelerationEnabled;
+#else
+  return false;
+#endif
+}
+
+CudaAlfDispatchResult CudaContext::filterAlfLumaFrame(const CudaMirrorHandle reconstructionHandle,
+                                                       const CudaAlfLumaFrame &frame,
+                                                       const CudaAlfCtuParam *ctus,
+                                                       const std::uint32_t ctuCount,
+                                                       CudaAlfClassifier *classifiers)
+{
+#if VTM_ENABLE_CUDA
+  const std::uint64_t pixels = static_cast<std::uint64_t>(frame.width) * frame.height;
+  const std::uint64_t expectedCtusInWidth = frame.ctuWidth == 0 ? 0
+    : (static_cast<std::uint64_t>(frame.width) + frame.ctuWidth - 1) / frame.ctuWidth;
+  const std::uint64_t expectedCtusInHeight = frame.ctuHeight == 0 ? 0
+    : (static_cast<std::uint64_t>(frame.height) + frame.ctuHeight - 1) / frame.ctuHeight;
+  if (!isAlfAccelerationAvailable() || ctus == nullptr || ctuCount == 0 || ctuCount > CUDA_ALF_MAX_CTUS
+      || frame.width == 0 || frame.height == 0 || frame.ctuWidth == 0 || frame.ctuHeight == 0
+      || frame.ctusInWidth == 0 || frame.ctusInHeight == 0
+      || frame.ctusInWidth != expectedCtusInWidth || frame.ctusInHeight != expectedCtusInHeight
+      || expectedCtusInWidth * expectedCtusInHeight != ctuCount
+      || pixels < CUDA_ALF_MIN_FRAME_PIXELS
+      || (frame.width & 3) != 0 || (frame.height & 3) != 0
+      || frame.vbCtuHeight <= 0 || (frame.vbCtuHeight & (frame.vbCtuHeight - 1)) != 0
+      || frame.vbCtuHeight != static_cast<std::int32_t>(frame.ctuHeight)
+      || frame.vbPos != frame.vbCtuHeight - 4
+      || (frame.bitDepth != 8 && frame.bitDepth != 10)
+      || (frame.elementSize != 2 && frame.elementSize != 4)
+      || pixels > std::numeric_limits<std::size_t>::max() / frame.elementSize
+      || frame.minSample > frame.maxSample)
+  {
+    return CudaAlfDispatchResult::NotEligible;
+  }
+  for (std::uint32_t index = 0; index < ctuCount; ++index)
+  {
+    const CudaAlfCtuParam &ctu = ctus[index];
+    const std::uint64_t expectedX64 = static_cast<std::uint64_t>(index % frame.ctusInWidth) * frame.ctuWidth;
+    const std::uint64_t expectedY64 = static_cast<std::uint64_t>(index / frame.ctusInWidth) * frame.ctuHeight;
+    const std::uint32_t expectedWidth = static_cast<std::uint32_t>(
+      std::min<std::uint64_t>(frame.ctuWidth, static_cast<std::uint64_t>(frame.width) - expectedX64));
+    const std::uint32_t expectedHeight = static_cast<std::uint32_t>(
+      std::min<std::uint64_t>(frame.ctuHeight, static_cast<std::uint64_t>(frame.height) - expectedY64));
+    if (ctu.x != expectedX64 || ctu.y != expectedY64 || ctu.width != expectedWidth
+        || ctu.height != expectedHeight || ctu.enabled > 1)
+    {
+      return CudaAlfDispatchResult::NotEligible;
+    }
+  }
+
+  requireRuntime(m_impl.get());
+  PictureMirror &mirror = findMirror(m_impl.get(), reconstructionHandle);
+  if (mirror.role != CudaPictureRole::Reconstruction || mirror.host.planeCount == 0)
+  {
+    return CudaAlfDispatchResult::NotEligible;
+  }
+  const CudaHostPlaneDesc &host = mirror.host.planes[0];
+  if (host.width != frame.width || host.height != frame.height || host.bitDepth != frame.bitDepth
+      || host.elementSize != frame.elementSize || host.data == nullptr || host.strideBytes <= 0
+      || static_cast<std::uint64_t>(host.strideBytes)
+           < static_cast<std::uint64_t>(host.width) * host.elementSize)
+  {
+    return CudaAlfDispatchResult::NotEligible;
+  }
+
+  try
+  {
+#if VTM_CUDA_TESTING
+    if (const char *failure = std::getenv("VTM_CUDA_ALF_TEST_FAILURE");
+        failure != nullptr && std::strcmp(failure, "kernel-launch") == 0)
+    {
+      cuda_backend::injectAlfFailure(m_impl->runtime, CudaAlfTestFailurePoint::KernelLaunch);
+    }
+#endif
+    ensureDevicePlane(reconstructionHandle, 0);
+    cuda_backend::waitFence(m_impl->runtime, CudaQueue::Alf, CudaFence::UploadComplete);
+    cuda_backend::filterAlfLumaFrame(m_impl->runtime, mirror.planes[0].device, frame, ctus, ctuCount,
+                                     classifiers);
+    return CudaAlfDispatchResult::Executed;
+  }
+  catch (const std::exception &error)
+  {
+    ++m_impl->alfFailures;
+    m_impl->alfAccelerationEnabled = false;
+    // The host reconstruction remains authoritative until a fully synchronized D2D commit succeeds.
+    // Quarantine this ALF queue/mirror state before propagating the fatal backend error.
+    try
+    {
+      markHostPlaneModified(reconstructionHandle, 0);
+    }
+    catch (...)
+    {
+    }
+    cuda_backend::recoverAlfRuntime(m_impl->runtime);
+    throw std::runtime_error(std::string("CUDA ALF execution failed: ") + error.what());
+  }
+  catch (...)
+  {
+    ++m_impl->alfFailures;
+    m_impl->alfAccelerationEnabled = false;
+    try
+    {
+      markHostPlaneModified(reconstructionHandle, 0);
+    }
+    catch (...)
+    {
+    }
+    cuda_backend::recoverAlfRuntime(m_impl->runtime);
+    throw std::runtime_error("CUDA ALF execution failed with an unknown error");
+  }
+#else
+  (void) reconstructionHandle;
+  (void) frame;
+  (void) ctus;
+  (void) ctuCount;
+  (void) classifiers;
+  return CudaAlfDispatchResult::NotEligible;
+#endif
+}
+
+AlfAccelerationStats CudaContext::alfStats() const noexcept
+{
+  AlfAccelerationStats stats{};
+#if VTM_ENABLE_CUDA
+  stats = cuda_backend::alfStats(m_impl->runtime);
+  stats.failures = m_impl->alfFailures;
+  stats.enabled = m_impl->runtime != nullptr && m_impl->alfAccelerationEnabled;
+  stats.poisoned = m_impl->runtime != nullptr && !m_impl->alfAccelerationEnabled;
+#endif
+  return stats;
+}
+
 bool CudaContext::computeQpaBatch(const CudaMirrorHandle sourceHandle, const CudaQpaTask *tasks,
                                   const std::uint32_t taskCount, CudaQpaResult *results) noexcept
 {
@@ -2043,6 +2184,16 @@ void CudaContext::injectQpaFailuresForTesting(const unsigned allocationFailureSt
 #else
   (void) allocationFailureStep;
   (void) executionFailures;
+#endif
+}
+
+void CudaContext::injectAlfFailureForTesting(const CudaAlfTestFailurePoint failurePoint)
+{
+#if VTM_ENABLE_CUDA
+  requireRuntime(m_impl.get());
+  cuda_backend::injectAlfFailure(m_impl->runtime, failurePoint);
+#else
+  (void) failurePoint;
 #endif
 }
 

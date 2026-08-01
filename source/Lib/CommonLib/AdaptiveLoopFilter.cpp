@@ -591,6 +591,16 @@ void AdaptiveLoopFilter::ALFProcess(CodingStructure& cs)
   }
 }
 
+void AdaptiveLoopFilter::prepareLumaParameters(CodingStructure& cs)
+{
+  m_clpRngs = cs.slice->getClpRngs();
+  for (int compIdx = 0; compIdx < MAX_NUM_COMPONENT; ++compIdx)
+  {
+    m_modes[compIdx] = cs.picture->getAlfModes(compIdx);
+  }
+  reconstructCoeffAPSs(cs, true, false, false);
+}
+
 void AdaptiveLoopFilter::reconstructCoeffAPSs(CodingStructure& cs, bool luma, bool chroma, bool isRdo)
 {
   //luma

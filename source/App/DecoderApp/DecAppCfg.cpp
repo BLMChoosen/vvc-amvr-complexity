@@ -80,6 +80,7 @@ bool DecAppCfg::parseCfg( int argc, char* argv[] )
   ("ReconFile,o",               m_reconFileName,                       std::string(""), "reconstructed YUV output file name\n")
   ("GPUBackend",                gpuBackend,                            std::string("cpu"), "compute backend (cpu or cuda)")
   ("GPUDevice",                 m_computeConfig.device,                           0, "CUDA device index")
+  ("GPUExperimentalALF",        m_computeConfig.enableExperimentalAlf,        false, "Enable experimental CUDA luma ALF")
   ("OplFile,-opl",              m_oplFilename,                         std::string(""), "opl-file name without extension for conformance testing\n")
 
 #if ENABLE_SIMD_OPT

@@ -33,6 +33,7 @@
 
 #include "CudaBackend/ComputeBackend.h"
 #include "CudaBackend/CudaContext.h"
+#include "CommonLib/AdaptiveLoopFilter.h"
 
 #include <cstdlib>
 #include <algorithm>
@@ -41,7 +42,9 @@
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <string>
 #include <thread>
@@ -277,6 +280,74 @@ bool validatePictureDescriptorFormats()
     return false;
   }
   return true;
+}
+
+bool writeAlfBenchmarkYuv(const std::string &path)
+{
+  constexpr int width = 1920;
+  constexpr int height = 1080;
+  std::ofstream output(path, std::ios::binary | std::ios::trunc);
+  if (!output) return false;
+  for (int y = 0; y < height; ++y)
+    for (int x = 0; x < width; ++x)
+      output.put(static_cast<char>(((x * 13) ^ (y * 29) ^ ((x + y) >> 2)) & 0xff));
+  for (int component = 0; component < 2; ++component)
+    for (int y = 0; y < height / 2; ++y)
+      for (int x = 0; x < width / 2; ++x)
+        output.put(static_cast<char>(128 + (((x * 3 + y * 5 + component * 17) & 15) - 8)));
+  return output.good();
+}
+
+bool repeatAccessUnit(const std::string &inputPath, const std::string &outputPath, const int repetitions)
+{
+  if (repetitions < 1 || repetitions > 1000) return false;
+  std::ifstream input(inputPath, std::ios::binary);
+  if (!input) return false;
+  const std::vector<char> bytes((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+  if (bytes.empty()) return false;
+  struct NalSpan { std::size_t begin; std::size_t end; std::uint8_t type; };
+  std::vector<std::pair<std::size_t, std::size_t>> starts;
+  for (std::size_t i = 0; i + 4 < bytes.size(); ++i)
+  {
+    const bool three = bytes[i] == 0 && bytes[i + 1] == 0 && bytes[i + 2] == 1;
+    const bool four = bytes[i] == 0 && bytes[i + 1] == 0 && bytes[i + 2] == 0 && bytes[i + 3] == 1;
+    if (three || four)
+    {
+      starts.emplace_back(i, four ? 4 : 3);
+      i += (four ? 4 : 3) - 1;
+    }
+  }
+  std::vector<NalSpan> nals;
+  for (std::size_t index = 0; index < starts.size(); ++index)
+  {
+    const std::size_t begin = starts[index].first;
+    const std::size_t end = index + 1 < starts.size() ? starts[index + 1].first : bytes.size();
+    const std::size_t header = begin + starts[index].second;
+    if (header + 1 >= end) return false;
+    nals.push_back(NalSpan{ begin, end, static_cast<std::uint8_t>(
+      static_cast<unsigned char>(bytes[header + 1]) >> 3) });
+  }
+  if (nals.empty()) return false;
+  std::ofstream output(outputPath, std::ios::binary | std::ios::trunc);
+  if (!output) return false;
+  bool hasVcl = false;
+  // Parameter sets and prefix APS are persistent. Write them once so repeated self-contained IDRs do not
+  // repeatedly tear down the same sequence state; omit EOS/EOB and repeat only the VCL access unit.
+  for (const NalSpan &nal : nals)
+  {
+    if (nal.type <= 11)
+    {
+      hasVcl = true;
+      continue;
+    }
+    if (nal.type == 21 || nal.type == 22) continue;
+    output.write(bytes.data() + nal.begin, static_cast<std::streamsize>(nal.end - nal.begin));
+  }
+  for (int repetition = 0; repetition < repetitions; ++repetition)
+    for (const NalSpan &nal : nals)
+      if (nal.type <= 11)
+        output.write(bytes.data() + nal.begin, static_cast<std::streamsize>(nal.end - nal.begin));
+  return hasVcl && output.good();
 }
 
 bool runSadBatchCase(vtm::CudaContext &context, const std::uint8_t elementSize, const std::uint8_t bitDepth,
@@ -1044,6 +1115,344 @@ bool runSameLayoutPartialReleaseCase(const int device, const bool retainDevice)
   context.shutdown();
   return releasedCleanly;
 }
+
+struct AlfReferenceAccess : AdaptiveLoopFilter
+{
+  static void copyFixedSet(const unsigned set, AlfCoeff *coefficients)
+  {
+    for (unsigned classIdx = 0; classIdx < MAX_NUM_ALF_CLASSES; ++classIdx)
+    {
+      const int fixed = m_classToFilterMapping[set % ALF_NUM_FIXED_FILTER_SETS][classIdx];
+      std::copy_n(m_fixedFilterSetCoeff[fixed], MAX_NUM_ALF_LUMA_COEFF,
+                  coefficients + classIdx * MAX_NUM_ALF_LUMA_COEFF);
+    }
+  }
+};
+
+vtm::CudaAlfLumaFrame makeAlfFrame(const std::uint32_t width, const std::uint32_t height,
+                                   const std::uint8_t bitDepth)
+{
+  constexpr std::uint32_t ctuSize = 64;
+  vtm::CudaAlfLumaFrame frame{};
+  frame.width = width;
+  frame.height = height;
+  frame.ctuWidth = frame.ctuHeight = ctuSize;
+  frame.ctusInWidth = (width + ctuSize - 1) / ctuSize;
+  frame.ctusInHeight = (height + ctuSize - 1) / ctuSize;
+  frame.minSample = 0;
+  frame.maxSample = (1 << bitDepth) - 1;
+  frame.vbCtuHeight = ctuSize;
+  frame.vbPos = ctuSize - 4;
+  frame.bitDepth = bitDepth;
+  frame.elementSize = sizeof(Pel);
+  return frame;
+}
+
+std::vector<vtm::CudaAlfCtuParam> makeAlfCtus(const vtm::CudaAlfLumaFrame &frame,
+                                              const bool varied)
+{
+  const std::uint32_t count = frame.ctusInWidth * frame.ctusInHeight;
+  std::vector<vtm::CudaAlfCtuParam> ctus(count);
+  std::array<AlfCoeff, MAX_NUM_ALF_CLASSES * MAX_NUM_ALF_LUMA_COEFF> fixed{};
+  for (std::uint32_t index = 0; index < count; ++index)
+  {
+    vtm::CudaAlfCtuParam &ctu = ctus[index];
+    ctu.x = (index % frame.ctusInWidth) * frame.ctuWidth;
+    ctu.y = (index / frame.ctusInWidth) * frame.ctuHeight;
+    ctu.width = std::min(frame.ctuWidth, frame.width - ctu.x);
+    ctu.height = std::min(frame.ctuHeight, frame.height - ctu.y);
+    ctu.enabled = varied ? (index % 7 != 0) : 1;
+    if (varied && (index & 1) == 0)
+    {
+      AlfReferenceAccess::copyFixedSet(index, fixed.data());
+    }
+    for (std::uint32_t classIdx = 0; classIdx < vtm::CUDA_ALF_CLASSES; ++classIdx)
+    {
+      for (std::uint32_t tap = 0; tap < vtm::CUDA_ALF_COEFFICIENTS; ++tap)
+      {
+        const std::uint32_t offset = classIdx * vtm::CUDA_ALF_COEFFICIENTS + tap;
+        const int apsValue = tap == 12 ? 0 : int((index * 11 + classIdx * 7 + tap * 5) % 31) - 15;
+        ctu.coefficients[offset] = varied && (index & 1) == 0 ? fixed[offset]
+                                                                      : static_cast<std::int16_t>(apsValue);
+        constexpr int clips[6] = { 0, 1, 3, 7, 31, 1023 };
+        ctu.clipValues[offset] = varied ? std::min(frame.maxSample, clips[(index + classIdx + tap) % 6])
+                                        : frame.maxSample;
+      }
+    }
+  }
+  return ctus;
+}
+
+void fillAlfPattern(TestPicture &picture, const std::uint8_t bitDepth)
+{
+  const vtm::CudaHostPlaneDesc &host = picture.descriptor.planes[0];
+  const std::uint32_t maximum = (1u << bitDepth) - 1;
+  for (std::uint32_t y = 0; y < host.height; ++y)
+  {
+    auto *row = static_cast<std::uint8_t *>(host.data) + static_cast<std::size_t>(y) * host.strideBytes;
+    for (std::uint32_t x = 0; x < host.width; ++x)
+    {
+      const std::uint32_t region = (x / 256) & 3;
+      std::uint32_t directional = 0;
+      if (region == 0) directional = (y * 73) ^ ((x >> 4) * 3);
+      if (region == 1) directional = (x * 79) ^ ((y >> 4) * 5);
+      if (region == 2) directional = ((x + y) * 83) ^ ((x >> 3) * 7);
+      if (region == 3) directional = ((x + maximum - (y & maximum)) * 89) ^ ((y >> 3) * 11);
+      std::uint32_t value = (directional + ((x * 17 + y * 29) & 7)) & maximum;
+      if ((x + y * 3) % 97 == 0) value = 0;
+      if ((x * 5 + y) % 101 == 0) value = maximum;
+      writeSample(row + static_cast<std::size_t>(x) * host.elementSize, host.elementSize,
+                  static_cast<std::int32_t>(value));
+    }
+  }
+  picture.planes[0].expected = picture.planes[0].storage;
+}
+
+bool runAlfLumaCase(vtm::CudaContext &context, const std::uint8_t bitDepth,
+                    double *cpuMilliseconds = nullptr, double *gpuMilliseconds = nullptr)
+{
+  constexpr std::uint32_t width = 1924;
+  constexpr std::uint32_t height = 1084;
+  TestPicture picture(width, height, sizeof(Pel), bitDepth, bitDepth, 1, 0, 0);
+  fillAlfPattern(picture, bitDepth);
+  const vtm::CudaHostPlaneDesc &host = picture.descriptor.planes[0];
+  auto sample = [&host](const int x, const int y) {
+    return static_cast<Pel>(readSample(static_cast<const std::uint8_t *>(host.data)
+      + static_cast<std::size_t>(y) * host.strideBytes + static_cast<std::size_t>(x) * host.elementSize,
+      host.elementSize));
+  };
+
+  constexpr int margin = 4;
+  const int extendedStride = int(width) + 2 * margin;
+  std::vector<Pel> extended((height + 2 * margin) * extendedStride);
+  Pel *active = extended.data() + margin * extendedStride + margin;
+  for (int y = -margin; y < int(height) + margin; ++y)
+    for (int x = -margin; x < int(width) + margin; ++x)
+      active[y * extendedStride + x] = sample(std::max(0, std::min(x, int(width) - 1)),
+                                               std::max(0, std::min(y, int(height) - 1)));
+
+  std::vector<AlfClassifier> cpuFull(static_cast<std::size_t>(width) * height);
+  std::vector<AlfClassifier *> cpuRows(height);
+  for (std::uint32_t y = 0; y < height; ++y) cpuRows[y] = cpuFull.data() + static_cast<std::size_t>(y) * width;
+  int lapData[NUM_DIRECTIONS][AdaptiveLoopFilter::m_CLASSIFICATION_BLK_SIZE + 5]
+             [AdaptiveLoopFilter::m_CLASSIFICATION_BLK_SIZE + 5]{};
+  int *lapRows[NUM_DIRECTIONS][AdaptiveLoopFilter::m_CLASSIFICATION_BLK_SIZE + 5]{};
+  int **lap[NUM_DIRECTIONS]{};
+  for (int direction = 0; direction < NUM_DIRECTIONS; ++direction)
+  {
+    for (int y = 0; y < AdaptiveLoopFilter::m_CLASSIFICATION_BLK_SIZE + 5; ++y)
+      lapRows[direction][y] = lapData[direction][y];
+    lap[direction] = lapRows[direction];
+  }
+  const CPelBuf source(active, extendedStride, width, height);
+  const vtm::CudaAlfLumaFrame frame = makeAlfFrame(width, height, bitDepth);
+  const auto cpuStart = std::chrono::steady_clock::now();
+  for (std::uint32_t y = 0; y < height; y += AdaptiveLoopFilter::m_CLASSIFICATION_BLK_SIZE)
+  {
+    for (std::uint32_t x = 0; x < width; x += AdaptiveLoopFilter::m_CLASSIFICATION_BLK_SIZE)
+    {
+      const Area block(x, y, std::min<std::uint32_t>(AdaptiveLoopFilter::m_CLASSIFICATION_BLK_SIZE, width - x),
+                       std::min<std::uint32_t>(AdaptiveLoopFilter::m_CLASSIFICATION_BLK_SIZE, height - y));
+      AdaptiveLoopFilter::deriveClassificationBlk(cpuRows.data(), lap, source, block, block,
+                                                   bitDepth + 4, frame.vbCtuHeight, frame.vbPos);
+    }
+  }
+
+  std::vector<vtm::CudaAlfCtuParam> ctus = makeAlfCtus(frame, true);
+  std::vector<Pel> expected(static_cast<std::size_t>(width) * height);
+  for (std::uint32_t y = 0; y < height; ++y)
+    std::copy_n(active + static_cast<std::size_t>(y) * extendedStride, width,
+                expected.data() + static_cast<std::size_t>(y) * width);
+  PelUnitBuf dst(ChromaFormat::_400, PelBuf(expected.data(), width, width, height));
+  const CPelUnitBuf src(ChromaFormat::_400, source);
+  XuPool pool;
+  CodingStructure cs(pool);
+  std::array<Pel, MAX_NUM_ALF_CLASSES * MAX_NUM_ALF_LUMA_COEFF> clips{};
+  const ClpRng range{ 0, (1 << bitDepth) - 1, bitDepth, 0 };
+  bool sawDisabled = false;
+  bool sawPartial = false;
+  for (const vtm::CudaAlfCtuParam &ctu : ctus)
+  {
+    sawPartial |= ctu.width != frame.ctuWidth || ctu.height != frame.ctuHeight;
+    if (!ctu.enabled)
+    {
+      sawDisabled = true;
+      continue;
+    }
+    for (std::size_t i = 0; i < clips.size(); ++i) clips[i] = static_cast<Pel>(ctu.clipValues[i]);
+    const Area block(ctu.x, ctu.y, ctu.width, ctu.height);
+    AdaptiveLoopFilter::filterBlk<ALF_FILTER_7>(cpuRows.data(), dst, src, block, block, COMPONENT_Y,
+      reinterpret_cast<const AlfCoeff *>(ctu.coefficients), clips.data(), range, cs,
+      frame.vbCtuHeight, frame.vbPos);
+  }
+  const auto cpuEnd = std::chrono::steady_clock::now();
+  if (!sawDisabled || !sawPartial) return false;
+
+  std::vector<vtm::CudaAlfClassifier> gpuClassifiers(static_cast<std::size_t>(width >> 2) * (height >> 2));
+  int owner = 0;
+  const auto mirror = context.registerPictureMirror(&owner, vtm::CudaPictureRole::Reconstruction,
+                                                     picture.descriptor);
+  const auto gpuStart = std::chrono::steady_clock::now();
+  if (context.filterAlfLumaFrame(mirror, frame, ctus.data(), static_cast<std::uint32_t>(ctus.size()),
+                                 gpuClassifiers.data()) != vtm::CudaAlfDispatchResult::Executed)
+    return false;
+  context.markDevicePlaneModified(mirror, 0);
+  context.ensureHostPlane(mirror, 0);
+  const auto gpuEnd = std::chrono::steady_clock::now();
+  unsigned transposeMask = 0;
+  for (std::uint32_t y = 0; y < height; y += 4)
+  {
+    for (std::uint32_t x = 0; x < width; x += 4)
+    {
+      const std::uint32_t compact = (y >> 2) * (width >> 2) + (x >> 2);
+      transposeMask |= 1u << cpuRows[y][x].transposeIdx;
+      if (gpuClassifiers[compact].classIdx != cpuRows[y][x].classIdx
+          || gpuClassifiers[compact].transposeIdx != cpuRows[y][x].transposeIdx)
+        return false;
+    }
+  }
+  if (transposeMask != 0xf) return false;
+  for (std::uint32_t y = 0; y < height; ++y)
+    for (std::uint32_t x = 0; x < width; ++x)
+      if (sample(x, y) != expected[static_cast<std::size_t>(y) * width + x]) return false;
+  context.releasePictureMirror(mirror);
+  if (cpuMilliseconds != nullptr)
+    *cpuMilliseconds = std::chrono::duration<double, std::milli>(cpuEnd - cpuStart).count();
+  if (gpuMilliseconds != nullptr)
+    *gpuMilliseconds = std::chrono::duration<double, std::milli>(gpuEnd - gpuStart).count();
+  return true;
+}
+
+bool benchmarkAlfFrame(vtm::CudaContext &context)
+{
+  constexpr int runs = 5;
+  std::array<double, runs> cpu{};
+  std::array<double, runs> gpu{};
+  const vtm::AlfAccelerationStats before = context.alfStats();
+  for (int run = 0; run < runs; ++run)
+  {
+    if (!runAlfLumaCase(context, 10, &cpu[run], &gpu[run])) return false;
+  }
+  std::sort(cpu.begin(), cpu.end());
+  std::sort(gpu.begin(), gpu.end());
+  const vtm::AlfAccelerationStats after = context.alfStats();
+  const double cpuMedian = cpu[runs / 2];
+  const double gpuMedian = gpu[runs / 2];
+  std::cout << "ALF 1924x1084 Pel" << (sizeof(Pel) * 8) << "/10-bit, 5-run median: CPU "
+            << cpuMedian << " ms, CUDA end-to-end " << gpuMedian << " ms, speedup "
+            << (gpuMedian > 0.0 ? cpuMedian / gpuMedian : 0.0) << "x; telemetry delta params/diagnostic/commit "
+            << (after.parameterUploadBytes - before.parameterUploadBytes) << "/"
+            << (after.diagnosticDownloadBytes - before.diagnosticDownloadBytes) << "/"
+            << (after.commitBytes - before.commitBytes) << " bytes, syncs "
+            << (after.synchronizations - before.synchronizations) << ", runtime "
+            << double(after.elapsedNanoseconds - before.elapsedNanoseconds) / 1000000.0 << " ms. "
+            << (gpuMedian < cpuMedian ? "Wall-time gate passed for this microbenchmark."
+                                      : "Wall-time gate did not pass; GPUExperimentalALF remains off by default.")
+            << '\n';
+  return true;
+}
+
+bool runAlfGeometryCase(vtm::CudaContext &context)
+{
+  const vtm::AlfAccelerationStats before = context.alfStats();
+  constexpr std::uint32_t width = 1924;
+  constexpr std::uint32_t height = 1084;
+  TestPicture picture(width, height, sizeof(Pel), 10, 44, 1, 0, 0);
+  picture.fillSamples(44);
+  int owner = 0;
+  const auto mirror = context.registerPictureMirror(&owner, vtm::CudaPictureRole::Reconstruction,
+                                                     picture.descriptor);
+  const vtm::CudaAlfLumaFrame frame = makeAlfFrame(width, height, 10);
+  const std::vector<vtm::CudaAlfCtuParam> validCtus = makeAlfCtus(frame, false);
+  auto rejected = [&](vtm::CudaAlfLumaFrame alteredFrame, std::vector<vtm::CudaAlfCtuParam> alteredCtus,
+                      std::uint32_t count) {
+    return context.filterAlfLumaFrame(mirror, alteredFrame, alteredCtus.data(), count)
+           == vtm::CudaAlfDispatchResult::NotEligible;
+  };
+  vtm::CudaAlfLumaFrame altered = frame;
+  altered.ctusInWidth--;
+  if (!rejected(altered, validCtus, static_cast<std::uint32_t>(validCtus.size()))) return false;
+  altered = frame;
+  altered.ctusInHeight--;
+  if (!rejected(altered, validCtus, static_cast<std::uint32_t>(validCtus.size()))) return false;
+  if (!rejected(frame, validCtus, static_cast<std::uint32_t>(validCtus.size() - 1))) return false;
+  for (int field = 0; field < 5; ++field)
+  {
+    auto ctus = validCtus;
+    vtm::CudaAlfCtuParam &last = ctus.back();
+    if (field == 0) last.x = std::numeric_limits<std::uint32_t>::max();
+    if (field == 1) last.y++;
+    if (field == 2) last.width++;
+    if (field == 3) last.height++;
+    if (field == 4) last.enabled = 2;
+    if (!rejected(frame, std::move(ctus), static_cast<std::uint32_t>(validCtus.size()))) return false;
+  }
+  if (context.alfStats().dispatches != before.dispatches
+      || context.alfStats().failures != before.failures) return false;
+  if (context.filterAlfLumaFrame(mirror, frame, validCtus.data(), static_cast<std::uint32_t>(validCtus.size()))
+      != vtm::CudaAlfDispatchResult::Executed) return false;
+  context.markDevicePlaneModified(mirror, 0);
+  context.ensureHostPlane(mirror, 0);
+  context.releasePictureMirror(mirror);
+  return true;
+}
+
+bool runAlfFailureCase(const int device, const vtm::CudaAlfTestFailurePoint failurePoint)
+{
+  const bool releaseFailure = failurePoint == vtm::CudaAlfTestFailurePoint::OldDeviceRelease
+                              || failurePoint == vtm::CudaAlfTestFailurePoint::OldPinnedRelease;
+  vtm::CudaContext context;
+  context.create(device);
+  TestPicture small(1920, 1080, sizeof(Pel), 10, 31, 1, 0, 0);
+  small.fillSamples(31);
+  int smallOwner = 0;
+  const auto smallMirror = context.registerPictureMirror(&smallOwner, vtm::CudaPictureRole::Reconstruction,
+                                                          small.descriptor);
+  const auto smallFrame = makeAlfFrame(1920, 1080, 10);
+  const auto smallCtus = makeAlfCtus(smallFrame, false);
+  if (releaseFailure)
+  {
+    if (context.filterAlfLumaFrame(smallMirror, smallFrame, smallCtus.data(),
+                                   static_cast<std::uint32_t>(smallCtus.size()))
+        != vtm::CudaAlfDispatchResult::Executed) return false;
+    context.markDevicePlaneModified(smallMirror, 0);
+    context.ensureHostPlane(smallMirror, 0);
+  }
+
+  TestPicture large(1924, 1084, sizeof(Pel), 10, 37, 1, 0, 0);
+  large.fillSamples(37);
+  int largeOwner = 0;
+  const auto largeMirror = context.registerPictureMirror(&largeOwner, vtm::CudaPictureRole::Reconstruction,
+                                                          large.descriptor);
+  const auto largeFrame = makeAlfFrame(1924, 1084, 10);
+  const auto largeCtus = makeAlfCtus(largeFrame, false);
+  std::vector<vtm::CudaAlfClassifier> diagnostics(static_cast<std::size_t>(largeFrame.width >> 2)
+                                                   * (largeFrame.height >> 2));
+  context.injectAlfFailureForTesting(failurePoint);
+  bool didThrow = false;
+  bool clearMessage = false;
+  try
+  {
+    (void) context.filterAlfLumaFrame(largeMirror, largeFrame, largeCtus.data(),
+                                      static_cast<std::uint32_t>(largeCtus.size()), diagnostics.data());
+  }
+  catch (const std::exception &error)
+  {
+    didThrow = true;
+    clearMessage = std::string(error.what()).find("CUDA ALF execution failed:") != std::string::npos;
+  }
+  const vtm::AlfAccelerationStats stats = context.alfStats();
+  const bool rejectedAfterPoison = context.filterAlfLumaFrame(
+    largeMirror, largeFrame, largeCtus.data(), static_cast<std::uint32_t>(largeCtus.size()))
+    == vtm::CudaAlfDispatchResult::NotEligible;
+  const bool valid = didThrow && clearMessage && rejectedAfterPoison && stats.failures == 1
+                     && stats.poisoned && !stats.enabled
+                     && stats.dispatches == (releaseFailure ? 1u : 0u)
+                     && stats.scratchBytes == 0 && stats.retiredScratchBytes == 0
+                     && large.matchesExpected();
+  context.shutdown();
+  return valid;
+}
 #endif
 
 }   // namespace
@@ -1052,9 +1461,18 @@ int main(const int argc, char *argv[])
 {
   vtm::ComputeConfig config;
   if (config.backend != vtm::ComputeBackend::CPU || config.device != 0
-      || config.enableExperimentalSad || config.enableExperimentalQpa)
+      || config.enableExperimentalSad || config.enableExperimentalQpa || config.enableExperimentalAlf)
   {
     return fail("ComputeConfig defaults are invalid");
+  }
+  if (argc == 3 && std::string(argv[1]) == "--write-alf-yuv")
+  {
+    return writeAlfBenchmarkYuv(argv[2]) ? EXIT_SUCCESS : fail("Could not write ALF benchmark YUV");
+  }
+  if (argc == 5 && std::string(argv[1]) == "--repeat-access-unit")
+  {
+    return repeatAccessUnit(argv[2], argv[3], std::stoi(argv[4]))
+             ? EXIT_SUCCESS : fail("Could not repeat ALF access unit");
   }
 
   vtm::ComputeBackend backend;
@@ -1443,6 +1861,11 @@ int main(const int argc, char *argv[])
     {
       return fail("CUDA QPA cross-CTU batch differed from the real ordered CPU calculation");
     }
+    if (!runAlfLumaCase(context, 8) || !runAlfLumaCase(context, 10)
+        || !runAlfGeometryCase(context))
+    {
+      return fail("CUDA luma ALF classifier/filter differed from the scalar VTM reference");
+    }
 #if VTM_CUDA_TESTING
     if (!runSadFailureCase(std::stoi(argv[2]), 1, 0)
         || !runSadFailureCase(std::stoi(argv[2]), 2, 0)
@@ -1457,6 +1880,21 @@ int main(const int argc, char *argv[])
         || !runQpaFailureCase(std::stoi(argv[2]), 0, 1))
     {
       return fail("CUDA QPA failure recovery, discard, or permanent poisoning is invalid");
+    }
+    if (!runAlfFailureCase(std::stoi(argv[2]), vtm::CudaAlfTestFailurePoint::GrowCtuDevice)
+        || !runAlfFailureCase(std::stoi(argv[2]), vtm::CudaAlfTestFailurePoint::GrowPinnedCtu)
+        || !runAlfFailureCase(std::stoi(argv[2]), vtm::CudaAlfTestFailurePoint::GrowClassifiers)
+        || !runAlfFailureCase(std::stoi(argv[2]), vtm::CudaAlfTestFailurePoint::GrowOutput)
+        || !runAlfFailureCase(std::stoi(argv[2]), vtm::CudaAlfTestFailurePoint::OldDeviceRelease)
+        || !runAlfFailureCase(std::stoi(argv[2]), vtm::CudaAlfTestFailurePoint::OldPinnedRelease)
+        || !runAlfFailureCase(std::stoi(argv[2]), vtm::CudaAlfTestFailurePoint::ParameterUpload)
+        || !runAlfFailureCase(std::stoi(argv[2]), vtm::CudaAlfTestFailurePoint::KernelLaunch)
+        || !runAlfFailureCase(std::stoi(argv[2]), vtm::CudaAlfTestFailurePoint::KernelCompletion)
+        || !runAlfFailureCase(std::stoi(argv[2]), vtm::CudaAlfTestFailurePoint::DiagnosticDownload)
+        || !runAlfFailureCase(std::stoi(argv[2]), vtm::CudaAlfTestFailurePoint::CommitCopy)
+        || !runAlfFailureCase(std::stoi(argv[2]), vtm::CudaAlfTestFailurePoint::CommitCompletion))
+    {
+      return fail("CUDA ALF rollback or permanent poisoning is invalid");
     }
     if (!runRecoveryIsolationCase(std::stoi(argv[2]), true)
         || !runRecoveryIsolationCase(std::stoi(argv[2]), false))
@@ -1482,9 +1920,10 @@ int main(const int argc, char *argv[])
       return fail("CUDA same-layout rebind could not reconstruct independently retained mirror resources");
     }
 #endif
-    if (runBenchmark && (!benchmarkSadBatch(context) || !benchmarkQpaBatch(std::stoi(argv[2]))))
+    if (runBenchmark && (!benchmarkSadBatch(context) || !benchmarkQpaBatch(std::stoi(argv[2]))
+                         || !benchmarkAlfFrame(context)))
     {
-      return fail("CUDA SAD microbenchmark failed");
+      return fail("CUDA backend microbenchmark failed");
     }
 
 #if VTM_CUDA_TESTING

@@ -910,6 +910,23 @@ uint32_t DecApp::decode()
   // get the number of checksum errors
   uint32_t nRet = m_cDecLib.getNumberOfChecksumErrorsDetected();
 
+  if (m_computeConfig.backend == vtm::ComputeBackend::CUDA)
+  {
+    const vtm::AlfAccelerationStats stats = m_cDecLib.alfAccelerationStats();
+    msg(INFO, "CUDA ALF frames: %llu, CTUs: %llu, pixels: %llu, scratch current/retired/peak: %llu/%llu/%llu bytes, "
+              "transfer params/diagnostic/commit: %llu/%llu/%llu bytes, syncs: %llu, time: %.3f ms, failures: %llu, "
+              "enabled: %d, poisoned: %d, disabled-by-flag: %d\n",
+        static_cast<unsigned long long>(stats.dispatches), static_cast<unsigned long long>(stats.ctus),
+        static_cast<unsigned long long>(stats.pixels), static_cast<unsigned long long>(stats.scratchBytes),
+        static_cast<unsigned long long>(stats.retiredScratchBytes), static_cast<unsigned long long>(stats.peakScratchBytes),
+        static_cast<unsigned long long>(stats.parameterUploadBytes),
+        static_cast<unsigned long long>(stats.diagnosticDownloadBytes),
+        static_cast<unsigned long long>(stats.commitBytes), static_cast<unsigned long long>(stats.synchronizations),
+        static_cast<double>(stats.elapsedNanoseconds) / 1000000.0,
+        static_cast<unsigned long long>(stats.failures),
+        stats.enabled ? 1 : 0, stats.poisoned ? 1 : 0, m_computeConfig.enableExperimentalAlf ? 0 : 1);
+  }
+
   // Synchronize compute work before deleting pictures, then release the backend last.
   xCleanupDecLib();
 
@@ -1488,8 +1505,10 @@ void DecApp::xFlushOutput( PicList* pcListPic, const int layerId )
         pcPicTop->neededForOutput = false;
         pcPicBottom->neededForOutput = false;
 
+        m_cDecLib.releasePictureComputeResources(pcPicTop);
         pcPicTop->destroy();
         delete pcPicTop;
+        m_cDecLib.releasePictureComputeResources(pcPicBottom);
         pcPicBottom->destroy();
         delete pcPicBottom;
         iterPic--;
@@ -1499,6 +1518,7 @@ void DecApp::xFlushOutput( PicList* pcListPic, const int layerId )
       }
       else
       {
+        m_cDecLib.releasePictureComputeResources(pcPicTop);
         pcPicTop->destroy();
         delete pcPicTop;
         iterPic--;
@@ -1717,6 +1737,7 @@ void DecApp::xFlushOutput( PicList* pcListPic, const int layerId )
 
       if (p != nullptr && (m_shutterIntervalPostFileName.empty() || !getShutterFilterFlag()))
       {
+        m_cDecLib.releasePictureComputeResources(p);
         p->destroy();
         delete p;
         p = nullptr;

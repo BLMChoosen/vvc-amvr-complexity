@@ -68,13 +68,19 @@ void computeDistortionBatch(RuntimeContext *context, const CudaDistortionBatchDe
 std::uint64_t distortionBatchDispatchCount(const RuntimeContext *context);
 void computeQpaBatch(RuntimeContext *context, const CudaDevicePlaneDesc &source,
                      const CudaQpaTask *tasks, std::uint32_t taskCount, CudaQpaResult *results);
+void filterAlfLumaFrame(RuntimeContext *context, const CudaDevicePlaneDesc &plane,
+                        const CudaAlfLumaFrame &frame, const CudaAlfCtuParam *ctus,
+                        std::uint32_t ctuCount, CudaAlfClassifier *classifiers);
+AlfAccelerationStats alfStats(const RuntimeContext *context) noexcept;
 std::uint64_t qpaBatchDispatchCount(const RuntimeContext *context);
 std::uint64_t qpaTaskCount(const RuntimeContext *context);
 void recoverDistortionRuntime(RuntimeContext *context) noexcept;
 void recoverQpaRuntime(RuntimeContext *context) noexcept;
+void recoverAlfRuntime(RuntimeContext *context) noexcept;
 void injectReleaseFailures(RuntimeContext *context, unsigned asyncFailures, unsigned immediateFailures);
 void injectDistortionFailures(RuntimeContext *context, unsigned allocationFailureStep, unsigned executionFailures);
 void injectQpaFailures(RuntimeContext *context, unsigned allocationFailureStep, unsigned executionFailures);
+void injectAlfFailure(RuntimeContext *context, CudaAlfTestFailurePoint failurePoint);
 void injectPinnedReleaseFailures(unsigned failures);
 
 }   // namespace vtm::cuda_backend

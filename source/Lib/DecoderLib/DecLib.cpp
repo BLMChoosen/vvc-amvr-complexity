@@ -696,6 +696,24 @@ void DecLib::synchronizeComputeBackend()
   }
 }
 
+void DecLib::releasePictureComputeResources(Picture *picture)
+{
+  if (picture != nullptr && m_computeState->cudaContext.isCreated())
+  {
+    m_computeState->cudaContext.releasePictureMirrors(picture);
+  }
+}
+
+vtm::AlfAccelerationStats DecLib::alfAccelerationStats() const
+{
+  vtm::AlfAccelerationStats stats = m_computeState->cudaContext.alfStats();
+  if (!m_computeState->config.enableExperimentalAlf)
+  {
+    stats.enabled = false;
+  }
+  return stats;
+}
+
 void DecLib::init(
 #if JVET_J0090_MEMORY_BANDWITH_MEASURE
   const std::string& cacheCfgFileName
@@ -958,7 +976,110 @@ void DecLib::executeLoopFilters()
     // ALF decodes the differentially coded coefficients and stores them in the parameters structure.
     // Code could be restructured to do directly after parsing. So far we just pass a fresh non-const
     // copy in case the APS gets used more than once.
-    m_cALF.ALFProcess(cs);
+    bool filteredOnCuda = false;
+    const PreCalcValues &pcv = *cs.pcv;
+    const std::uint64_t ctuCount64 = static_cast<std::uint64_t>(pcv.widthInCtus) * pcv.heightInCtus;
+    bool cudaEligible = m_computeState->config.backend == vtm::ComputeBackend::CUDA
+                        && m_computeState->config.enableExperimentalAlf
+                        && m_computeState->cudaContext.isAlfAccelerationAvailable()
+                        && cs.pps->getNumTiles() == 1 && cs.pps->getNumSubPics() == 1
+                        && cs.pps->getNumSlicesInPic() == 1 && m_pcPic->numSlices == 1
+                        && !cs.picHeader->getVirtualBoundariesPresentFlag()
+                        && cs.slice->getAlfEnabledFlag(COMPONENT_Y)
+                        && !cs.slice->getAlfEnabledFlag(COMPONENT_Cb)
+                        && !cs.slice->getAlfEnabledFlag(COMPONENT_Cr)
+                        && !cs.slice->m_ccAlfFilterParam.ccAlfFilterEnabled[0]
+                        && !cs.slice->m_ccAlfFilterParam.ccAlfFilterEnabled[1]
+                        && (pcv.lumaWidth & 3) == 0 && (pcv.lumaHeight & 3) == 0
+                        && ctuCount64 != 0 && ctuCount64 <= vtm::CUDA_ALF_MAX_CTUS
+                        && static_cast<std::uint64_t>(pcv.lumaWidth) * pcv.lumaHeight
+                             >= vtm::CUDA_ALF_MIN_FRAME_PIXELS;
+    if (cudaEligible)
+    {
+      AlfMode *chromaCb = cs.picture->getAlfModes(COMPONENT_Cb);
+      AlfMode *chromaCr = cs.picture->getAlfModes(COMPONENT_Cr);
+      for (std::uint32_t ctu = 0; ctu < ctuCount64; ++ctu)
+      {
+        if (chromaCb[ctu] != AlfMode::OFF || chromaCr[ctu] != AlfMode::OFF)
+        {
+          cudaEligible = false;
+          break;
+        }
+      }
+    }
+    if (cudaEligible)
+    {
+      m_cALF.prepareLumaParameters(cs);
+      std::vector<vtm::CudaAlfCtuParam> cudaCtus(static_cast<std::size_t>(ctuCount64));
+      bool hasEnabledLuma = false;
+#if GREEN_METADATA_SEI_ENABLED
+      std::uint64_t enabledPixels = 0;
+#endif
+      for (std::uint32_t ctu = 0; ctu < ctuCount64; ++ctu)
+      {
+        vtm::CudaAlfCtuParam &dst = cudaCtus[ctu];
+        dst.x = (ctu % pcv.widthInCtus) * pcv.maxCUWidth;
+        dst.y = (ctu / pcv.widthInCtus) * pcv.maxCUHeight;
+        dst.width = std::min<std::uint32_t>(pcv.maxCUWidth, pcv.lumaWidth - dst.x);
+        dst.height = std::min<std::uint32_t>(pcv.maxCUHeight, pcv.lumaHeight - dst.y);
+        const AlfMode mode = m_cALF.getLumaMode(ctu);
+        dst.enabled = mode != AlfMode::OFF;
+        if (!dst.enabled)
+        {
+          continue;
+        }
+        hasEnabledLuma = true;
+#if GREEN_METADATA_SEI_ENABLED
+        enabledPixels += static_cast<std::uint64_t>(dst.width) * dst.height;
+#endif
+        const AlfCoeff *coeff = m_cALF.getLumaCoeff(mode);
+        const Pel *clip = m_cALF.getLumaClip(mode);
+        for (std::uint32_t index = 0; index < vtm::CUDA_ALF_CLASSES * vtm::CUDA_ALF_COEFFICIENTS; ++index)
+        {
+          dst.coefficients[index] = coeff[index];
+          dst.clipValues[index] = clip[index];
+        }
+      }
+      vtm::CudaAlfLumaFrame frame{};
+      frame.width = pcv.lumaWidth;
+      frame.height = pcv.lumaHeight;
+      frame.ctuWidth = pcv.maxCUWidth;
+      frame.ctuHeight = pcv.maxCUHeight;
+      frame.ctusInWidth = pcv.widthInCtus;
+      frame.ctusInHeight = pcv.heightInCtus;
+      const ClpRng &range = m_cALF.getLumaClpRng();
+      frame.minSample = range.min;
+      frame.maxSample = range.max;
+      frame.vbCtuHeight = m_cALF.getLumaVbCtuHeight();
+      frame.vbPos = m_cALF.getLumaVbPos();
+      frame.bitDepth = static_cast<std::uint8_t>(range.bd);
+      frame.elementSize = sizeof(Pel);
+
+      const vtm::CudaMirrorHandle mirror = m_computeState->cudaContext.pictureMirrorHandle(
+        m_pcPic, vtm::CudaPictureRole::Reconstruction);
+      // LMCS, deblocking and SAO are host writers. Publish their final luma before the ALF snapshot upload.
+      m_computeState->cudaContext.markHostPlaneModified(mirror, 0);
+      if (hasEnabledLuma)
+      {
+        const vtm::CudaAlfDispatchResult dispatch = m_computeState->cudaContext.filterAlfLumaFrame(
+          mirror, frame, cudaCtus.data(), static_cast<std::uint32_t>(cudaCtus.size()));
+        if (dispatch == vtm::CudaAlfDispatchResult::Executed)
+        {
+          m_computeState->cudaContext.markDevicePlaneModified(mirror, 0);
+          // The decoded-picture hash, reference-picture consumers and YUV writer are host readers today.
+          m_computeState->cudaContext.ensureHostPlane(mirror, 0);
+          filteredOnCuda = true;
+#if GREEN_METADATA_SEI_ENABLED
+          cs.m_featureCounter.alfLumaType7 += enabledPixels / 16;
+          cs.m_featureCounter.alfLumaPels += enabledPixels;
+#endif
+        }
+      }
+    }
+    if (!filteredOnCuda)
+    {
+      m_cALF.ALFProcess(cs);
+    }
   }
 
 #if GREEN_METADATA_SEI_ENABLED
