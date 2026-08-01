@@ -41,6 +41,9 @@
 #include "CommonDef.h"
 #include "Unit.h"
 #include "Picture.h"
+#include "CudaDeblocking.h"
+
+#include <vector>
 
 //! \ingroup CommonLib
 //! \{
@@ -147,6 +150,7 @@ private:
 
   PelStorage                   m_encPicYuvBuffer;
   bool                         m_enc;
+  std::vector<vtm::CudaDbfLumaTask> *m_cudaLumaTasks = nullptr;
 private:
   static PosType getPos(const Position &p, EdgeDir dir) { return dir == EdgeDir::VER ? p.x : p.y; }
 
@@ -179,15 +183,15 @@ private:
                                const bool partQNoFilter, const ClpRng &clpRng, const bool largeBoundary,
                                const bool isChromaHorCTBBoundary) const;
 
-  inline bool xUseStrongFiltering(Pel *src, const ptrdiff_t offset, const int d, const int beta, const int tc,
+  static inline bool xUseStrongFiltering(Pel *src, const ptrdiff_t offset, const int d, const int beta, const int tc,
                                   bool sidePisLarge = false, bool sideQisLarge = false,
-                                  FilterLenPair maxFilterLen = DEFAULT_FL2, bool isChromaHorCTBBoundary = false) const;
+                                  FilterLenPair maxFilterLen = DEFAULT_FL2, bool isChromaHorCTBBoundary = false);
 
   inline bool isCrossedByVirtualBoundaries ( const int xPos, const int yPos, const int width, const int height, int& numHorVirBndry, int& numVerVirBndry, int horVirBndryPos[], int verVirBndryPos[], const PicHeader* picHeader );
   inline void xDeriveEdgefilterParam       ( const int xPos, const int yPos, const int numVerVirBndry, const int numHorVirBndry, const int verVirBndryPos[], const int horVirBndryPos[], bool &verEdgeFilter, bool &horEdgeFilter );
 
-  inline int xCalcDP(Pel *src, const ptrdiff_t offset, const bool isChromaHorCTBBoundary = false) const;
-  inline int xCalcDQ(Pel *src, const ptrdiff_t offset) const;
+  static inline int xCalcDP(Pel *src, const ptrdiff_t offset, const bool isChromaHorCTBBoundary = false);
+  static inline int xCalcDQ(Pel *src, const ptrdiff_t offset);
 
   static const uint16_t sm_tcTable[MAX_QP + 3];
   static const uint8_t sm_betaTable[MAX_QP + 1];
@@ -208,7 +212,8 @@ public:
   void  destroy                   ();
 
   /// picture-level deblocking filter
-  void deblockingFilterPic        ( CodingStructure& cs );
+  void deblockingFilterPic        ( CodingStructure& cs,
+                                    std::vector<vtm::CudaDbfLumaTask> *cudaLumaTasks = nullptr );
 
   static int getBeta              ( const int qp )
   {
@@ -218,6 +223,10 @@ public:
 
   void resetBsAndEdgeFilter(EdgeDir edgeDir);
   void resetFilterLengths();
+
+  // Scalar normative reference for CUDA descriptor tests. Tasks are applied in their emitted CPU order.
+  static void filterLumaTasksCpu(Pel *base, ptrdiff_t stride,
+                                 const vtm::CudaDbfLumaTask *tasks, std::uint32_t taskCount);
 };
 
 //! \}

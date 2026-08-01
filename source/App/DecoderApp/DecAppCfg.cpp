@@ -81,6 +81,7 @@ bool DecAppCfg::parseCfg( int argc, char* argv[] )
   ("GPUBackend",                gpuBackend,                            std::string("cpu"), "compute backend (cpu or cuda)")
   ("GPUDevice",                 m_computeConfig.device,                           0, "CUDA device index")
   ("GPUExperimentalALF",        m_computeConfig.enableExperimentalAlf,        false, "Enable experimental CUDA luma ALF")
+  ("GPUExperimentalDBF",        m_computeConfig.enableExperimentalDbf,        false, "Enable experimental CUDA luma deblocking filter")
   ("OplFile,-opl",              m_oplFilename,                         std::string(""), "opl-file name without extension for conformance testing\n")
 
 #if ENABLE_SIMD_OPT

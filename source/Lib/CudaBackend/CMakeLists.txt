@@ -4,6 +4,7 @@ add_library( ${LIB_NAME} STATIC
   ComputeBackend.cpp
   ComputeBackend.h
   CudaAlf.h
+  ../CommonLib/CudaDeblocking.h
   CudaDistortion.h
   CudaQpa.h
   CudaContext.cpp

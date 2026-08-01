@@ -49,6 +49,7 @@
 
 #include <fstream>
 #include <exception>
+#include <chrono>
 #include <set>
 #include <stdio.h>
 #include <fcntl.h>
@@ -714,6 +715,13 @@ vtm::AlfAccelerationStats DecLib::alfAccelerationStats() const
   return stats;
 }
 
+vtm::DbfAccelerationStats DecLib::dbfAccelerationStats() const
+{
+  vtm::DbfAccelerationStats stats = m_computeState->cudaContext.dbfStats();
+  if (!m_computeState->config.enableExperimentalDbf) stats.enabled = false;
+  return stats;
+}
+
 void DecLib::init(
 #if JVET_J0090_MEMORY_BANDWITH_MEASURE
   const std::string& cacheCfgFileName
@@ -963,7 +971,54 @@ void DecLib::executeLoopFilters()
   cs.m_featureCounter =  initValues;
 #endif
   // deblocking filter
-  m_deblockingFilter.deblockingFilterPic( cs );
+  const PreCalcValues &dbfPcv = *cs.pcv;
+  const std::uint64_t dbfPixels = std::uint64_t(dbfPcv.lumaWidth) * dbfPcv.lumaHeight;
+  const bool cudaDbfEligible = m_computeState->config.backend == vtm::ComputeBackend::CUDA
+    && m_computeState->config.enableExperimentalDbf
+    && m_computeState->cudaContext.isDbfAccelerationAvailable()
+    && cs.sps->getChromaFormatIdc() == ChromaFormat::_420
+    && (cs.sps->getBitDepth(ChannelType::LUMA) == 8 || cs.sps->getBitDepth(ChannelType::LUMA) == 10)
+    && cs.sps->getBitDepth(ChannelType::CHROMA) == cs.sps->getBitDepth(ChannelType::LUMA)
+    && (sizeof(Pel) == 2 || sizeof(Pel) == 4)
+    && dbfPixels >= vtm::CUDA_DBF_MIN_FRAME_PIXELS
+    && dbfPixels / 2 <= vtm::CUDA_DBF_MAX_TASKS
+    && cs.pps->getNumTiles() == 1 && cs.pps->getNumSubPics() == 1
+    && cs.pps->getNumSlicesInPic() == 1 && m_pcPic->numSlices == 1
+    && !cs.picHeader->getVirtualBoundariesPresentFlag()
+    && !cs.sps->getLadfEnabled()
+    && !cs.slice->getDeblockingFilterDisable();
+  if (cudaDbfEligible)
+  {
+    const vtm::CudaMirrorHandle mirror = m_computeState->cudaContext.pictureMirrorHandle(
+      m_pcPic, vtm::CudaPictureRole::Reconstruction);
+    // LMCS is a host writer. Snapshot it before CPU derives descriptors and filters chroma.
+    m_computeState->cudaContext.markHostPlaneModified(mirror, 0);
+    std::vector<vtm::CudaDbfLumaTask> tasks;
+    tasks.reserve(static_cast<std::size_t>(std::min<std::uint64_t>(dbfPixels / 4,
+                                                                   vtm::CUDA_DBF_MAX_TASKS)));
+    const auto collectionStart = std::chrono::steady_clock::now();
+    m_deblockingFilter.deblockingFilterPic(cs, &tasks);
+    m_computeState->cudaContext.recordDbfDescriptorCollection(static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - collectionStart).count()));
+    if (isChromaEnabled(cs.sps->getChromaFormatIdc()))
+    {
+      m_computeState->cudaContext.markHostPlaneModified(mirror, 1);
+      m_computeState->cudaContext.markHostPlaneModified(mirror, 2);
+    }
+    vtm::CudaDbfFrame frame{};
+    frame.width = dbfPcv.lumaWidth;
+    frame.height = dbfPcv.lumaHeight;
+    frame.bitDepth = static_cast<std::uint8_t>(cs.sps->getBitDepth(ChannelType::LUMA));
+    frame.elementSize = sizeof(Pel);
+    const vtm::CudaDbfDispatchResult result = m_computeState->cudaContext.filterDbfLumaFrame(
+      mirror, frame, tasks.data(), static_cast<std::uint32_t>(tasks.size()));
+    CHECK(result == vtm::CudaDbfDispatchResult::NotEligible,
+          "CUDA DBF rejected CPU-validated descriptors after selection");
+  }
+  else
+  {
+    m_deblockingFilter.deblockingFilterPic(cs);
+  }
   CS::setRefinedMotionField(cs);
   if( cs.sps->getSAOEnabledFlag() )
   {

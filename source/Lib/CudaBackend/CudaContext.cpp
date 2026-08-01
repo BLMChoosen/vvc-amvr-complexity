@@ -219,6 +219,13 @@ struct CudaContext::Impl
   std::uint64_t alfUploadSubmissionNanoseconds = 0;
   std::uint64_t alfDownloadNanoseconds = 0;
   std::uint64_t alfIntegrationNanoseconds = 0;
+  bool dbfAccelerationEnabled = true;
+  std::uint64_t dbfFailures = 0;
+  std::uint64_t dbfNoOpFrames = 0;
+  std::uint64_t dbfMirrorUploadBytes = 0;
+  std::uint64_t dbfMirrorDownloadBytes = 0;
+  std::uint64_t dbfDescriptorCollectionNanoseconds = 0;
+  std::uint64_t dbfIntegrationNanoseconds = 0;
   std::uint64_t mirrorSynchronizationOperations = 0;
   CudaMirrorMemoryStats mirrorMemory{};
 #if VTM_CUDA_TESTING
@@ -424,6 +431,19 @@ void recoverAndQuarantineAlfNoexcept(ContextImpl *impl, const CudaMirrorHandle h
   catch (...)
   {
   }
+  quarantineAlfMirrorNoexcept(impl, handle);
+}
+
+template<typename ContextImpl>
+void recoverAndQuarantineDbfNoexcept(ContextImpl *impl, const CudaMirrorHandle handle) noexcept
+{
+  if (impl == nullptr || impl->runtime == nullptr)
+  {
+    quarantineAlfMirrorNoexcept(impl, handle);
+    return;
+  }
+  cuda_backend::recoverDbfRuntime(impl->runtime);
+  try { cuda_backend::synchronizeRuntimeContext(impl->runtime); } catch (...) {}
   quarantineAlfMirrorNoexcept(impl, handle);
 }
 
@@ -948,6 +968,13 @@ void CudaContext::create(const int device)
   m_impl->alfUploadSubmissionNanoseconds = 0;
   m_impl->alfDownloadNanoseconds = 0;
   m_impl->alfIntegrationNanoseconds = 0;
+  m_impl->dbfAccelerationEnabled = true;
+  m_impl->dbfFailures = 0;
+  m_impl->dbfNoOpFrames = 0;
+  m_impl->dbfMirrorUploadBytes = 0;
+  m_impl->dbfMirrorDownloadBytes = 0;
+  m_impl->dbfDescriptorCollectionNanoseconds = 0;
+  m_impl->dbfIntegrationNanoseconds = 0;
   m_impl->mirrorSynchronizationOperations = 0;
   m_impl->mirrorMemory = CudaMirrorMemoryStats{};
   m_impl->mirrorMemory.budgetBytes = CUDA_DEFAULT_MIRROR_MEMORY_BUDGET_BYTES;
@@ -2164,6 +2191,140 @@ AlfAccelerationStats CudaContext::alfStats() const noexcept
   return stats;
 }
 
+bool CudaContext::isDbfAccelerationAvailable() const noexcept
+{
+#if VTM_ENABLE_CUDA
+  return m_impl->runtime != nullptr && m_impl->dbfAccelerationEnabled;
+#else
+  return false;
+#endif
+}
+
+CudaDbfDispatchResult CudaContext::filterDbfLumaFrame(const CudaMirrorHandle reconstructionHandle,
+                                                       const CudaDbfFrame &frame,
+                                                       const CudaDbfLumaTask *tasks,
+                                                       const std::uint32_t taskCount)
+{
+#if VTM_ENABLE_CUDA
+  const std::uint64_t pixels = std::uint64_t(frame.width) * frame.height;
+  if (!isDbfAccelerationAvailable() || (tasks == nullptr && taskCount != 0) || taskCount > CUDA_DBF_MAX_TASKS
+      || frame.width == 0 || frame.height == 0 || pixels < CUDA_DBF_MIN_FRAME_PIXELS
+      || (frame.bitDepth != 8 && frame.bitDepth != 10)
+      || (frame.elementSize != 2 && frame.elementSize != 4))
+    return CudaDbfDispatchResult::NotEligible;
+  for (std::uint32_t i = 0; i < taskCount; ++i)
+  {
+    const CudaDbfLumaTask &t = tasks[i];
+    const bool validLenP = t.maxFilterLenP == 1 || t.maxFilterLenP == 2 || t.maxFilterLenP == 3
+                           || t.maxFilterLenP == 5 || t.maxFilterLenP == 7;
+    const bool validLenQ = t.maxFilterLenQ == 1 || t.maxFilterLenQ == 2 || t.maxFilterLenQ == 3
+                           || t.maxFilterLenQ == 5 || t.maxFilterLenQ == 7;
+    const bool segmentInside = t.direction == 0
+      ? t.x < frame.width && std::uint64_t(t.y) + 4 <= frame.height
+      : t.y < frame.height && std::uint64_t(t.x) + 4 <= frame.width;
+    if (t.direction > 1 || !validLenP || !validLenQ || !segmentInside
+        || (t.x & 3) != 0 || (t.y & 3) != 0 || t.tc < 0 || t.beta < 0
+        || t.minSample != 0 || t.maxSample != (std::int32_t{1} << frame.bitDepth) - 1
+        || (t.flags & ~(CUDA_DBF_SIDE_P_LARGE | CUDA_DBF_SIDE_Q_LARGE
+                        | CUDA_DBF_PART_P_NO_FILTER | CUDA_DBF_PART_Q_NO_FILTER)) != 0
+        || ((t.flags & CUDA_DBF_SIDE_P_LARGE) != 0 && t.maxFilterLenP <= 3)
+        || ((t.flags & CUDA_DBF_SIDE_Q_LARGE) != 0 && t.maxFilterLenQ <= 3))
+      return CudaDbfDispatchResult::NotEligible;
+  }
+  requireRuntime(m_impl.get());
+  PictureMirror &mirror = findMirror(m_impl.get(), reconstructionHandle);
+  if (mirror.role != CudaPictureRole::Reconstruction || mirror.host.planeCount == 0)
+    return CudaDbfDispatchResult::NotEligible;
+  const CudaHostPlaneDesc &host = mirror.host.planes[0];
+  if (host.width != frame.width || host.height != frame.height || host.bitDepth != frame.bitDepth
+      || host.elementSize != frame.elementSize || host.data == nullptr || host.strideBytes <= 0
+      || host.marginLeft < 8 || host.marginRight < 8 || host.marginTop < 8 || host.marginBottom < 8)
+    return CudaDbfDispatchResult::NotEligible;
+  if (taskCount == 0)
+  {
+    ++m_impl->dbfNoOpFrames;
+    return CudaDbfDispatchResult::NoOp;
+  }
+  const CudaMirrorMemoryUsage before = m_impl->mirrorMemory.total;
+  const auto integrationStart = std::chrono::steady_clock::now();
+  try
+  {
+#if VTM_CUDA_TESTING
+    if (const char *failure = std::getenv("VTM_CUDA_DBF_TEST_FAILURE"))
+    {
+      CudaDbfTestFailurePoint point = CudaDbfTestFailurePoint::None;
+      if (std::strcmp(failure, "allocation") == 0) point = CudaDbfTestFailurePoint::Allocation;
+      else if (std::strcmp(failure, "upload") == 0) point = CudaDbfTestFailurePoint::ParameterUpload;
+      else if (std::strcmp(failure, "snapshot") == 0) point = CudaDbfTestFailurePoint::SnapshotCopy;
+      else if (std::strcmp(failure, "vertical-launch") == 0) point = CudaDbfTestFailurePoint::VerticalLaunch;
+      else if (std::strcmp(failure, "vertical-sync") == 0) point = CudaDbfTestFailurePoint::VerticalCompletion;
+      else if (std::strcmp(failure, "horizontal-launch") == 0) point = CudaDbfTestFailurePoint::HorizontalLaunch;
+      else if (std::strcmp(failure, "horizontal-sync") == 0) point = CudaDbfTestFailurePoint::HorizontalCompletion;
+      else if (std::strcmp(failure, "commit") == 0) point = CudaDbfTestFailurePoint::CommitCopy;
+      else if (std::strcmp(failure, "commit-sync") == 0) point = CudaDbfTestFailurePoint::CommitCompletion;
+      else throw std::runtime_error(std::string("Invalid VTM_CUDA_DBF_TEST_FAILURE value: ") + failure);
+      cuda_backend::injectDbfFailure(m_impl->runtime, point);
+    }
+#endif
+    ensureDevicePlane(reconstructionHandle, 0);
+    cuda_backend::waitFence(m_impl->runtime, CudaQueue::Dbf, CudaFence::UploadComplete);
+    cuda_backend::filterDbfLumaFrame(m_impl->runtime, mirror.planes[0].device, frame, tasks, taskCount);
+    mirror.planes[0].state = CudaMirrorState::DeviceValid;
+    mirror.planes[0].uploadPending = false;
+    ensureHostPlane(reconstructionHandle, 0);
+    const CudaMirrorMemoryUsage after = m_impl->mirrorMemory.total;
+    m_impl->dbfMirrorUploadBytes += after.uploadedBytes - before.uploadedBytes;
+    m_impl->dbfMirrorDownloadBytes += after.downloadedBytes - before.downloadedBytes;
+    m_impl->dbfIntegrationNanoseconds += static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - integrationStart).count());
+    return CudaDbfDispatchResult::Executed;
+  }
+  catch (const std::exception &error)
+  {
+    ++m_impl->dbfFailures;
+    m_impl->dbfAccelerationEnabled = false;
+    recoverAndQuarantineDbfNoexcept(m_impl.get(), reconstructionHandle);
+    throw std::runtime_error(std::string("CUDA DBF execution failed after selection: ") + error.what());
+  }
+  catch (...)
+  {
+    ++m_impl->dbfFailures;
+    m_impl->dbfAccelerationEnabled = false;
+    recoverAndQuarantineDbfNoexcept(m_impl.get(), reconstructionHandle);
+    throw std::runtime_error("CUDA DBF execution failed after selection: unknown error");
+  }
+#else
+  (void) reconstructionHandle; (void) frame; (void) tasks; (void) taskCount;
+  return CudaDbfDispatchResult::NotEligible;
+#endif
+}
+
+DbfAccelerationStats CudaContext::dbfStats() const noexcept
+{
+  DbfAccelerationStats stats{};
+#if VTM_ENABLE_CUDA
+  stats = cuda_backend::dbfStats(m_impl->runtime);
+  stats.mirrorUploadBytes = m_impl->dbfMirrorUploadBytes;
+  stats.mirrorDownloadBytes = m_impl->dbfMirrorDownloadBytes;
+  stats.failures = m_impl->dbfFailures;
+  stats.noOpFrames = m_impl->dbfNoOpFrames;
+  stats.descriptorCollectionNanoseconds = m_impl->dbfDescriptorCollectionNanoseconds;
+  stats.integrationNanoseconds = m_impl->dbfIntegrationNanoseconds;
+  stats.enabled = m_impl->runtime != nullptr && m_impl->dbfAccelerationEnabled;
+  stats.poisoned = m_impl->runtime != nullptr && !m_impl->dbfAccelerationEnabled;
+#endif
+  return stats;
+}
+
+void CudaContext::recordDbfDescriptorCollection(const std::uint64_t nanoseconds) noexcept
+{
+#if VTM_ENABLE_CUDA
+  m_impl->dbfDescriptorCollectionNanoseconds += nanoseconds;
+#else
+  (void) nanoseconds;
+#endif
+}
+
 bool CudaContext::computeQpaBatch(const CudaMirrorHandle sourceHandle, const CudaQpaTask *tasks,
                                   const std::uint32_t taskCount, CudaQpaResult *results)
 {
@@ -2390,6 +2551,16 @@ void CudaContext::injectAlfFailureForTesting(const CudaAlfTestFailurePoint failu
 #if VTM_ENABLE_CUDA
   requireRuntime(m_impl.get());
   cuda_backend::injectAlfFailure(m_impl->runtime, failurePoint);
+#else
+  (void) failurePoint;
+#endif
+}
+
+void CudaContext::injectDbfFailureForTesting(const CudaDbfTestFailurePoint failurePoint)
+{
+#if VTM_ENABLE_CUDA
+  requireRuntime(m_impl.get());
+  cuda_backend::injectDbfFailure(m_impl->runtime, failurePoint);
 #else
   (void) failurePoint;
 #endif

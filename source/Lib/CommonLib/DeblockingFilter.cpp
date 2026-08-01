@@ -136,8 +136,21 @@ void DeblockingFilter::destroy()
   }
 }
 
-void DeblockingFilter::deblockingFilterPic(CodingStructure &cs)
+void DeblockingFilter::deblockingFilterPic(CodingStructure &cs,
+                                            std::vector<vtm::CudaDbfLumaTask> *cudaLumaTasks)
 {
+  CHECK(m_cudaLumaTasks != nullptr, "Nested CUDA deblocking collection is not supported");
+  m_cudaLumaTasks = cudaLumaTasks;
+  struct CollectionReset
+  {
+    std::vector<vtm::CudaDbfLumaTask> *&tasks;
+    ~CollectionReset() { tasks = nullptr; }
+  } collectionReset{ m_cudaLumaTasks };
+  if (m_cudaLumaTasks != nullptr)
+  {
+    m_cudaLumaTasks->clear();
+    CHECK(cs.sps->getLadfEnabled(), "CUDA deblocking collection requires LADF to be disabled");
+  }
   const PreCalcValues &pcv = *cs.pcv;
 
   DTRACE_UPDATE( g_trace_ctx, ( std::make_pair( "poc", cs.slice->getPOC() ) ) );
@@ -1104,6 +1117,26 @@ void DeblockingFilter::xEdgeFilterLuma(const CodingUnit &cu, const EdgeDir edgeD
 
       for (int blkIdx = 0; blkIdx < blocksInPart; blkIdx++)
       {
+        if (m_cudaLumaTasks != nullptr)
+        {
+          static constexpr std::uint8_t filterLenValue[] = { 1, 2, 3, 5, 7 };
+          vtm::CudaDbfLumaTask task{};
+          task.x = static_cast<std::uint32_t>(pos.x + (edgeDir == EdgeDir::HOR ? blkIdx * GRID_SIZE : 0));
+          task.y = static_cast<std::uint32_t>(pos.y + (edgeDir == EdgeDir::VER ? blkIdx * GRID_SIZE : 0));
+          task.tc = tc;
+          task.beta = beta;
+          task.minSample = clpRng.min;
+          task.maxSample = clpRng.max;
+          task.direction = edgeDir == EdgeDir::VER ? 0 : 1;
+          task.maxFilterLenP = filterLenValue[static_cast<unsigned>(maxFilterLen.p)];
+          task.maxFilterLenQ = filterLenValue[static_cast<unsigned>(maxFilterLen.q)];
+          task.flags = (sidePisLarge ? vtm::CUDA_DBF_SIDE_P_LARGE : 0)
+                       | (sideQisLarge ? vtm::CUDA_DBF_SIDE_Q_LARGE : 0)
+                       | (partPNoFilter ? vtm::CUDA_DBF_PART_P_NO_FILTER : 0)
+                       | (partQNoFilter ? vtm::CUDA_DBF_PART_Q_NO_FILTER : 0);
+          m_cudaLumaTasks->push_back(task);
+          continue;
+        }
         Pel *src0 = tmpSrc + srcStep * (idx * pelsInPart + blkIdx * GRID_SIZE);
         Pel *src3 = src0 + srcStep * (GRID_SIZE - 1);
 
@@ -1575,6 +1608,81 @@ void DeblockingFilter::xPelFilterLuma(Pel *src, const ptrdiff_t offset, const in
   }
 }
 
+void DeblockingFilter::filterLumaTasksCpu(Pel *base, const ptrdiff_t stride,
+                                           const vtm::CudaDbfLumaTask *tasks,
+                                           const std::uint32_t taskCount)
+{
+  CHECK(base == nullptr || (taskCount != 0 && tasks == nullptr), "Invalid scalar CUDA DBF reference arguments");
+  auto filterLen = [](const std::uint8_t value) {
+    switch (value)
+    {
+    case 1: return FilterLen::_1;
+    case 2: return FilterLen::_2;
+    case 3: return FilterLen::_3;
+    case 5: return FilterLen::_5;
+    case 7: return FilterLen::_7;
+    default: THROW("Invalid CUDA DBF filter length");
+    }
+  };
+  for (std::uint32_t taskIndex = 0; taskIndex < taskCount; ++taskIndex)
+  {
+    const vtm::CudaDbfLumaTask &task = tasks[taskIndex];
+    const EdgeDir edgeDir = task.direction == 0 ? EdgeDir::VER : EdgeDir::HOR;
+    const ptrdiff_t offset = edgeDir == EdgeDir::VER ? 1 : stride;
+    const ptrdiff_t srcStep = edgeDir == EdgeDir::VER ? stride : 1;
+    Pel *src0 = base + static_cast<ptrdiff_t>(task.y) * stride + task.x;
+    Pel *src3 = src0 + 3 * srcStep;
+    const int dp0 = xCalcDP(src0, offset), dq0 = xCalcDQ(src0, offset);
+    const int dp3 = xCalcDP(src3, offset), dq3 = xCalcDQ(src3, offset);
+    const bool sidePisLarge = (task.flags & vtm::CUDA_DBF_SIDE_P_LARGE) != 0;
+    const bool sideQisLarge = (task.flags & vtm::CUDA_DBF_SIDE_Q_LARGE) != 0;
+    const bool partPNoFilter = (task.flags & vtm::CUDA_DBF_PART_P_NO_FILTER) != 0;
+    const bool partQNoFilter = (task.flags & vtm::CUDA_DBF_PART_Q_NO_FILTER) != 0;
+    const FilterLenPair maxFilterLen{ filterLen(task.maxFilterLenP), filterLen(task.maxFilterLenQ) };
+    const int sideThreshold = (task.beta + (task.beta >> 1)) >> 3;
+    const ClpRng clpRng{ task.minSample, task.maxSample, task.maxSample > 255 ? 10 : 8, 0 };
+
+    bool useLongtapFilter = false;
+    if (sidePisLarge || sideQisLarge)
+    {
+      const int dp0L = sidePisLarge ? (dp0 + xCalcDP(src0 - 3 * offset, offset) + 1) >> 1 : dp0;
+      const int dp3L = sidePisLarge ? (dp3 + xCalcDP(src3 - 3 * offset, offset) + 1) >> 1 : dp3;
+      const int dq0L = sideQisLarge ? (dq0 + xCalcDQ(src0 + 3 * offset, offset) + 1) >> 1 : dq0;
+      const int dq3L = sideQisLarge ? (dq3 + xCalcDQ(src3 + 3 * offset, offset) + 1) >> 1 : dq3;
+      const int d0L = dp0L + dq0L, d3L = dp3L + dq3L;
+      if (d0L + d3L < task.beta)
+      {
+        const bool filterP = dp0L + dp3L < sideThreshold;
+        const bool filterQ = dq0L + dq3L < sideThreshold;
+        useLongtapFilter = xUseStrongFiltering(src0, offset, 2 * d0L, task.beta, task.tc,
+                                               sidePisLarge, sideQisLarge, maxFilterLen)
+                           && xUseStrongFiltering(src3, offset, 2 * d3L, task.beta, task.tc,
+                                                  sidePisLarge, sideQisLarge, maxFilterLen);
+        if (useLongtapFilter)
+          for (int i = 0; i < GRID_SIZE; ++i)
+            xPelFilterLuma(src0 + srcStep * i, offset, task.tc, true, partPNoFilter, partQNoFilter,
+                           task.tc * 10, filterP, filterQ, clpRng, sidePisLarge, sideQisLarge, maxFilterLen);
+      }
+    }
+    if (!useLongtapFilter)
+    {
+      const int d0 = dp0 + dq0, d3 = dp3 + dq3;
+      if (d0 + d3 < task.beta)
+      {
+        const bool largerThan1 = maxFilterLen.p > FilterLen::_1 && maxFilterLen.q > FilterLen::_1;
+        const bool largerThan2 = maxFilterLen.p > FilterLen::_2 && maxFilterLen.q > FilterLen::_2;
+        const bool filterP = largerThan1 && dp0 + dp3 < sideThreshold;
+        const bool filterQ = largerThan1 && dq0 + dq3 < sideThreshold;
+        const bool strong = largerThan2 && xUseStrongFiltering(src0, offset, 2 * d0, task.beta, task.tc)
+                            && xUseStrongFiltering(src3, offset, 2 * d3, task.beta, task.tc);
+        for (int i = 0; i < GRID_SIZE; ++i)
+          xPelFilterLuma(src0 + srcStep * i, offset, task.tc, strong, partPNoFilter, partQNoFilter,
+                         task.tc * 10, filterP, filterQ, clpRng);
+      }
+    }
+  }
+}
+
 inline void DeblockingFilter::xPelFilterChroma(Pel *src, const ptrdiff_t offset, const int tc, const bool sw,
                                                const bool partPNoFilter, const bool partQNoFilter, const ClpRng &clpRng,
                                                const bool largeBoundary, const bool isChromaHorCTBBoundary) const
@@ -1638,7 +1746,7 @@ inline void DeblockingFilter::xPelFilterChroma(Pel *src, const ptrdiff_t offset,
 
 inline bool DeblockingFilter::xUseStrongFiltering(Pel *src, const ptrdiff_t offset, const int d, const int beta,
                                                   const int tc, bool sidePisLarge, bool sideQisLarge,
-                                                  FilterLenPair maxFilterLen, bool isChromaHorCTBBoundary) const
+                                                  FilterLenPair maxFilterLen, bool isChromaHorCTBBoundary)
 {
   const Pel m4  = src[0];
   const Pel m3  = src[-offset];
@@ -1695,7 +1803,7 @@ inline bool DeblockingFilter::xUseStrongFiltering(Pel *src, const ptrdiff_t offs
   }
 }
 
-inline int DeblockingFilter::xCalcDP(Pel *src, const ptrdiff_t offset, const bool isChromaHorCTBBoundary) const
+inline int DeblockingFilter::xCalcDP(Pel *src, const ptrdiff_t offset, const bool isChromaHorCTBBoundary)
 {
   if (isChromaHorCTBBoundary)
   {
@@ -1707,7 +1815,7 @@ inline int DeblockingFilter::xCalcDP(Pel *src, const ptrdiff_t offset, const boo
   }
 }
 
-inline int DeblockingFilter::xCalcDQ(Pel *src, const ptrdiff_t offset) const
+inline int DeblockingFilter::xCalcDQ(Pel *src, const ptrdiff_t offset)
 {
   return abs(src[0] - 2 * src[offset] + src[offset * 2]);
 }

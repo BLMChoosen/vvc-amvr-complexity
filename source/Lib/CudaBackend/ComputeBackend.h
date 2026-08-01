@@ -53,6 +53,7 @@ struct ComputeConfig
   bool           enableExperimentalSad = false;
   bool           enableExperimentalQpa = false;
   bool           enableExperimentalAlf = false;
+  bool           enableExperimentalDbf = false;
 };
 
 struct CudaSadStats
@@ -82,6 +83,27 @@ struct AlfAccelerationStats
   std::uint64_t integrationNanoseconds = 0;
   std::uint64_t scratchBytes = 0;
   std::uint64_t retiredScratchBytes = 0;
+  std::uint64_t peakScratchBytes = 0;
+  std::uint64_t failures = 0;
+  bool enabled = false;
+  bool poisoned = false;
+};
+
+struct DbfAccelerationStats
+{
+  std::uint64_t dispatches = 0;
+  std::uint64_t noOpFrames = 0;
+  std::uint64_t tasks = 0;
+  std::uint64_t pixels = 0;
+  std::uint64_t parameterUploadBytes = 0;
+  std::uint64_t commitBytes = 0;
+  std::uint64_t mirrorUploadBytes = 0;
+  std::uint64_t mirrorDownloadBytes = 0;
+  std::uint64_t runtimeSynchronizations = 0;
+  std::uint64_t runtimeNanoseconds = 0;
+  std::uint64_t descriptorCollectionNanoseconds = 0;
+  std::uint64_t integrationNanoseconds = 0;
+  std::uint64_t scratchBytes = 0;
   std::uint64_t peakScratchBytes = 0;
   std::uint64_t failures = 0;
   bool enabled = false;

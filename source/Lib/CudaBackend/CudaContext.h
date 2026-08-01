@@ -38,6 +38,7 @@
 #include "CudaDistortion.h"
 #include "CudaQpa.h"
 #include "CudaAlf.h"
+#include "CommonLib/CudaDeblocking.h"
 
 #include <memory>
 #include <cstddef>
@@ -51,7 +52,8 @@ enum class CudaQueue
   Compute,
   Download,
   Qpa,
-  Alf
+  Alf,
+  Dbf
 };
 
 enum class CudaFence
@@ -171,6 +173,12 @@ public:
                                            const CudaAlfCtuParam *ctus, std::uint32_t ctuCount,
                                            CudaAlfClassifier *classifiers = nullptr);
   AlfAccelerationStats alfStats() const noexcept;
+  bool isDbfAccelerationAvailable() const noexcept;
+  CudaDbfDispatchResult filterDbfLumaFrame(CudaMirrorHandle reconstructionMirror,
+                                            const CudaDbfFrame &frame,
+                                            const CudaDbfLumaTask *tasks, std::uint32_t taskCount);
+  DbfAccelerationStats dbfStats() const noexcept;
+  void recordDbfDescriptorCollection(std::uint64_t nanoseconds) noexcept;
 #if VTM_CUDA_TESTING
   void injectReleaseFailuresForTesting(unsigned asyncFailures, unsigned immediateFailures);
   void injectDistortionFailuresForTesting(unsigned allocationFailureStep, unsigned executionFailures);
@@ -178,6 +186,7 @@ public:
   void injectDistortionFailurePointForTesting(CudaBatchTestFailurePoint failurePoint);
   void injectQpaFailurePointForTesting(CudaBatchTestFailurePoint failurePoint);
   void injectAlfFailureForTesting(CudaAlfTestFailurePoint failurePoint);
+  void injectDbfFailureForTesting(CudaDbfTestFailurePoint failurePoint);
   void injectMirrorPlaneFailuresForTesting(std::uint8_t plane, unsigned allocationFailureStep,
                                            unsigned uploadFailures, unsigned downloadFailures);
   void injectPinnedReleaseFailuresForTesting(unsigned failures);
