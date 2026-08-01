@@ -102,6 +102,8 @@ struct RuntimeContext
   std::uint64_t               alfElapsedNanoseconds = 0;
   std::uint64_t               alfPeakScratchBytes = 0;
   DbfScratch                  dbfScratch{};
+  // A partial candidate or partially released old scratch remains owned here until recovery/teardown.
+  DbfScratch                  dbfRetiredScratch{};
   std::uint64_t              dbfDispatches = 0;
   std::uint64_t              dbfTasks = 0;
   std::uint64_t              dbfPixels = 0;
@@ -129,6 +131,8 @@ namespace
 
 #if VTM_CUDA_TESTING
 std::atomic<unsigned> pinnedReleaseFailures{ 0 };
+std::atomic<std::uint64_t> dbfLiveDeviceAllocations{ 0 };
+std::atomic<std::uint64_t> dbfLivePinnedAllocations{ 0 };
 #endif
 
 void checkCuda(const cudaError_t result, const char *operation)
@@ -172,10 +176,81 @@ std::uint64_t dbfScratchBytes(const DbfScratch &scratch) noexcept
   return bytes;
 }
 
+void noteDbfDeviceAllocation() noexcept
+{
+#if VTM_CUDA_TESTING
+  ++dbfLiveDeviceAllocations;
+#endif
+}
+
+void noteDbfPinnedAllocation() noexcept
+{
+#if VTM_CUDA_TESTING
+  ++dbfLivePinnedAllocations;
+#endif
+}
+
+void noteDbfDeviceRelease() noexcept
+{
+#if VTM_CUDA_TESTING
+  --dbfLiveDeviceAllocations;
+#endif
+}
+
+void noteDbfPinnedRelease() noexcept
+{
+#if VTM_CUDA_TESTING
+  --dbfLivePinnedAllocations;
+#endif
+}
+
+cudaError_t releaseDbfDeviceAsync(void *&allocation, const cudaStream_t stream) noexcept
+{
+  if (allocation == nullptr) return cudaSuccess;
+  const cudaError_t result = cudaFreeAsync(allocation, stream);
+  if (result == cudaSuccess)
+  {
+    allocation = nullptr;
+    noteDbfDeviceRelease();
+  }
+  return result;
+}
+
+cudaError_t releaseDbfDeviceImmediate(void *&allocation) noexcept
+{
+  if (allocation == nullptr) return cudaSuccess;
+  const cudaError_t result = cudaFree(allocation);
+  if (result == cudaSuccess)
+  {
+    allocation = nullptr;
+    noteDbfDeviceRelease();
+  }
+  return result;
+}
+
+cudaError_t releaseDbfPinned(void *&allocation) noexcept
+{
+  if (allocation == nullptr) return cudaSuccess;
+  const cudaError_t result = cudaFreeHost(allocation);
+  if (result == cudaSuccess)
+  {
+    allocation = nullptr;
+    noteDbfPinnedRelease();
+  }
+  return result;
+}
+
 bool isEmpty(const AlfScratch &scratch) noexcept
 {
   return scratch.ctusDevice == nullptr && scratch.ctusHost == nullptr
          && scratch.classifiersDevice == nullptr && scratch.outputDevice == nullptr;
+}
+
+bool isEmpty(const DbfScratch &scratch) noexcept
+{
+  return scratch.tasksDevice == nullptr && scratch.tasksHost == nullptr
+         && scratch.laneOffsetsDevice == nullptr && scratch.laneOffsetsHost == nullptr
+         && scratch.outputDevice == nullptr;
 }
 
 #if VTM_CUDA_TESTING
@@ -211,8 +286,15 @@ bool consumeDbfFailure(RuntimeContext *context, const CudaDbfTestFailurePoint po
   context->dbfFailurePoint = CudaDbfTestFailurePoint::None;
   return true;
 }
+
+bool isDbfRecoveryReleaseFailure(const CudaDbfTestFailurePoint point) noexcept
+{
+  return point >= CudaDbfTestFailurePoint::RecoveryTasksDeviceRelease
+         && point <= CudaDbfTestFailurePoint::RecoveryLaneOffsetsPinnedRelease;
+}
 #else
 bool consumeDbfFailure(RuntimeContext *, CudaDbfTestFailurePoint) noexcept { return false; }
+bool isDbfRecoveryReleaseFailure(CudaDbfTestFailurePoint) noexcept { return false; }
 #endif
 
 std::size_t queueIndex(const CudaQueue queue)
@@ -295,15 +377,18 @@ void releaseRuntimeContext(RuntimeContext *context, const bool checked, const bo
       }
     }
   }
-  for (void **allocation : { reinterpret_cast<void **>(&context->dbfScratch.tasksDevice),
-                             reinterpret_cast<void **>(&context->dbfScratch.laneOffsetsDevice),
-                             &context->dbfScratch.outputDevice })
+  for (DbfScratch *scratch : { &context->dbfScratch, &context->dbfRetiredScratch })
   {
-    if (*allocation != nullptr)
+    for (void **allocation : { reinterpret_cast<void **>(&scratch->tasksDevice),
+                               reinterpret_cast<void **>(&scratch->laneOffsetsDevice),
+                               &scratch->outputDevice })
     {
-      const cudaError_t result = cudaFreeAsync(*allocation, context->streams[queueIndex(CudaQueue::Dbf)]);
-      rememberCudaError(firstError, firstOperation, result, "DBF scratch release");
-      if (result == cudaSuccess) *allocation = nullptr;
+      if (*allocation != nullptr)
+      {
+        const cudaError_t result = releaseDbfDeviceAsync(*allocation,
+          context->streams[queueIndex(CudaQueue::Dbf)]);
+        rememberCudaError(firstError, firstOperation, result, "DBF scratch release");
+      }
     }
   }
   for (cudaStream_t stream : context->streams)
@@ -355,25 +440,26 @@ void releaseRuntimeContext(RuntimeContext *context, const bool checked, const bo
       }
     }
   }
-  for (void **allocation : { reinterpret_cast<void **>(&context->dbfScratch.tasksDevice),
-                             reinterpret_cast<void **>(&context->dbfScratch.laneOffsetsDevice),
-                             &context->dbfScratch.outputDevice })
+  for (DbfScratch *scratch : { &context->dbfScratch, &context->dbfRetiredScratch })
   {
-    if (*allocation != nullptr)
+    for (void **allocation : { reinterpret_cast<void **>(&scratch->tasksDevice),
+                               reinterpret_cast<void **>(&scratch->laneOffsetsDevice),
+                               &scratch->outputDevice })
     {
-      const cudaError_t result = cudaFree(*allocation);
-      rememberCudaError(firstError, firstOperation, result, "DBF scratch immediate release");
-      if (result == cudaSuccess) *allocation = nullptr;
+      if (*allocation != nullptr)
+      {
+        const cudaError_t result = releaseDbfDeviceImmediate(*allocation);
+        rememberCudaError(firstError, firstOperation, result, "DBF scratch immediate release");
+      }
     }
-  }
-  for (void **allocation : { reinterpret_cast<void **>(&context->dbfScratch.tasksHost),
-                             reinterpret_cast<void **>(&context->dbfScratch.laneOffsetsHost) })
-  {
-    if (*allocation != nullptr)
+    for (void **allocation : { reinterpret_cast<void **>(&scratch->tasksHost),
+                               reinterpret_cast<void **>(&scratch->laneOffsetsHost) })
     {
-      const cudaError_t result = cudaFreeHost(*allocation);
-      rememberCudaError(firstError, firstOperation, result, "pinned DBF scratch release");
-      if (result == cudaSuccess) *allocation = nullptr;
+      if (*allocation != nullptr)
+      {
+        const cudaError_t result = releaseDbfPinned(*allocation);
+        rememberCudaError(firstError, firstOperation, result, "pinned DBF scratch release");
+      }
     }
   }
   for (cudaEvent_t &fence : context->fences)
@@ -674,18 +760,76 @@ void ensureAlfCapacity(RuntimeContext *context, const std::size_t ctuCount,
   releaseAlfScratchChecked(context, context->alfRetiredScratch, stream);
 }
 
+void releaseDbfScratchChecked(RuntimeContext *context, DbfScratch &scratch, const cudaStream_t stream)
+{
+  if (isEmpty(scratch))
+  {
+    scratch = DbfScratch{};
+    return;
+  }
+  struct DeviceRelease
+  {
+    void **allocation;
+    CudaDbfTestFailurePoint failurePoint;
+    const char *operation;
+  };
+  const DeviceRelease deviceReleases[] = {
+    { reinterpret_cast<void **>(&scratch.tasksDevice), CudaDbfTestFailurePoint::OldTasksDeviceRelease,
+      "old DBF task device scratch release" },
+    { reinterpret_cast<void **>(&scratch.laneOffsetsDevice),
+      CudaDbfTestFailurePoint::OldLaneOffsetsDeviceRelease, "old DBF lane device scratch release" },
+    { &scratch.outputDevice, CudaDbfTestFailurePoint::OldOutputDeviceRelease,
+      "old DBF output device scratch release" }
+  };
+  for (const DeviceRelease &release : deviceReleases)
+  {
+    if (*release.allocation == nullptr) continue;
+    if (consumeDbfFailure(context, release.failurePoint))
+      throw std::runtime_error(std::string("Injected CUDA ") + release.operation + " failure");
+    checkCuda(releaseDbfDeviceAsync(*release.allocation, stream), release.operation);
+  }
+  checkCuda(cudaStreamSynchronize(stream), "old DBF scratch release completion");
+  ++context->dbfSynchronizations;
+
+  struct PinnedRelease
+  {
+    void **allocation;
+    CudaDbfTestFailurePoint failurePoint;
+    const char *operation;
+  };
+  const PinnedRelease pinnedReleases[] = {
+    { reinterpret_cast<void **>(&scratch.tasksHost), CudaDbfTestFailurePoint::OldTasksPinnedRelease,
+      "old pinned DBF task release" },
+    { reinterpret_cast<void **>(&scratch.laneOffsetsHost),
+      CudaDbfTestFailurePoint::OldLaneOffsetsPinnedRelease, "old pinned DBF lane release" }
+  };
+  for (const PinnedRelease &release : pinnedReleases)
+  {
+    if (*release.allocation == nullptr) continue;
+    if (consumeDbfFailure(context, release.failurePoint))
+      throw std::runtime_error(std::string("Injected CUDA ") + release.operation + " failure");
+    checkCuda(releaseDbfPinned(*release.allocation), release.operation);
+  }
+  scratch = DbfScratch{};
+}
+
 void ensureDbfCapacity(RuntimeContext *context, const std::size_t tasks, const std::size_t lanes,
                        const std::size_t outputBytes)
 {
-  DbfScratch &s = context->dbfScratch;
-  if (tasks <= s.taskCapacity && lanes <= s.laneCapacity && outputBytes <= s.outputCapacity) return;
+  DbfScratch &current = context->dbfScratch;
+  if (tasks <= current.taskCapacity && lanes <= current.laneCapacity
+      && outputBytes <= current.outputCapacity) return;
+  if (!isEmpty(context->dbfRetiredScratch))
+    throw std::runtime_error("CUDA DBF retired scratch was not recovered before growth");
   if (tasks == 0 || tasks > CUDA_DBF_MAX_TASKS || lanes == 0)
     throw std::runtime_error("CUDA DBF scratch request is outside fixed limits");
   constexpr std::size_t budget = std::size_t{ 512 } * 1024 * 1024;
   const std::size_t taskBytes = tasks * sizeof(CudaDbfLumaTask);
   const std::size_t laneBytes = (lanes + 1) * sizeof(std::uint32_t);
+  const std::size_t requestedBytes = 2 * taskBytes + 2 * laneBytes + outputBytes;
   if (taskBytes > budget / 2 || laneBytes > budget - 2 * taskBytes
-      || outputBytes > budget - 2 * taskBytes - 2 * laneBytes)
+      || outputBytes > budget - 2 * taskBytes - 2 * laneBytes
+      || dbfScratchBytes(current) > budget - requestedBytes)
     throw std::runtime_error("CUDA DBF scratch budget exceeded");
 
   cudaStream_t stream = context->streams[queueIndex(CudaQueue::Dbf)];
@@ -697,42 +841,49 @@ void ensureDbfCapacity(RuntimeContext *context, const std::size_t tasks, const s
   candidate.outputCapacity = outputBytes;
   try
   {
-    if (consumeDbfFailure(context, CudaDbfTestFailurePoint::Allocation))
-      throw std::runtime_error("Injected CUDA DBF allocation failure");
+    if (consumeDbfFailure(context, CudaDbfTestFailurePoint::Allocation)
+        || consumeDbfFailure(context, CudaDbfTestFailurePoint::GrowTasksDevice))
+      throw std::runtime_error("Injected CUDA DBF task device allocation failure");
     checkCuda(cudaMallocFromPoolAsync(reinterpret_cast<void **>(&candidate.tasksDevice), taskBytes,
                                       context->memoryPool, stream), "DBF task allocation");
+    noteDbfDeviceAllocation();
+    if (consumeDbfFailure(context, CudaDbfTestFailurePoint::GrowTasksPinned))
+      throw std::runtime_error("Injected CUDA DBF task pinned allocation failure");
     checkCuda(cudaHostAlloc(reinterpret_cast<void **>(&candidate.tasksHost), taskBytes,
                             cudaHostAllocPortable), "pinned DBF task allocation");
+    noteDbfPinnedAllocation();
+    if (consumeDbfFailure(context, CudaDbfTestFailurePoint::GrowLaneOffsetsDevice))
+      throw std::runtime_error("Injected CUDA DBF lane device allocation failure");
     checkCuda(cudaMallocFromPoolAsync(reinterpret_cast<void **>(&candidate.laneOffsetsDevice), laneBytes,
                                       context->memoryPool, stream), "DBF lane offset allocation");
+    noteDbfDeviceAllocation();
+    if (consumeDbfFailure(context, CudaDbfTestFailurePoint::GrowLaneOffsetsPinned))
+      throw std::runtime_error("Injected CUDA DBF lane pinned allocation failure");
     checkCuda(cudaHostAlloc(reinterpret_cast<void **>(&candidate.laneOffsetsHost), laneBytes,
                             cudaHostAllocPortable), "pinned DBF lane offset allocation");
+    noteDbfPinnedAllocation();
+    if (consumeDbfFailure(context, CudaDbfTestFailurePoint::GrowOutputDevice))
+      throw std::runtime_error("Injected CUDA DBF output allocation failure");
     checkCuda(cudaMallocFromPoolAsync(&candidate.outputDevice, outputBytes, context->memoryPool, stream),
               "DBF transactional output allocation");
+    noteDbfDeviceAllocation();
     checkCuda(cudaStreamSynchronize(stream), "DBF scratch allocation completion");
     ++context->dbfSynchronizations;
   }
   catch (...)
   {
-    for (void *p : { static_cast<void *>(candidate.tasksDevice),
-                     static_cast<void *>(candidate.laneOffsetsDevice), candidate.outputDevice })
-      if (p != nullptr) (void) cudaFreeAsync(p, stream);
-    (void) cudaStreamSynchronize(stream);
-    if (candidate.tasksHost != nullptr) (void) cudaFreeHost(candidate.tasksHost);
-    if (candidate.laneOffsetsHost != nullptr) (void) cudaFreeHost(candidate.laneOffsetsHost);
+    // Never best-effort free a partial candidate: recovery/teardown owns every successful allocation.
+    context->dbfRetiredScratch = candidate;
+    context->dbfPeakScratchBytes = std::max(context->dbfPeakScratchBytes,
+      dbfScratchBytes(current) + dbfScratchBytes(context->dbfRetiredScratch));
     throw;
   }
-  DbfScratch old = s;
-  s = candidate;
+
+  std::swap(current, candidate);
+  context->dbfRetiredScratch = candidate;
   context->dbfPeakScratchBytes = std::max(context->dbfPeakScratchBytes,
-                                          dbfScratchBytes(s) + dbfScratchBytes(old));
-  for (void *p : { static_cast<void *>(old.tasksDevice),
-                   static_cast<void *>(old.laneOffsetsDevice), old.outputDevice })
-    if (p != nullptr) checkCuda(cudaFreeAsync(p, stream), "old DBF device scratch release");
-  checkCuda(cudaStreamSynchronize(stream), "old DBF scratch release completion");
-  ++context->dbfSynchronizations;
-  if (old.tasksHost != nullptr) checkCuda(cudaFreeHost(old.tasksHost), "old pinned DBF task release");
-  if (old.laneOffsetsHost != nullptr) checkCuda(cudaFreeHost(old.laneOffsetsHost), "old pinned DBF lane release");
+    dbfScratchBytes(current) + dbfScratchBytes(context->dbfRetiredScratch));
+  releaseDbfScratchChecked(context, context->dbfRetiredScratch, stream);
 }
 
 __device__ __forceinline__ int dbfAbs(const int x) { return x < 0 ? -x : x; }
@@ -759,7 +910,7 @@ __device__ bool dbfStrong(const Sample *src, const std::ptrdiff_t offset, const 
                           const int lenP, const int lenQ)
 {
   const int m4 = int(src[0]), m3 = int(src[-offset]), m7 = int(src[3 * offset]);
-  const int m0 = int(src[-4 * offset]), m2 = int(src[-2 * offset]);
+  const int m0 = int(src[-4 * offset]);
   int sp3 = dbfAbs(m0 - m3), sq3 = dbfAbs(m7 - m4);
   if (largeP || largeQ)
   {
@@ -1718,6 +1869,10 @@ void filterDbfLumaFrame(RuntimeContext *context, const CudaDevicePlaneDesc &plan
   for (std::uint32_t i = 0; i < taskCount; ++i) ++directionCounts[tasks[i].direction];
   ensureDbfCapacity(context, std::max(directionCounts[0], directionCounts[1]),
                     std::max(verticalLanes, horizontalLanes), outputBytes);
+#if VTM_CUDA_TESTING
+  if (isDbfRecoveryReleaseFailure(context->dbfFailurePoint))
+    throw std::runtime_error("Injected CUDA DBF failure before recovery release testing");
+#endif
   cudaStream_t stream = context->streams[queueIndex(CudaQueue::Dbf)];
   DbfScratch &s = context->dbfScratch;
 
@@ -1846,7 +2001,8 @@ DbfAccelerationStats dbfStats(const RuntimeContext *context) noexcept
   stats.commitBytes = context->dbfCommitBytes;
   stats.runtimeSynchronizations = context->dbfSynchronizations;
   stats.runtimeNanoseconds = context->dbfElapsedNanoseconds;
-  stats.scratchBytes = dbfScratchBytes(context->dbfScratch);
+  stats.scratchBytes = dbfScratchBytes(context->dbfScratch) + dbfScratchBytes(context->dbfRetiredScratch);
+  stats.retiredScratchBytes = dbfScratchBytes(context->dbfRetiredScratch);
   stats.peakScratchBytes = context->dbfPeakScratchBytes;
   stats.enabled = true;
   return stats;
@@ -2004,35 +2160,74 @@ void recoverDbfRuntime(RuntimeContext *context) noexcept
   if (context == nullptr) return;
   (void) cudaSetDevice(context->device);
   const std::size_t index = queueIndex(CudaQueue::Dbf);
+  void **deferredAllocation = nullptr;
   if (context->streams[index] != nullptr)
   {
     (void) cudaStreamSynchronize(context->streams[index]);
-    for (void **allocation : { reinterpret_cast<void **>(&context->dbfScratch.tasksDevice),
-                               reinterpret_cast<void **>(&context->dbfScratch.laneOffsetsDevice),
-                               &context->dbfScratch.outputDevice })
+    for (DbfScratch *scratch : { &context->dbfScratch, &context->dbfRetiredScratch })
     {
-      if (*allocation != nullptr && cudaFreeAsync(*allocation, context->streams[index]) == cudaSuccess)
-        *allocation = nullptr;
-      else if (*allocation != nullptr) (void) cudaGetLastError();
+      struct RecoveryRelease
+      {
+        void **allocation;
+        CudaDbfTestFailurePoint failurePoint;
+      };
+      const RecoveryRelease releases[] = {
+        { reinterpret_cast<void **>(&scratch->tasksDevice),
+          CudaDbfTestFailurePoint::RecoveryTasksDeviceRelease },
+        { reinterpret_cast<void **>(&scratch->laneOffsetsDevice),
+          CudaDbfTestFailurePoint::RecoveryLaneOffsetsDeviceRelease },
+        { &scratch->outputDevice, CudaDbfTestFailurePoint::RecoveryOutputDeviceRelease }
+      };
+      for (const RecoveryRelease &release : releases)
+      {
+        if (*release.allocation == nullptr) continue;
+        if (consumeDbfFailure(context, release.failurePoint))
+        {
+          // Model a release that failed for this recovery pass. Ownership stays in its exact slot.
+          deferredAllocation = release.allocation;
+          continue;
+        }
+        if (releaseDbfDeviceAsync(*release.allocation, context->streams[index]) != cudaSuccess)
+          (void) cudaGetLastError();
+      }
     }
     (void) cudaStreamSynchronize(context->streams[index]);
     (void) cudaStreamDestroy(context->streams[index]);
     context->streams[index] = nullptr;
   }
-  for (void **allocation : { reinterpret_cast<void **>(&context->dbfScratch.tasksDevice),
-                             reinterpret_cast<void **>(&context->dbfScratch.laneOffsetsDevice),
-                             &context->dbfScratch.outputDevice })
+  for (DbfScratch *scratch : { &context->dbfScratch, &context->dbfRetiredScratch })
   {
-    if (*allocation != nullptr && cudaFree(*allocation) == cudaSuccess) *allocation = nullptr;
-    else if (*allocation != nullptr) (void) cudaGetLastError();
+    for (void **allocation : { reinterpret_cast<void **>(&scratch->tasksDevice),
+                               reinterpret_cast<void **>(&scratch->laneOffsetsDevice),
+                               &scratch->outputDevice })
+    {
+      if (*allocation != nullptr && allocation != deferredAllocation
+          && releaseDbfDeviceImmediate(*allocation) != cudaSuccess)
+        (void) cudaGetLastError();
+    }
+    struct RecoveryPinnedRelease
+    {
+      void **allocation;
+      CudaDbfTestFailurePoint failurePoint;
+    };
+    const RecoveryPinnedRelease pinnedReleases[] = {
+      { reinterpret_cast<void **>(&scratch->tasksHost),
+        CudaDbfTestFailurePoint::RecoveryTasksPinnedRelease },
+      { reinterpret_cast<void **>(&scratch->laneOffsetsHost),
+        CudaDbfTestFailurePoint::RecoveryLaneOffsetsPinnedRelease }
+    };
+    for (const RecoveryPinnedRelease &release : pinnedReleases)
+    {
+      if (*release.allocation == nullptr) continue;
+      if (consumeDbfFailure(context, release.failurePoint))
+      {
+        deferredAllocation = release.allocation;
+        continue;
+      }
+      if (releaseDbfPinned(*release.allocation) != cudaSuccess) (void) cudaGetLastError();
+    }
+    if (isEmpty(*scratch)) *scratch = DbfScratch{};
   }
-  for (void **allocation : { reinterpret_cast<void **>(&context->dbfScratch.tasksHost),
-                             reinterpret_cast<void **>(&context->dbfScratch.laneOffsetsHost) })
-  {
-    if (*allocation != nullptr && cudaFreeHost(*allocation) == cudaSuccess) *allocation = nullptr;
-    else if (*allocation != nullptr) (void) cudaGetLastError();
-  }
-  context->dbfScratch = DbfScratch{};
 #if VTM_CUDA_TESTING
   context->dbfFailurePoint = CudaDbfTestFailurePoint::None;
 #endif

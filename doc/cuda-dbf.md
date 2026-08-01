@@ -51,8 +51,8 @@ CTU dimensions (1924x1084), descriptor rejection, and all transactional failure 
 also passed Compute Sanitizer memcheck and racecheck with zero findings.
 
 On the initial RTX 5060 target, a dense 1924x1084 Pel16/10-bit microbenchmark (warm-up plus five
-measured runs, about 129k descriptors) produced median CPU descriptor application of 11.196 ms and
-CUDA integration of 9.378 ms (1.19x). A real 1920x1080 AI decode was byte-identical, with 105,512
+measured runs, about 129k descriptors) produced median CPU descriptor application of 11.050 ms and
+CUDA integration of 8.560 ms (1.29x). A real 1920x1080 AI decode was byte-identical, with 105,512
 descriptors and 8.876 ms reported DBF runtime, but end-to-end DecoderApp wall time regressed from
 0.310 s to 0.441 s. That dispatch uploaded 2.96 MB of parameters, committed 4.15 MB, transferred
 8.27 MB in each mirror direction, and used six synchronizations. Therefore the end-to-end gate has

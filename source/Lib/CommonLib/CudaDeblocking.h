@@ -24,6 +24,21 @@ enum class CudaDbfTestFailurePoint : std::uint8_t
 {
   None,
   Allocation,
+  GrowTasksDevice,
+  GrowTasksPinned,
+  GrowLaneOffsetsDevice,
+  GrowLaneOffsetsPinned,
+  GrowOutputDevice,
+  OldTasksDeviceRelease,
+  OldLaneOffsetsDeviceRelease,
+  OldOutputDeviceRelease,
+  OldTasksPinnedRelease,
+  OldLaneOffsetsPinnedRelease,
+  RecoveryTasksDeviceRelease,
+  RecoveryLaneOffsetsDeviceRelease,
+  RecoveryOutputDeviceRelease,
+  RecoveryTasksPinnedRelease,
+  RecoveryLaneOffsetsPinnedRelease,
   ParameterUpload,
   SnapshotCopy,
   VerticalLaunch,
@@ -33,6 +48,18 @@ enum class CudaDbfTestFailurePoint : std::uint8_t
   CommitCopy,
   CommitCompletion
 };
+
+constexpr std::int32_t cudaDbfMaximumTc(const std::uint8_t bitDepth) noexcept
+{
+  // Highest value of the normative tc table (395 at 10-bit), scaled exactly as DeblockingFilter.
+  return bitDepth == 8 ? 99 : bitDepth == 10 ? 395 : -1;
+}
+
+constexpr std::int32_t cudaDbfMaximumBeta(const std::uint8_t bitDepth) noexcept
+{
+  // Highest value of the normative beta table (88), scaled by 1 << (bitDepth - 8).
+  return bitDepth == 8 ? 88 : bitDepth == 10 ? 352 : -1;
+}
 
 // One normative four-sample luma edge segment. CPU code derives all syntax-
 // dependent state. CUDA only performs the sample-dependent decisions and filter arithmetic.
