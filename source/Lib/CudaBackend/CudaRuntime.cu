@@ -101,6 +101,7 @@ struct RuntimeContext
   std::size_t                 qpaCapacity = 0;
   std::uint64_t               qpaDispatches = 0;
   std::uint64_t               qpaTasks = 0;
+  std::uint64_t               decoderTransformDispatches = 0;
   AlfScratch                  alfScratch{};
   // A failed old-buffer release must retain ownership until recovery/teardown.
   AlfScratch                  alfRetiredScratch{};
@@ -915,6 +916,7 @@ void ensureAlfCapacity(RuntimeContext *context, const std::size_t ctuCount,
     context->alfRetiredScratch = candidate;
     context->alfPeakScratchBytes = std::max(context->alfPeakScratchBytes,
       alfScratchBytes(current) + alfScratchBytes(context->alfRetiredScratch));
+    noteCombinedLoopFilterScratchPeak(context);
     throw;
   }
 
@@ -922,6 +924,9 @@ void ensureAlfCapacity(RuntimeContext *context, const std::size_t ctuCount,
   context->alfRetiredScratch = candidate;
   context->alfPeakScratchBytes = std::max(context->alfPeakScratchBytes,
     alfScratchBytes(current) + alfScratchBytes(context->alfRetiredScratch));
+  // Record the transactional high-water mark while old and replacement ALF allocations coexist,
+  // including retained DBF/chain storage owned by the same context.
+  noteCombinedLoopFilterScratchPeak(context);
   releaseAlfScratchChecked(context, context->alfRetiredScratch, stream);
 }
 
@@ -1041,6 +1046,7 @@ void ensureDbfCapacity(RuntimeContext *context, const std::size_t tasks, const s
     context->dbfRetiredScratch = candidate;
     context->dbfPeakScratchBytes = std::max(context->dbfPeakScratchBytes,
       dbfScratchBytes(current) + dbfScratchBytes(context->dbfRetiredScratch));
+    noteCombinedLoopFilterScratchPeak(context);
     throw;
   }
 
@@ -1048,6 +1054,9 @@ void ensureDbfCapacity(RuntimeContext *context, const std::size_t tasks, const s
   context->dbfRetiredScratch = candidate;
   context->dbfPeakScratchBytes = std::max(context->dbfPeakScratchBytes,
     dbfScratchBytes(current) + dbfScratchBytes(context->dbfRetiredScratch));
+  // Record the transactional high-water mark before retiring old DBF allocations. This is the
+  // only point where the complete old + replacement + other-subsystem total is observable.
+  noteCombinedLoopFilterScratchPeak(context);
   releaseDbfScratchChecked(context, context->dbfRetiredScratch, stream);
 }
 
@@ -1569,6 +1578,111 @@ __global__ void qpaBatchKernel(const Sample *luma, const std::size_t pitchBytes,
     result.highpassSum = highpassPartial[0];
     result.lumaSum = lumaPartial[0];
     results[blockIdx.x] = result;
+  }
+}
+
+__device__ std::int32_t decoderTransformClip(const std::int64_t value, const std::int32_t minimum,
+                                             const std::int32_t maximum)
+{
+  return static_cast<std::int32_t>(value < minimum ? minimum : (value > maximum ? maximum : value));
+}
+
+__device__ std::int32_t decoderTransformRoundShift(const std::int64_t value, const int shift)
+{
+  if (shift <= 0) return static_cast<std::int32_t>(value << -shift);
+  return static_cast<std::int32_t>((value + (std::int64_t{ 1 } << (shift - 1))) >> shift);
+}
+
+__global__ void decoderTransformBatchKernel(const CudaDecoderTransformTask *tasks,
+                                             const std::int32_t *quantizedCoefficients,
+                                             const std::int32_t *prediction, const std::uint16_t *scan,
+                                             const std::int16_t *matrices, std::int32_t *output)
+{
+  const CudaDecoderTransformTask task = tasks[blockIdx.x];
+  const unsigned samples = unsigned(task.width) * task.height;
+  extern __shared__ std::int32_t scratch[];
+  std::int32_t *coefficients = scratch;
+  std::int32_t *temporary = scratch + 32 * 32;
+  const std::int32_t *quantized = quantizedCoefficients + task.coefficientOffset;
+
+  for (unsigned index = threadIdx.x; index < samples; index += blockDim.x) coefficients[index] = 0;
+  __syncthreads();
+  if (task.dependentQuant)
+  {
+    if (threadIdx.x == 0)
+    {
+      int lastScan = -1;
+      for (int index = int(samples) - 1; index >= 0; --index)
+      {
+        if (quantized[scan[task.scanOffset + index]] != 0) { lastScan = index; break; }
+      }
+      int state = 0;
+      for (int scanIndex = lastScan; scanIndex >= 0; --scanIndex)
+      {
+        const unsigned raster = scan[task.scanOffset + scanIndex];
+        const std::int32_t level = quantized[raster];
+        if (level != 0)
+        {
+          const std::int32_t qIndex = 2 * level + (level > 0 ? -(state >> 1) : (state >> 1));
+          const std::int64_t scaled = std::int64_t(qIndex) * task.inverseQuantScale;
+          const std::int64_t value = task.dequantShift < 0
+                                       ? (scaled << -task.dequantShift)
+                                       : ((scaled + (task.dequantShift == 0 ? 0
+                                                       : (std::int64_t{ 1 } << (task.dequantShift - 1))))
+                                          >> task.dequantShift);
+          coefficients[raster] = decoderTransformClip(value, task.coefficientMinimum, task.coefficientMaximum);
+        }
+        state = (32040 >> ((state << 2) + ((level & 1) << 1))) & 3;
+      }
+    }
+  }
+  else
+  {
+    for (unsigned index = threadIdx.x; index < samples; index += blockDim.x)
+    {
+      const std::int64_t scaled = std::int64_t(quantized[index]) * task.inverseQuantScale;
+      const std::int64_t value = task.dequantShift < 0
+                                   ? (scaled << -task.dequantShift)
+                                   : ((scaled + (task.dequantShift == 0 ? 0
+                                                   : (std::int64_t{ 1 } << (task.dequantShift - 1))))
+                                      >> task.dequantShift);
+      coefficients[index] = decoderTransformClip(value, task.coefficientMinimum, task.coefficientMaximum);
+    }
+  }
+  __syncthreads();
+
+  if (task.mode == CudaDecoderTransformMode::Dct2)
+  {
+    const std::int16_t *vertical = matrices + task.verticalMatrixOffset;
+    const std::int16_t *horizontal = matrices + task.horizontalMatrixOffset;
+    for (unsigned index = threadIdx.x; index < samples; index += blockDim.x)
+    {
+      const unsigned x = index / task.height;
+      const unsigned y = index % task.height;
+      std::int64_t sum = 0;
+      for (unsigned k = 0; k < task.height; ++k)
+        sum += std::int64_t(vertical[y * task.height + k]) * coefficients[k * task.width + x];
+      temporary[index] = decoderTransformClip(decoderTransformRoundShift(sum, task.firstTransformShift),
+                                              task.coefficientMinimum, task.coefficientMaximum);
+    }
+    __syncthreads();
+    for (unsigned index = threadIdx.x; index < samples; index += blockDim.x)
+    {
+      const unsigned y = index / task.width;
+      const unsigned x = index % task.width;
+      std::int64_t sum = 0;
+      for (unsigned k = 0; k < task.width; ++k)
+        sum += std::int64_t(horizontal[x * task.width + k]) * temporary[k * task.height + y];
+      coefficients[index] = decoderTransformClip(decoderTransformRoundShift(sum, task.secondTransformShift),
+                                                 task.residualMinimum, task.residualMaximum);
+    }
+    __syncthreads();
+  }
+
+  for (unsigned index = threadIdx.x; index < samples; index += blockDim.x)
+  {
+    const std::int64_t reconstructed = std::int64_t(prediction[task.predictionOffset + index]) + coefficients[index];
+    output[task.outputOffset + index] = decoderTransformClip(reconstructed, task.sampleMinimum, task.sampleMaximum);
   }
 }
 

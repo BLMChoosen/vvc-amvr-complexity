@@ -109,6 +109,30 @@ int  Reshape::calculateChromaAdj(Pel avgLuma)
   return(iAdj);
 }
 
+static_assert(Reshape::getChromaAdjVpduCoordinate(0, 128) == 0
+              && Reshape::getChromaAdjVpduCoordinate(63, 128) == 0,
+              "multiple CUs/TUs inside a 128-CTU VPDU must share the cached coordinate");
+static_assert(Reshape::getChromaAdjVpduCoordinate(64, 128) == 64,
+              "crossing a 64-sample VPDU inside a 128 CTU must invalidate the cache key");
+static_assert(Reshape::getChromaAdjVpduCoordinate(63, 64) == 0
+              && Reshape::getChromaAdjVpduCoordinate(64, 64) == 64,
+              "64-sample CTUs must transition cache keys at the CTU boundary");
+static_assert(!Reshape::isChromaAdjVpduCacheHit(-1, -1, 0, 0, false),
+              "the decoder cache sentinel must force the first neighbour read");
+static_assert(Reshape::isChromaAdjVpduCacheHit(0, 0, 0, 0, false)
+              && !Reshape::isChromaAdjVpduCacheHit(0, 0, 64, 0, false)
+              && !Reshape::isChromaAdjVpduCacheHit(0, 0, 0, 0, true),
+              "cache hits are decoder-only and limited to the same VPDU");
+
+bool Reshape::chromaAdjVpduReadsLuma(const TransformUnit &tu, const CompArea &areaY) const
+{
+  const CodingStructure &cs = *tu.cs;
+  const int ctuSize = cs.sps->getCTUSize();
+  const int xPos = getChromaAdjVpduCoordinate(areaY.lumaPos().x, ctuSize);
+  const int yPos = getChromaAdjVpduCoordinate(areaY.lumaPos().y, ctuSize);
+  return !isChromaAdjVpduCacheHit(m_vpduX, m_vpduY, xPos, yPos, cs.pcv->isEncoder);
+}
+
 /** compute chroma residuce scale for TU
 * \param average luma pred of TU
 * \return chroma residue scale
@@ -121,18 +145,10 @@ int  Reshape::calculateChromaAdjVpduNei(TransformUnit &tu, const CompArea &areaY
   int ctuSize = cs.sps->getCTUSize();
   int numNeighbor = std::min(64, ctuSize);
   int numNeighborLog = floorLog2(numNeighbor);
-  if (ctuSize == 128)
-  {
-    xPos = xPos / 64 * 64;
-    yPos = yPos / 64 * 64;
-  }
-  else
-  {
-    xPos = xPos / ctuSize * ctuSize;
-    yPos = yPos / ctuSize * ctuSize;
-  }
+  xPos = getChromaAdjVpduCoordinate(xPos, ctuSize);
+  yPos = getChromaAdjVpduCoordinate(yPos, ctuSize);
 
-  if (isVPDUprocessed(xPos, yPos) && !cs.pcv->isEncoder)
+  if (!chromaAdjVpduReadsLuma(tu, areaY))
   {
     return getChromaScale();
   }

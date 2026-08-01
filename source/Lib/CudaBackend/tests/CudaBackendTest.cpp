@@ -2485,6 +2485,86 @@ bool runLoopFilterChainDisabledStageContractCase(vtm::CudaContext &context)
 }
 
 #if VTM_CUDA_TESTING
+bool runCombinedScratchPeakGrowthCase(const int device)
+{
+  // DBF growth: the combined metric must observe old + replacement allocations concurrently.
+  {
+    vtm::CudaContext context;
+    context.create(device);
+    TestPicture picture(1924, 1084, sizeof(Pel), 10, 109, 1, 0, 0, 8, 8);
+    fillDbfPattern(picture, 10);
+    int owner = 0;
+    const auto mirror = context.registerPictureMirror(
+      &owner, vtm::CudaPictureRole::Reconstruction, picture.descriptor);
+    const auto tasks = makeDbfTasks(10);
+    const vtm::CudaDbfFrame frame{ 1924, 1084, 10, sizeof(Pel), { 0, 0 } };
+    bool valid = context.filterDbfLumaFrame(mirror, frame, tasks.data(), 1)
+                   == vtm::CudaDbfDispatchResult::Executed;
+    const auto before = context.loopFilterChainStats();
+    context.markHostPlaneModified(mirror, 0);
+    valid = valid && context.filterDbfLumaFrame(
+                       mirror, frame, tasks.data(), static_cast<std::uint32_t>(tasks.size()))
+                       == vtm::CudaDbfDispatchResult::Executed;
+    const auto after = context.loopFilterChainStats();
+    valid = valid && before.scratchBytes != 0 && after.scratchBytes > before.scratchBytes
+            && after.retiredScratchBytes == 0
+            && after.peakScratchBytes >= before.scratchBytes + after.scratchBytes;
+    context.releasePictureMirror(mirror);
+    context.shutdown();
+    if (!valid)
+    {
+      std::cerr << "combined DBF peak did not include old + replacement scratch: before="
+                << before.scratchBytes << " after=" << after.scratchBytes
+                << " peak=" << after.peakScratchBytes << '\n';
+      return false;
+    }
+  }
+
+  // ALF growth uses a fresh context so the proven transient sum is exactly old + replacement ALF.
+  {
+    vtm::CudaContext context;
+    context.create(device);
+    TestPicture small(1920, 1080, sizeof(Pel), 10, 113, 1, 0, 0);
+    TestPicture large(1924, 1084, sizeof(Pel), 10, 127, 1, 0, 0);
+    small.fillSamples(113);
+    large.fillSamples(127);
+    int smallOwner = 0;
+    int largeOwner = 0;
+    const auto smallMirror = context.registerPictureMirror(
+      &smallOwner, vtm::CudaPictureRole::Reconstruction, small.descriptor);
+    const auto largeMirror = context.registerPictureMirror(
+      &largeOwner, vtm::CudaPictureRole::Reconstruction, large.descriptor);
+    const auto smallFrame = makeAlfFrame(1920, 1080, 10);
+    const auto largeFrame = makeAlfFrame(1924, 1084, 10);
+    const auto smallCtus = makeAlfCtus(smallFrame, false);
+    const auto largeCtus = makeAlfCtus(largeFrame, false);
+    bool valid = context.filterAlfLumaFrame(
+                   smallMirror, smallFrame, smallCtus.data(),
+                   static_cast<std::uint32_t>(smallCtus.size()))
+                   == vtm::CudaAlfDispatchResult::Executed;
+    const auto before = context.loopFilterChainStats();
+    valid = valid && context.filterAlfLumaFrame(
+                       largeMirror, largeFrame, largeCtus.data(),
+                       static_cast<std::uint32_t>(largeCtus.size()))
+                       == vtm::CudaAlfDispatchResult::Executed;
+    const auto after = context.loopFilterChainStats();
+    valid = valid && before.scratchBytes != 0 && after.scratchBytes > before.scratchBytes
+            && after.retiredScratchBytes == 0
+            && after.peakScratchBytes >= before.scratchBytes + after.scratchBytes;
+    context.releasePictureMirror(largeMirror);
+    context.releasePictureMirror(smallMirror);
+    context.shutdown();
+    if (!valid)
+    {
+      std::cerr << "combined ALF peak did not include old + replacement scratch: before="
+                << before.scratchBytes << " after=" << after.scratchBytes
+                << " peak=" << after.peakScratchBytes << '\n';
+      return false;
+    }
+  }
+  return true;
+}
+
 bool runLoopFilterChainFailureCase(const int device,
                                    const vtm::CudaLoopFilterChainTestFailurePoint point)
 {
@@ -2583,6 +2663,7 @@ bool runLoopFilterChainFailureCase(const int device,
 
 bool runLoopFilterChainFailureMatrix(const int device)
 {
+  if (!runCombinedScratchPeakGrowthCase(device)) return false;
   for (const auto point : {
          vtm::CudaLoopFilterChainTestFailurePoint::GrowLutDevice,
          vtm::CudaLoopFilterChainTestFailurePoint::GrowLutPinned,

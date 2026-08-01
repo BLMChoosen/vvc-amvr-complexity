@@ -67,7 +67,9 @@ void computeDistortionBatch(RuntimeContext *context, const CudaDistortionBatchDe
                             std::uint64_t *results);
 std::uint64_t distortionBatchDispatchCount(const RuntimeContext *context);
 void computeQpaBatch(RuntimeContext *context, const CudaDevicePlaneDesc &source,
-                     const CudaQpaTask *tasks, std::uint32_t taskCount, CudaQpaResult *results);
+                      const CudaQpaTask *tasks, std::uint32_t taskCount, CudaQpaResult *results);
+void computeDecoderTransformBatch(RuntimeContext *context, const CudaDecoderTransformBatch &batch);
+std::uint64_t decoderTransformBatchDispatchCount(const RuntimeContext *context);
 void filterAlfLumaFrame(RuntimeContext *context, const CudaDevicePlaneDesc &plane,
                         const CudaAlfLumaFrame &frame, const CudaAlfCtuParam *ctus,
                         std::uint32_t ctuCount, CudaAlfClassifier *classifiers);

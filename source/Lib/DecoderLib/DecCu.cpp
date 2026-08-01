@@ -44,6 +44,23 @@
 
 #include "CommonLib/dtrace_buffer.h"
 
+#if VTM_ENABLE_DECODER_BATCH_PROFILING
+#include <array>
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
+#include <functional>
+#include <mutex>
+#include <sstream>
+#include <string>
+#include <thread>
+#if defined(_WIN32)
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
+#endif
+
 #if RExt__DECODER_DEBUG_TOOL_STATISTICS
 #include "CommonLib/CodingStatistics.h"
 #endif
@@ -59,10 +76,753 @@
 // Constructor / destructor / create / destroy
 // ====================================================================================================================
 
-DecCu::DecCu() : m_tmpStorageCtu(nullptr) {}
+#if VTM_ENABLE_DECODER_BATCH_PROFILING
+namespace
+{
+enum class McProfilePath : uint8_t
+{
+  UNI = 0,
+  UNI_RPR,
+  IDENTICAL_UNI,
+  IDENTICAL_UNI_RPR,
+  UNI_WEIGHTED,
+  UNI_WEIGHTED_RPR,
+  BI_AVG,
+  BI_AVG_RPR,
+  BI_WEIGHTED,
+  BI_WEIGHTED_RPR,
+  BI_BCW,
+  BI_BCW_RPR,
+  NUM
+};
+
+enum class McProfileReason : uint8_t
+{
+  INTRA_OR_PLT = 0,
+  IBC,
+  GPM,
+  AFFINE_OR_PROF,
+  CIIP,
+  SUB_PU,
+  DMVR,
+  BDOF,
+  INVALID_DPB_REFERENCE,
+  MIXED_EFFECTIVE_PATH,
+  LMCS_CHROMA_ADJ,
+  IBC_BUFFER_RESET,
+  IBC_VPDU_RESET,
+  IBC_PRE_MV_CONSUMER,
+  PATH_CHANGE,
+  PICTURE_BOUNDARY,
+  STREAM_END,
+  NUM
+};
+
+const char *const mcProfilePathNames[] = {
+  "uni", "uni_rpr", "identical_uni", "identical_uni_rpr", "uni_weighted", "uni_weighted_rpr",
+  "bi_avg", "bi_avg_rpr", "bi_weighted", "bi_weighted_rpr", "bi_bcw", "bi_bcw_rpr"
+};
+const char *const mcProfileReasonNames[] = {
+  "intra_or_plt", "ibc", "gpm", "affine_or_prof", "ciip", "sub_pu", "dmvr", "bdof",
+  "invalid_dpb", "mixed_effective_path", "lmcs_chroma_adj", "ibc_buffer_reset", "ibc_vpdu_reset",
+  "ibc_pre_mv_consumer", "path_change", "picture_boundary", "stream_end"
+};
+static_assert(sizeof(mcProfilePathNames) / sizeof(mcProfilePathNames[0]) == static_cast<size_t>(McProfilePath::NUM),
+              "decoder batching path names are incomplete");
+static_assert(sizeof(mcProfileReasonNames) / sizeof(mcProfileReasonNames[0]) == static_cast<size_t>(McProfileReason::NUM),
+              "decoder batching reason names are incomplete");
+
+constexpr McProfileReason mcProfileModeReason(const bool isIbc, const bool isInter)
+{
+  return isIbc ? McProfileReason::IBC : (isInter ? McProfileReason::NUM : McProfileReason::INTRA_OR_PLT);
+}
+static_assert(mcProfileModeReason(true, false) == McProfileReason::IBC,
+              "IBC must be classified before the generic non-inter rejection");
+static_assert(mcProfileModeReason(false, false) == McProfileReason::INTRA_OR_PLT,
+              "non-inter CUs must retain their dedicated rejection");
+
+constexpr bool mcProfileIbcFillObservable(const bool spsIbcEnabled)
+{
+  return spsIbcEnabled;
+}
+static_assert(!mcProfileIbcFillObservable(false),
+              "xFillIBCBuffer writes are semantically unobservable when SPS IBC is disabled");
+
+struct IbcFillModel
+{
+  uint64_t pending = 0;
+  uint64_t maximumPending = 0;
+  uint64_t totalQueued = 0;
+  uint64_t totalApplied = 0;
+  uint64_t disabledSpsNoops = 0;
+  uint64_t lastQueuedSequence = 0;
+  uint64_t lastAppliedSequence = 0;
+
+  constexpr void enqueue(const bool observable)
+  {
+    if (!observable)
+    {
+      disabledSpsNoops++;
+      return;
+    }
+    pending++;
+    totalQueued++;
+    lastQueuedSequence = totalQueued;
+    if (pending > maximumPending) maximumPending = pending;
+  }
+
+  constexpr void completeInOrder()
+  {
+    totalApplied += pending;
+    pending = 0;
+    lastAppliedSequence = lastQueuedSequence;
+  }
+
+  constexpr bool boundaryIsValid() const
+  {
+    return pending == 0 && lastAppliedSequence == lastQueuedSequence;
+  }
+};
+
+constexpr bool mcProfileIbcFillModelAssertions()
+{
+  IbcFillModel model;
+  model.enqueue(true);
+  model.enqueue(true);
+  if (model.pending != 2 || model.maximumPending != 2 || model.totalApplied != 0) return false;
+  model.completeInOrder();
+  if (!model.boundaryIsValid() || model.totalApplied != 2 || model.lastAppliedSequence != 2) return false;
+  model.enqueue(false);
+  return model.boundaryIsValid() && model.disabledSpsNoops == 1;
+}
+static_assert(mcProfileIbcFillModelAssertions(),
+              "pending IBC fills must batch, complete in order, and never cross a consumer/reset boundary");
+
+bool mcProfileEnabledFromEnvironment()
+{
+  const char *value = std::getenv("VTM_DECODER_BATCH_PROFILE");
+  return value != nullptr && value[0] != '\0' && !(value[0] == '0' && value[1] == '\0');
+}
+
+bool mcProfileIdenticalMotion(const PredictionUnit &pu)
+{
+  const Slice &slice = *pu.cs->slice;
+  if (slice.isInterB() && !pu.cs->pps->getWPBiPred() && pu.refIdx[0] >= 0 && pu.refIdx[1] >= 0)
+  {
+    const Picture *refPicL0 = slice.getRefPic(REF_PIC_LIST_0, pu.refIdx[0]);
+    const Picture *refPicL1 = slice.getRefPic(REF_PIC_LIST_1, pu.refIdx[1]);
+    return refPicL0 == refPicL1 && pu.mv[0] == pu.mv[1];
+  }
+  return false;
+}
+
+McProfilePath mcProfileRprVariant(const McProfilePath base, const bool rpr)
+{
+  return rpr ? static_cast<McProfilePath>(static_cast<unsigned>(base) + 1) : base;
+}
+
+struct LogHistogram
+{
+  std::array<uint64_t, 65> buckets{};
+  uint64_t count = 0;
+  uint64_t maximum = 0;
+
+  void add(const uint64_t value)
+  {
+    unsigned bucket = 0;
+    if (value != 0)
+    {
+      uint64_t remaining = value;
+      while (remaining >>= 1) ++bucket;
+      ++bucket;
+    }
+    buckets[bucket]++;
+    count++;
+    if (value > maximum) maximum = value;
+  }
+
+  uint64_t quantileUpperBound(const unsigned percentile) const
+  {
+    if (count == 0) return 0;
+    const uint64_t rank = (count * percentile + 99) / 100;
+    uint64_t cumulative = 0;
+    for (unsigned bucket = 0; bucket < buckets.size(); ++bucket)
+    {
+      cumulative += buckets[bucket];
+      if (cumulative >= rank)
+      {
+        if (bucket == 0) return 0;
+        if (bucket == 64) return UINT64_MAX;
+        return (uint64_t{ 1 } << bucket) - 1;
+      }
+    }
+    return maximum;
+  }
+};
+
+struct RunDistribution
+{
+  LogHistogram tasks;
+  LogHistogram pixels;
+  uint64_t totalTasks = 0;
+  uint64_t totalPixels = 0;
+
+  void add(const uint64_t taskCount, const uint64_t pixelCount)
+  {
+    tasks.add(taskCount);
+    pixels.add(pixelCount);
+    totalTasks += taskCount;
+    totalPixels += pixelCount;
+  }
+};
+
+constexpr unsigned transformSizeClasses = 7;
+constexpr int transformQpMinimum = -64;
+constexpr int transformQpMaximum = 127;
+
+enum class TransformFeature : uint8_t
+{
+  DCT2 = 0,
+  MTS,
+  TRANSFORM_SKIP,
+  LFNST,
+  SBT,
+  JOINT_CBCR,
+  ACT,
+  LMCS,
+  REGULAR_DCT2_CANDIDATE,
+  NUM
+};
+
+enum class DequantPath : uint8_t
+{
+  DEPENDENT_FLAT = 0,
+  DEPENDENT_SCALING_LIST,
+  SCALAR_FLAT,
+  SCALAR_SCALING_LIST,
+  NUM
+};
+
+const char *const transformFeatureNames[] = {
+  "dct2", "mts", "transform_skip", "lfnst", "sbt", "joint_cbcr", "act", "lmcs",
+  "regular_dct2_candidate"
+};
+const char *const dequantPathNames[] = {
+  "dependent_flat", "dependent_scaling_list", "scalar_flat", "scalar_scaling_list"
+};
+const char *const transformComponentNames[] = { "Y", "Cb", "Cr" };
+
+static_assert(sizeof(transformFeatureNames) / sizeof(transformFeatureNames[0]) ==
+                static_cast<size_t>(TransformFeature::NUM),
+              "transform feature names are incomplete");
+static_assert(sizeof(dequantPathNames) / sizeof(dequantPathNames[0]) == static_cast<size_t>(DequantPath::NUM),
+              "dequant path names are incomplete");
+
+struct TransformAggregate
+{
+  uint64_t tasks = 0;
+  uint64_t pixels = 0;
+  uint64_t coefficients = 0;
+  uint64_t nonzeroCoefficients = 0;
+
+  void add(const uint64_t pixelCount, const uint64_t coefficientCount, const uint64_t nonzeroCount)
+  {
+    tasks++;
+    pixels += pixelCount;
+    coefficients += coefficientCount;
+    nonzeroCoefficients += nonzeroCount;
+  }
+};
+
+struct TransformBlockAggregate
+{
+  uint64_t blocks = 0;
+  uint64_t cbfBlocks = 0;
+  uint64_t zeroCbfBlocks = 0;
+  uint64_t pixels = 0;
+  uint64_t cbfPixels = 0;
+  uint64_t zeroCbfPixels = 0;
+
+  void add(const uint64_t pixelCount, const bool cbf)
+  {
+    blocks++;
+    pixels += pixelCount;
+    if (cbf)
+    {
+      cbfBlocks++;
+      cbfPixels += pixelCount;
+    }
+    else
+    {
+      zeroCbfBlocks++;
+      zeroCbfPixels += pixelCount;
+    }
+  }
+};
+
+struct TransformProfileSample
+{
+  ComponentID component = COMPONENT_Y;
+  unsigned widthLog2 = 0;
+  unsigned heightLog2 = 0;
+  uint64_t pixels = 0;
+  uint64_t coefficients = 0;
+  uint64_t nonzeroCoefficients = 0;
+  int qp = 0;
+  DequantPath dequantPath = DequantPath::SCALAR_FLAT;
+  std::array<bool, static_cast<size_t>(TransformFeature::NUM)> features{};
+};
+
+unsigned transformSizeClass(const unsigned size)
+{
+  return std::min<unsigned>(floorLog2(size), transformSizeClasses - 1);
+}
+
+constexpr size_t transformShapeIndex(const ComponentID component, const unsigned widthLog2,
+                                     const unsigned heightLog2)
+{
+  return (static_cast<size_t>(component) * transformSizeClasses + widthLog2) * transformSizeClasses + heightLog2;
+}
+
+constexpr size_t transformGroupIndex(const ComponentID component, const unsigned widthLog2,
+                                     const unsigned heightLog2, const DequantPath dequantPath)
+{
+  return transformShapeIndex(component, widthLog2, heightLog2) * static_cast<size_t>(DequantPath::NUM)
+       + static_cast<size_t>(dequantPath);
+}
+
+uint64_t mcProfileProcessId()
+{
+#if defined(_WIN32)
+  return static_cast<uint64_t>(_getpid());
+#else
+  return static_cast<uint64_t>(getpid());
+#endif
+}
+
+std::atomic<uint64_t> mcProfileDecoderInstances{ 0 };
+std::mutex mcProfileOutputMutex;
+} // namespace
+
+struct DecCu::McProfile
+{
+  std::array<RunDistribution, static_cast<size_t>(McProfilePath::NUM)> paths;
+  RunDistribution inverseTransformRuns;
+  RunDistribution reconstructionRuns;
+  std::array<TransformBlockAggregate, MAX_NUM_COMPONENT * transformSizeClasses * transformSizeClasses> transformBlocks;
+  std::array<TransformAggregate, MAX_NUM_COMPONENT * transformSizeClasses * transformSizeClasses> transformShapes;
+  std::array<TransformAggregate, static_cast<size_t>(TransformFeature::NUM)> transformFeatures;
+  std::array<TransformAggregate, static_cast<size_t>(DequantPath::NUM)> dequantPaths;
+  std::array<RunDistribution,
+             MAX_NUM_COMPONENT * transformSizeClasses * transformSizeClasses * static_cast<size_t>(DequantPath::NUM)>
+    transformGroups;
+  std::array<uint64_t,
+             MAX_NUM_COMPONENT * transformSizeClasses * transformSizeClasses * static_cast<size_t>(DequantPath::NUM)>
+    pendingTransformGroupTasks{};
+  std::array<uint64_t,
+             MAX_NUM_COMPONENT * transformSizeClasses * transformSizeClasses * static_cast<size_t>(DequantPath::NUM)>
+    pendingTransformGroupPixels{};
+  std::array<uint64_t, transformQpMaximum - transformQpMinimum + 1> transformQps{};
+  TransformAggregate transformTotals;
+  std::array<uint64_t, static_cast<size_t>(McProfileReason::NUM)> flushReasons{};
+  std::array<uint64_t, static_cast<size_t>(McProfileReason::NUM)> rejectedCus{};
+  IbcFillModel ibcFills;
+  std::mutex stateMutex;
+  uint64_t processId = mcProfileProcessId();
+  uint64_t decoderInstance = mcProfileDecoderInstances.fetch_add(1, std::memory_order_relaxed) + 1;
+  std::thread::id ownerThread;
+  uint64_t ownerThreadHash = 0;
+  uint64_t hookCalls = 0;
+  uint64_t threadMismatchHooks = 0;
+  bool haveOwnerThread = false;
+  uint64_t totalPixels = 0;
+  uint64_t eligiblePixels = 0;
+  uint64_t eligibleCus = 0;
+  uint64_t pictures = 0;
+  int firstPoc = 0;
+  int lastPoc = 0;
+  bool havePoc = false;
+  int activePath = -1;
+  uint64_t activeTasks = 0;
+  uint64_t activePixels = 0;
+  uint64_t inverseTransformTasks = 0;
+  uint64_t inverseTransformPixels = 0;
+  uint64_t reconstructionTasks = 0;
+  uint64_t reconstructionPixels = 0;
+  uint64_t transformQpUnderflow = 0;
+  uint64_t transformQpOverflow = 0;
+  uint64_t ibcBoundaryChecks = 0;
+  uint64_t ibcBoundaryViolations = 0;
+  uint64_t ibcPrepareChecks = 0;
+  uint64_t ibcPrepareViolations = 0;
+
+  void validateHookThreadLocked()
+  {
+    const std::thread::id current = std::this_thread::get_id();
+    hookCalls++;
+    if (!haveOwnerThread)
+    {
+      ownerThread = current;
+      ownerThreadHash = static_cast<uint64_t>(std::hash<std::thread::id>{}(current));
+      haveOwnerThread = true;
+    }
+    else if (current != ownerThread)
+    {
+      threadMismatchHooks++;
+    }
+  }
+
+  void flushMc(const McProfileReason reason)
+  {
+    if (activePath < 0)
+    {
+      if (ibcFills.pending != 0)
+      {
+        ibcBoundaryViolations++;
+        ibcFills.completeInOrder();
+      }
+      return;
+    }
+    paths[static_cast<size_t>(activePath)].add(activeTasks, activePixels);
+    flushReasons[static_cast<size_t>(reason)]++;
+    ibcFills.completeInOrder();
+    activePath = -1;
+    activeTasks = 0;
+    activePixels = 0;
+  }
+
+  void flushPipeline()
+  {
+    if (inverseTransformTasks != 0)
+      inverseTransformRuns.add(inverseTransformTasks, inverseTransformPixels);
+    if (reconstructionTasks != 0)
+      reconstructionRuns.add(reconstructionTasks, reconstructionPixels);
+    inverseTransformTasks = 0;
+    inverseTransformPixels = 0;
+    reconstructionTasks = 0;
+    reconstructionPixels = 0;
+    flushTransformGroup();
+  }
+
+  void flushTransformGroup()
+  {
+    for (size_t group = 0; group < transformGroups.size(); ++group)
+    {
+      if (pendingTransformGroupTasks[group] == 0) continue;
+      transformGroups[group].add(pendingTransformGroupTasks[group], pendingTransformGroupPixels[group]);
+      pendingTransformGroupTasks[group] = 0;
+      pendingTransformGroupPixels[group] = 0;
+    }
+  }
+
+  void beginPocLocked(const int poc)
+  {
+    if (!havePoc)
+    {
+      firstPoc = lastPoc = poc;
+      pictures = 1;
+      havePoc = true;
+      return;
+    }
+    if (poc != lastPoc)
+    {
+      flushMc(McProfileReason::PICTURE_BOUNDARY);
+      flushPipeline();
+      lastPoc = poc;
+      pictures++;
+    }
+  }
+
+  void rejectLocked(const McProfileReason reason, const bool reconstructionDependency)
+  {
+    rejectedCus[static_cast<size_t>(reason)]++;
+    flushMc(reason);
+    if (reconstructionDependency) flushPipeline();
+  }
+
+  void prepareCu(const int poc, const uint64_t pixels, const McProfileReason rejection,
+                 const bool reconstructionDependency)
+  {
+    std::lock_guard<std::mutex> lock(stateMutex);
+    validateHookThreadLocked();
+    beginPocLocked(poc);
+    totalPixels += pixels;
+    if (rejection != McProfileReason::NUM)
+    {
+      if (rejection == McProfileReason::IBC)
+      {
+        ibcPrepareChecks++;
+        if (!ibcFills.boundaryIsValid()) ibcPrepareViolations++;
+      }
+      rejectLocked(rejection, reconstructionDependency);
+    }
+  }
+
+  void queueMc(const McProfilePath path, const uint64_t pixels)
+  {
+    std::lock_guard<std::mutex> lock(stateMutex);
+    validateHookThreadLocked();
+    const int pathIndex = static_cast<int>(path);
+    if (activePath >= 0 && activePath != pathIndex) flushMc(McProfileReason::PATH_CHANGE);
+    if (activePath < 0) activePath = pathIndex;
+    activeTasks++;
+    activePixels += pixels;
+    eligibleCus++;
+    eligiblePixels += pixels;
+  }
+
+  void recordTransformBlock(const ComponentID component, const unsigned widthLog2, const unsigned heightLog2,
+                            const uint64_t pixels, const bool cbf)
+  {
+    std::lock_guard<std::mutex> lock(stateMutex);
+    validateHookThreadLocked();
+    transformBlocks[transformShapeIndex(component, widthLog2, heightLog2)].add(pixels, cbf);
+  }
+
+  void recordInverseTransform(const TransformProfileSample &sample)
+  {
+    std::lock_guard<std::mutex> lock(stateMutex);
+    validateHookThreadLocked();
+    inverseTransformTasks++;
+    inverseTransformPixels += sample.pixels;
+    transformTotals.add(sample.pixels, sample.coefficients, sample.nonzeroCoefficients);
+    transformShapes[transformShapeIndex(sample.component, sample.widthLog2, sample.heightLog2)]
+      .add(sample.pixels, sample.coefficients, sample.nonzeroCoefficients);
+    dequantPaths[static_cast<size_t>(sample.dequantPath)].add(sample.pixels, sample.coefficients,
+                                                              sample.nonzeroCoefficients);
+    for (size_t feature = 0; feature < sample.features.size(); ++feature)
+    {
+      if (sample.features[feature])
+        transformFeatures[feature].add(sample.pixels, sample.coefficients, sample.nonzeroCoefficients);
+    }
+    if (sample.qp < transformQpMinimum)
+      transformQpUnderflow++;
+    else if (sample.qp > transformQpMaximum)
+      transformQpOverflow++;
+    else
+      transformQps[static_cast<size_t>(sample.qp - transformQpMinimum)]++;
+
+    if (!sample.features[static_cast<size_t>(TransformFeature::REGULAR_DCT2_CANDIDATE)])
+    {
+      flushTransformGroup();
+      return;
+    }
+    const size_t group = transformGroupIndex(sample.component, sample.widthLog2, sample.heightLog2, sample.dequantPath);
+    pendingTransformGroupTasks[group]++;
+    pendingTransformGroupPixels[group] += sample.pixels;
+  }
+
+  void recordReconstruction(const uint64_t pixels)
+  {
+    std::lock_guard<std::mutex> lock(stateMutex);
+    validateHookThreadLocked();
+    reconstructionTasks++;
+    reconstructionPixels += pixels;
+  }
+
+  void lmcsChromaAdjDependency()
+  {
+    std::lock_guard<std::mutex> lock(stateMutex);
+    validateHookThreadLocked();
+    flushMc(McProfileReason::LMCS_CHROMA_ADJ);
+    flushPipeline();
+  }
+
+  void ibcBufferBoundary(const McProfileReason reason)
+  {
+    std::lock_guard<std::mutex> lock(stateMutex);
+    validateHookThreadLocked();
+    flushMc(reason);
+    flushPipeline();
+    ibcBoundaryChecks++;
+    if (!ibcFills.boundaryIsValid()) ibcBoundaryViolations++;
+  }
+
+  void recordPendingIbcFill(const bool observable)
+  {
+    std::lock_guard<std::mutex> lock(stateMutex);
+    validateHookThreadLocked();
+    ibcFills.enqueue(observable);
+  }
+
+  static void appendDistribution(std::ostream &output, const RunDistribution &distribution)
+  {
+    output << "{\"runs\":" << distribution.tasks.count
+           << ",\"tasks\":" << distribution.totalTasks
+           << ",\"pixels\":" << distribution.totalPixels
+           << ",\"tasks_q50_upper\":" << distribution.tasks.quantileUpperBound(50)
+           << ",\"tasks_q90_upper\":" << distribution.tasks.quantileUpperBound(90)
+           << ",\"tasks_q99_upper\":" << distribution.tasks.quantileUpperBound(99)
+           << ",\"tasks_max\":" << distribution.tasks.maximum
+           << ",\"pixels_q50_upper\":" << distribution.pixels.quantileUpperBound(50)
+           << ",\"pixels_q90_upper\":" << distribution.pixels.quantileUpperBound(90)
+           << ",\"pixels_q99_upper\":" << distribution.pixels.quantileUpperBound(99)
+           << ",\"pixels_max\":" << distribution.pixels.maximum << '}';
+  }
+
+  static void appendTransformAggregate(std::ostream &output, const TransformAggregate &aggregate)
+  {
+    output << "{\"tasks\":" << aggregate.tasks
+           << ",\"pixels\":" << aggregate.pixels
+           << ",\"coefficients\":" << aggregate.coefficients
+           << ",\"nonzero_coefficients\":" << aggregate.nonzeroCoefficients << '}';
+  }
+
+  static void appendTransformBlockAggregate(std::ostream &output, const TransformBlockAggregate &aggregate)
+  {
+    output << "{\"blocks\":" << aggregate.blocks
+           << ",\"cbf_blocks\":" << aggregate.cbfBlocks
+           << ",\"zero_cbf_blocks\":" << aggregate.zeroCbfBlocks
+           << ",\"pixels\":" << aggregate.pixels
+           << ",\"cbf_pixels\":" << aggregate.cbfPixels
+           << ",\"zero_cbf_pixels\":" << aggregate.zeroCbfPixels << '}';
+  }
+
+  void report()
+  {
+    std::ostringstream output;
+    std::lock_guard<std::mutex> stateLock(stateMutex);
+    flushMc(McProfileReason::STREAM_END);
+    flushPipeline();
+    const uint64_t reportThreadHash = static_cast<uint64_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+    output << "DECODER_BATCH_PROFILE {\"schema\":4,\"process_id\":" << processId
+           << ",\"decoder_instance\":" << decoderInstance
+           << ",\"owner_thread_hash\":" << ownerThreadHash
+           << ",\"report_thread_hash\":" << reportThreadHash
+           << ",\"hook_calls\":" << hookCalls
+           << ",\"thread_mismatch_hooks\":" << threadMismatchHooks
+           << ",\"first_poc\":" << firstPoc << ",\"last_poc\":" << lastPoc
+           << ",\"pictures\":" << pictures << ",\"total_pixels\":" << totalPixels
+           << ",\"eligible_pixels\":" << eligiblePixels << ",\"eligible_cus\":" << eligibleCus
+           << ",\"paths\":{";
+    bool comma = false;
+    for (size_t path = 0; path < paths.size(); ++path)
+    {
+      if (paths[path].tasks.count == 0) continue;
+      output << (comma ? ",\"" : "\"") << mcProfilePathNames[path] << "\":";
+      appendDistribution(output, paths[path]);
+      comma = true;
+    }
+    output << "},\"rejections\":{";
+    comma = false;
+    for (size_t reason = 0; reason < rejectedCus.size(); ++reason)
+    {
+      if (rejectedCus[reason] == 0 && flushReasons[reason] == 0) continue;
+      output << (comma ? ",\"" : "\"") << mcProfileReasonNames[reason] << "\":{\"cus\":"
+             << rejectedCus[reason] << ",\"flushes\":" << flushReasons[reason] << '}';
+      comma = true;
+    }
+    output << "},\"inverse_transform\":";
+    appendDistribution(output, inverseTransformRuns);
+    output << ",\"reconstruction\":";
+    appendDistribution(output, reconstructionRuns);
+    output << ",\"transform_workload\":{\"totals\":";
+    appendTransformAggregate(output, transformTotals);
+    output << ",\"by_shape_component\":{";
+    comma = false;
+    for (unsigned component = 0; component < MAX_NUM_COMPONENT; ++component)
+    {
+      for (unsigned widthLog2 = 0; widthLog2 < transformSizeClasses; ++widthLog2)
+      {
+        for (unsigned heightLog2 = 0; heightLog2 < transformSizeClasses; ++heightLog2)
+        {
+          const size_t index = transformShapeIndex(static_cast<ComponentID>(component), widthLog2, heightLog2);
+          const TransformBlockAggregate &blocks = transformBlocks[index];
+          const TransformAggregate &tasks = transformShapes[index];
+          if (blocks.blocks == 0 && tasks.tasks == 0) continue;
+          output << (comma ? ",\"" : "\"") << transformComponentNames[component] << ':'
+                 << (uint64_t{ 1 } << widthLog2) << 'x' << (uint64_t{ 1 } << heightLog2) << "\":{\"blocks\":";
+          appendTransformBlockAggregate(output, blocks);
+          output << ",\"transforms\":";
+          appendTransformAggregate(output, tasks);
+          output << '}';
+          comma = true;
+        }
+      }
+    }
+    output << "},\"features\":{";
+    comma = false;
+    for (size_t feature = 0; feature < transformFeatures.size(); ++feature)
+    {
+      if (transformFeatures[feature].tasks == 0) continue;
+      output << (comma ? ",\"" : "\"") << transformFeatureNames[feature] << "\":";
+      appendTransformAggregate(output, transformFeatures[feature]);
+      comma = true;
+    }
+    output << "},\"dequant_paths\":{";
+    comma = false;
+    for (size_t path = 0; path < dequantPaths.size(); ++path)
+    {
+      if (dequantPaths[path].tasks == 0) continue;
+      output << (comma ? ",\"" : "\"") << dequantPathNames[path] << "\":";
+      appendTransformAggregate(output, dequantPaths[path]);
+      comma = true;
+    }
+    output << "},\"qp\":{\"underflow\":" << transformQpUnderflow << ",\"overflow\":" << transformQpOverflow
+           << ",\"counts\":{";
+    comma = false;
+    for (size_t qpIndex = 0; qpIndex < transformQps.size(); ++qpIndex)
+    {
+      if (transformQps[qpIndex] == 0) continue;
+      output << (comma ? ",\"" : "\"") << (static_cast<int>(qpIndex) + transformQpMinimum) << "\":"
+             << transformQps[qpIndex];
+      comma = true;
+    }
+    output << "}},\"groups\":{";
+    comma = false;
+    for (unsigned component = 0; component < MAX_NUM_COMPONENT; ++component)
+    {
+      for (unsigned widthLog2 = 0; widthLog2 < transformSizeClasses; ++widthLog2)
+      {
+        for (unsigned heightLog2 = 0; heightLog2 < transformSizeClasses; ++heightLog2)
+        {
+          for (size_t path = 0; path < static_cast<size_t>(DequantPath::NUM); ++path)
+          {
+            const size_t index = transformGroupIndex(static_cast<ComponentID>(component), widthLog2, heightLog2,
+                                                     static_cast<DequantPath>(path));
+            if (transformGroups[index].tasks.count == 0) continue;
+            output << (comma ? ",\"" : "\"") << transformComponentNames[component] << ':'
+                   << (uint64_t{ 1 } << widthLog2) << 'x' << (uint64_t{ 1 } << heightLog2) << ':'
+                   << dequantPathNames[path] << "\":";
+            appendDistribution(output, transformGroups[index]);
+            comma = true;
+          }
+        }
+      }
+    }
+    output << "}}";
+    output << ",\"ibc_buffer_fills\":{\"queued\":" << ibcFills.totalQueued
+           << ",\"applied\":" << ibcFills.totalApplied
+           << ",\"max_pending\":" << ibcFills.maximumPending
+           << ",\"disabled_sps_noops\":" << ibcFills.disabledSpsNoops
+           << ",\"last_queued_sequence\":" << ibcFills.lastQueuedSequence
+           << ",\"last_applied_sequence\":" << ibcFills.lastAppliedSequence
+           << ",\"boundary_checks\":" << ibcBoundaryChecks
+           << ",\"boundary_violations\":" << ibcBoundaryViolations
+           << ",\"prepare_checks\":" << ibcPrepareChecks
+           << ",\"prepare_violations\":" << ibcPrepareViolations
+           << ",\"pending_at_report\":" << ibcFills.pending << '}';
+    output << "}\n";
+    const std::string line = output.str();
+    std::lock_guard<std::mutex> outputLock(mcProfileOutputMutex);
+    std::fwrite(line.data(), 1, line.size(), stderr);
+    std::fflush(stderr);
+  }
+};
+#endif
+
+DecCu::DecCu() : m_tmpStorageCtu(nullptr)
+#if VTM_ENABLE_DECODER_BATCH_PROFILING
+  , m_mcProfile(mcProfileEnabledFromEnvironment() ? std::make_unique<McProfile>() : nullptr)
+#endif
+{
+}
 
 DecCu::~DecCu()
 {
+#if VTM_ENABLE_DECODER_BATCH_PROFILING
+  if (m_mcProfile) m_mcProfile->report();
+#endif
 }
 
 void DecCu::init( TrQuant* pcTrQuant, IntraPrediction* pcIntra, InterPrediction* pcInter)
@@ -102,6 +862,9 @@ void DecCu::decompressCtu( CodingStructure& cs, const UnitArea& ctuArea )
 
   if (cs.resetIBCBuffer)
   {
+#if VTM_ENABLE_DECODER_BATCH_PROFILING
+    if (mcProfileIbcFillObservable(cs.slice->getSPS()->getIBCFlag())) xProfileIbcBufferReset();
+#endif
     m_pcInterPred->resetIBCBuffer(cs.pcv->chrFormat, cs.slice->getSPS()->getMaxCUHeight());
     cs.resetIBCBuffer = false;
   }
@@ -122,6 +885,9 @@ void DecCu::decompressCtu( CodingStructure& cs, const UnitArea& ctuArea )
           {
             for(int y = currCU.Y().y; y < currCU.Y().y + currCU.Y().height; y += vSize)
             {
+#if VTM_ENABLE_DECODER_BATCH_PROFILING
+              if (mcProfileIbcFillObservable(cs.slice->getSPS()->getIBCFlag())) xProfileIbcVpduReset();
+#endif
               m_pcInterPred->resetVPDUforIBC(cs.pcv->chrFormat, cs.slice->getSPS()->getMaxCUHeight(), vSize,
                                              x + IBC_BUFFER_SIZE / cs.slice->getSPS()->getMaxCUHeight() / 2, y);
             }
@@ -130,6 +896,9 @@ void DecCu::decompressCtu( CodingStructure& cs, const UnitArea& ctuArea )
       }
       if (!CU::isIntra(currCU) && !CU::isPLT(currCU) && currCU.Y().valid())
       {
+#if VTM_ENABLE_DECODER_BATCH_PROFILING
+        if (CU::isIBC(currCU)) xProfileIbcPreMvConsumer();
+#endif
         xDeriveCuMvs(currCU);
 #if K0149_BLOCK_STATISTICS
         if(currCU.geoFlag)
@@ -138,11 +907,17 @@ void DecCu::decompressCtu( CodingStructure& cs, const UnitArea& ctuArea )
         }
 #endif
       }
+#if VTM_ENABLE_DECODER_BATCH_PROFILING
+      const int mcProfilePath = xProfilePrepareMcCu(currCU);
+#endif
       switch( currCU.predMode )
       {
       case MODE_INTER:
       case MODE_IBC:
         xReconInter( currCU );
+#if VTM_ENABLE_DECODER_BATCH_PROFILING
+        if (mcProfilePath >= 0) xProfileQueueMcCu(currCU, mcProfilePath);
+#endif
         break;
       case MODE_PLT:
       case MODE_INTRA:
@@ -154,6 +929,9 @@ void DecCu::decompressCtu( CodingStructure& cs, const UnitArea& ctuArea )
       }
 
       m_pcInterPred->xFillIBCBuffer(currCU);
+#if VTM_ENABLE_DECODER_BATCH_PROFILING
+      xProfileIbcFill(currCU, mcProfilePath >= 0);
+#endif
 
       DTRACE_BLOCK_REC( cs.picture->getRecoBuf( currCU ), currCU, currCU.predMode );
     }
@@ -162,6 +940,233 @@ void DecCu::decompressCtu( CodingStructure& cs, const UnitArea& ctuArea )
   getAndStoreBlockStatistics(cs, ctuArea);
 #endif
 }
+
+#if VTM_ENABLE_DECODER_BATCH_PROFILING
+int DecCu::xProfilePrepareMcCu(CodingUnit &cu)
+{
+  if (!m_mcProfile || !cu.Y().valid()) return -1;
+
+  const uint64_t pixels = static_cast<uint64_t>(cu.Y().width) * static_cast<uint64_t>(cu.Y().height);
+  const auto reject = [&](const McProfileReason reason, const bool reconstructionDependency)
+  {
+    m_mcProfile->prepareCu(cu.slice->getPOC(), pixels, reason, reconstructionDependency);
+    return -1;
+  };
+
+  const McProfileReason modeReason = mcProfileModeReason(CU::isIBC(cu), CU::isInter(cu));
+  if (modeReason != McProfileReason::NUM)
+  {
+    return reject(modeReason, true);
+  }
+  if (cu.geoFlag)
+  {
+    return reject(McProfileReason::GPM, false);
+  }
+  if (cu.affine)
+  {
+    return reject(McProfileReason::AFFINE_OR_PROF, false);
+  }
+
+  const bool luma = cu.Y().valid();
+  const bool chroma = isChromaEnabled(cu.chromaFormat) && cu.Cb().valid();
+  const bool directList0 = !(luma && (chroma || !isChromaEnabled(cu.chromaFormat)));
+  int cuPath = -1;
+  for (auto &pu : CU::traversePUs(cu))
+  {
+    if (pu.ciipFlag)
+    {
+      return reject(McProfileReason::CIIP, true);
+    }
+    if (pu.mergeType != MergeType::DEFAULT_N)
+    {
+      return reject(McProfileReason::SUB_PU, false);
+    }
+
+    bool scaledReference = false;
+    for (int list = 0; list < NUM_REF_PIC_LIST_01; list++)
+    {
+      const bool listUsed = (pu.interDir & (1 << list)) != 0;
+      const int refIdx = pu.refIdx[list];
+      const RefPicList refList = static_cast<RefPicList>(list);
+      if ((listUsed && (refIdx < 0 || refIdx >= cu.slice->getNumRefIdx(refList))) || (!listUsed && refIdx >= 0))
+      {
+        return reject(McProfileReason::INVALID_DPB_REFERENCE, true);
+      }
+      if (listUsed)
+      {
+        Picture *refPic = cu.slice->getRefPic(refList, refIdx);
+        if (refPic == nullptr)
+        {
+          return reject(McProfileReason::INVALID_DPB_REFERENCE, true);
+        }
+        scaledReference = scaledReference || refPic->isRefScaled(cu.cs->sps, cu.cs->pps);
+      }
+    }
+
+    McProfilePath path;
+    if (directList0)
+    {
+      const SliceType sliceType = cu.slice->getSliceType();
+      const bool weighted = (sliceType == P_SLICE && cu.cs->pps->getUseWP())
+                         || (sliceType == B_SLICE && cu.cs->pps->getWPBiPred());
+      path = mcProfileRprVariant(weighted ? McProfilePath::UNI_WEIGHTED : McProfilePath::UNI,
+                                 scaledReference);
+    }
+    else if (mcProfileIdenticalMotion(pu))
+    {
+      path = mcProfileRprVariant(McProfilePath::IDENTICAL_UNI, scaledReference);
+    }
+    else
+    {
+      bool bdofApplied = false;
+      if (cu.cs->sps->getBDOFEnabledFlag() && !cu.cs->picHeader->getBdofDisabledFlag())
+      {
+        bdofApplied = PU::isSimpleSymmetricBiPred(pu) && PU::dmvrBdofSizeCheck(pu)
+                      && !pu.ciipFlag && !cu.smvdMode;
+        if (pu.mmvdEncOptMode == 2 && pu.mmvdMergeFlag) bdofApplied = false;
+      }
+      bdofApplied = bdofApplied && !scaledReference;
+      if (bdofApplied)
+      {
+        return reject(McProfileReason::BDOF, false);
+      }
+      const bool dmvrApplied = PU::checkDMVRCondition(pu) && !scaledReference;
+      if (dmvrApplied)
+      {
+        return reject(McProfileReason::DMVR, false);
+      }
+
+      const bool bothLists = pu.refIdx[REF_PIC_LIST_0] >= 0 && pu.refIdx[REF_PIC_LIST_1] >= 0;
+      const SliceType sliceType = cu.slice->getSliceType();
+      if (sliceType == B_SLICE && cu.cs->pps->getWPBiPred() && cu.bcwIdx == BCW_DEFAULT)
+        path = McProfilePath::BI_WEIGHTED;
+      else if (sliceType == P_SLICE && cu.cs->pps->getUseWP())
+        path = McProfilePath::UNI_WEIGHTED;
+      else if (bothLists && cu.bcwIdx != BCW_DEFAULT)
+        path = McProfilePath::BI_BCW;
+      else
+        path = bothLists ? McProfilePath::BI_AVG : McProfilePath::UNI;
+      path = mcProfileRprVariant(path, scaledReference);
+    }
+
+    const int pathIndex = static_cast<int>(path);
+    if (cuPath >= 0 && cuPath != pathIndex)
+    {
+      return reject(McProfileReason::MIXED_EFFECTIVE_PATH, false);
+    }
+    cuPath = pathIndex;
+  }
+
+  if (cuPath < 0)
+  {
+    return reject(McProfileReason::MIXED_EFFECTIVE_PATH, false);
+  }
+  m_mcProfile->prepareCu(cu.slice->getPOC(), pixels, McProfileReason::NUM, false);
+  return cuPath;
+}
+
+void DecCu::xProfileQueueMcCu(CodingUnit &cu, const int path)
+{
+  if (!m_mcProfile || !cu.Y().valid()) return;
+  const uint64_t pixels = static_cast<uint64_t>(cu.Y().width) * static_cast<uint64_t>(cu.Y().height);
+  m_mcProfile->queueMc(static_cast<McProfilePath>(path), pixels);
+}
+
+void DecCu::xProfileLmcsChromaAdj()
+{
+  if (m_mcProfile) m_mcProfile->lmcsChromaAdjDependency();
+}
+
+void DecCu::xProfileIbcBufferReset()
+{
+  if (m_mcProfile) m_mcProfile->ibcBufferBoundary(McProfileReason::IBC_BUFFER_RESET);
+}
+
+void DecCu::xProfileIbcVpduReset()
+{
+  if (m_mcProfile) m_mcProfile->ibcBufferBoundary(McProfileReason::IBC_VPDU_RESET);
+}
+
+void DecCu::xProfileIbcPreMvConsumer()
+{
+  if (m_mcProfile) m_mcProfile->ibcBufferBoundary(McProfileReason::IBC_PRE_MV_CONSUMER);
+}
+
+void DecCu::xProfileIbcFill(CodingUnit &cu, const bool queued)
+{
+  if (!m_mcProfile || !queued) return;
+  m_mcProfile->recordPendingIbcFill(mcProfileIbcFillObservable(cu.slice->getSPS()->getIBCFlag()));
+}
+
+void DecCu::xProfileTransformBlock(TransformUnit &tu, const ComponentID compID)
+{
+  if (!m_mcProfile || CU::isIBC(*tu.cu) || !tu.blocks[compID].valid()) return;
+  const CompArea &area = tu.blocks[compID];
+  m_mcProfile->recordTransformBlock(compID, transformSizeClass(area.width), transformSizeClass(area.height),
+                                    static_cast<uint64_t>(area.width) * static_cast<uint64_t>(area.height),
+                                    TU::getCbf(tu, compID));
+}
+
+void DecCu::xProfileInverseTransform(TransformUnit &tu, const ComponentID compID, const QpParam &qp)
+{
+  if (!m_mcProfile || CU::isIBC(*tu.cu) || !tu.blocks[compID].valid()) return;
+
+  const CompArea &area = tu.blocks[compID];
+  const bool transformSkip = tu.mtsIdx[compID] == MtsType::SKIP;
+  const bool mts = tu.mtsIdx[compID] != MtsType::DCT2_DCT2 && !transformSkip;
+  TransType horizontal = TransType::DCT2;
+  TransType vertical = TransType::DCT2;
+  if (!transformSkip) m_pcTrQuant->getTrTypes(tu, compID, horizontal, vertical);
+  const bool dct2 = !transformSkip && horizontal == TransType::DCT2 && vertical == TransType::DCT2;
+  const bool lfnst = tu.cu->lfnstIdx > 0 && (tu.cu->isSepTree() || isLuma(compID));
+  const bool sbt = tu.cu->sbtInfo != 0;
+  const bool joint = tu.jointCbCr != 0 && isChroma(compID);
+  const bool act = tu.cu->colorTransform;
+  Slice &slice = *tu.cs->slice;
+  const bool lmcs = !act && slice.getLmcsEnabledFlag() && isChroma(compID)
+                 && (TU::getCbf(tu, compID) || joint)
+                 && slice.getPicHeader()->getLmcsChromaResidualScaleFlag()
+                 && area.width * area.height > 4;
+
+  const bool regularResidualCoding = tu.cu->slice->getTSResidualCodingDisabledFlag() || !transformSkip;
+  const bool dependentQuant = slice.getDepQuantEnabledFlag() && regularResidualCoding;
+  const bool disableScalingForLfnst = slice.getExplicitScalingListUsed()
+                                        ? slice.getSPS()->getDisableScalingMatrixForLfnstBlks()
+                                        : false;
+  const bool disableScalingForAct = slice.getSPS()->getScalingMatrixForAlternativeColourSpaceDisabledFlag()
+                                 && (slice.getSPS()->getScalingMatrixDesignatedColourSpaceFlag() == act);
+  const bool scalingList = m_pcTrQuant->getQuant()->getUseScalingList(area.width, area.height, transformSkip, lfnst,
+                                                                      disableScalingForLfnst,
+                                                                      disableScalingForAct);
+
+  TransformProfileSample sample;
+  sample.component = compID;
+  sample.widthLog2 = transformSizeClass(area.width);
+  sample.heightLog2 = transformSizeClass(area.height);
+  sample.pixels = static_cast<uint64_t>(area.width) * static_cast<uint64_t>(area.height);
+  sample.coefficients = sample.pixels;
+  sample.qp = qp.Qp(transformSkip);
+  sample.dequantPath = dependentQuant
+                         ? (scalingList ? DequantPath::DEPENDENT_SCALING_LIST : DequantPath::DEPENDENT_FLAT)
+                         : (scalingList ? DequantPath::SCALAR_SCALING_LIST : DequantPath::SCALAR_FLAT);
+  const CCoeffBuf coefficients = tu.getCoeffs(compID);
+  for (unsigned y = 0; y < area.height; ++y)
+    for (unsigned x = 0; x < area.width; ++x)
+      sample.nonzeroCoefficients += coefficients.at(x, y) != 0;
+
+  sample.features[static_cast<size_t>(TransformFeature::DCT2)] = dct2;
+  sample.features[static_cast<size_t>(TransformFeature::MTS)] = mts;
+  sample.features[static_cast<size_t>(TransformFeature::TRANSFORM_SKIP)] = transformSkip;
+  sample.features[static_cast<size_t>(TransformFeature::LFNST)] = lfnst;
+  sample.features[static_cast<size_t>(TransformFeature::SBT)] = sbt;
+  sample.features[static_cast<size_t>(TransformFeature::JOINT_CBCR)] = joint;
+  sample.features[static_cast<size_t>(TransformFeature::ACT)] = act;
+  sample.features[static_cast<size_t>(TransformFeature::LMCS)] = lmcs;
+  sample.features[static_cast<size_t>(TransformFeature::REGULAR_DCT2_CANDIDATE)] =
+    dct2 && !mts && !transformSkip && !lfnst && !sbt && !joint && !act && !lmcs;
+  m_mcProfile->recordInverseTransform(sample);
+}
+#endif
 
 // ====================================================================================================================
 // Protected member functions
@@ -656,6 +1661,13 @@ void DecCu::xReconInter(CodingUnit &cu)
   // inter recon
   xDecodeInterTexture(cu);
 
+#if VTM_ENABLE_DECODER_BATCH_PROFILING
+  if (m_mcProfile && cu.Y().valid() && !CU::isIBC(cu))
+  {
+    m_mcProfile->recordReconstruction(static_cast<uint64_t>(cu.Y().width) * static_cast<uint64_t>(cu.Y().height));
+  }
+#endif
+
   // clip for only non-zero cbf case
   CodingStructure &cs = *cu.cs;
 
@@ -726,6 +1738,9 @@ void DecCu::xDecodeInterTU( TransformUnit & currTU, const ComponentID compID )
   PelBuf resiBuf  = cs.getResiBuf(area);
 
   QpParam cQP(currTU, compID);
+#if VTM_ENABLE_DECODER_BATCH_PROFILING
+  xProfileTransformBlock(currTU, compID);
+#endif
 
   if( currTU.jointCbCr && isChroma(compID) )
   {
@@ -734,11 +1749,17 @@ void DecCu::xDecodeInterTU( TransformUnit & currTU, const ComponentID compID )
       PelBuf resiCr = cs.getResiBuf( currTU.blocks[ COMPONENT_Cr ] );
       if( currTU.jointCbCr >> 1 )
       {
+#if VTM_ENABLE_DECODER_BATCH_PROFILING
+        xProfileInverseTransform(currTU, COMPONENT_Cb, cQP);
+#endif
         m_pcTrQuant->invTransformNxN( currTU, COMPONENT_Cb, resiBuf, cQP );
       }
       else
       {
         QpParam qpCr(currTU, COMPONENT_Cr);
+#if VTM_ENABLE_DECODER_BATCH_PROFILING
+        xProfileInverseTransform(currTU, COMPONENT_Cr, qpCr);
+#endif
         m_pcTrQuant->invTransformNxN( currTU, COMPONENT_Cr, resiCr, qpCr );
       }
       m_pcTrQuant->invTransformICT( currTU, resiBuf, resiCr );
@@ -746,6 +1767,9 @@ void DecCu::xDecodeInterTU( TransformUnit & currTU, const ComponentID compID )
   }
   else if (TU::getCbf(currTU, compID))
   {
+#if VTM_ENABLE_DECODER_BATCH_PROFILING
+    xProfileInverseTransform(currTU, compID, cQP);
+#endif
     m_pcTrQuant->invTransformNxN( currTU, compID, resiBuf, cQP );
   }
   else
@@ -783,6 +1807,9 @@ void DecCu::xDecodeInterTexture(CodingUnit &cu)
         if (slice.getLmcsEnabledFlag() && slice.getPicHeader()->getLmcsChromaResidualScaleFlag() && (compID == COMPONENT_Y))
         {
           const CompArea &areaY = currTU.blocks[COMPONENT_Y];
+#if VTM_ENABLE_DECODER_BATCH_PROFILING
+          if (m_pcReshape->chromaAdjVpduReadsLuma(currTU, areaY)) xProfileLmcsChromaAdj();
+#endif
           int adj = m_pcReshape->calculateChromaAdjVpduNei(currTU, areaY);
           currTU.setChromaAdj(adj);
         }
@@ -811,6 +1838,9 @@ void DecCu::xDecodeInterTexture(CodingUnit &cu)
             && (compID == COMPONENT_Y) && (currTU.cbf[COMPONENT_Cb] || currTU.cbf[COMPONENT_Cr]))
         {
           const CompArea &areaY = currTU.blocks[COMPONENT_Y];
+#if VTM_ENABLE_DECODER_BATCH_PROFILING
+          if (m_pcReshape->chromaAdjVpduReadsLuma(currTU, areaY)) xProfileLmcsChromaAdj();
+#endif
           int             adj   = m_pcReshape->calculateChromaAdjVpduNei(currTU, areaY);
           currTU.setChromaAdj(adj);
         }

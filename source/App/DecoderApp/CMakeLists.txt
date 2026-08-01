@@ -48,6 +48,20 @@ endif()
 
 target_link_libraries( ${EXE_NAME} PRIVATE CommonLib DecoderLib Utilities CudaBackend ${ADDITIONAL_LIBS} )
 
+# Bind the executable to the exact profiling option and build cache that produced it. The
+# measurement runner validates this adjacent manifest instead of trusting directory names.
+add_custom_command(
+  TARGET ${EXE_NAME} POST_BUILD
+  COMMAND ${CMAKE_COMMAND}
+    "-DDECODER_EXECUTABLE=$<TARGET_FILE:${EXE_NAME}>"
+    "-DDECODER_MANIFEST=$<TARGET_FILE:${EXE_NAME}>.build-manifest.json"
+    "-DDECODER_PROFILE_MODE=${VTM_ENABLE_DECODER_BATCH_PROFILING}"
+    "-DDECODER_CONFIGURATION=$<CONFIG>"
+    "-DDECODER_CMAKE_CACHE=${CMAKE_BINARY_DIR}/CMakeCache.txt"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/WriteDecoderBuildManifest.cmake"
+  VERBATIM
+)
+
 # lldb custom data formatters
 if( XCODE )
   add_dependencies( ${EXE_NAME} Install${PROJECT_NAME}LldbFiles )
@@ -152,10 +166,19 @@ if( VTM_BUILD_CUDA_BACKEND_TESTS )
         "-DTEST_WORK_DIR=${DECODER_CHAIN_FIXTURE_DIR}"
         -P "${DECODER_CHAIN_PROCESS_SCRIPT}"
     )
+    add_test(
+      NAME DecoderApp.CudaLoopFilterChainFallback
+      COMMAND ${CMAKE_COMMAND}
+        "-DTEST_MODE=FALLBACK"
+        "-DTEST_DECODER=$<TARGET_FILE:${EXE_NAME}>"
+        "-DTEST_WORK_DIR=${DECODER_CHAIN_FIXTURE_DIR}"
+        -P "${DECODER_CHAIN_PROCESS_SCRIPT}"
+    )
     set_tests_properties( DecoderApp.CudaLoopFilterChainFixture PROPERTIES
       FIXTURES_SETUP CudaLoopFilterChainProcess RUN_SERIAL TRUE LABELS gpu TIMEOUT 300
     )
-    set_tests_properties( DecoderApp.CudaLoopFilterChainParity DecoderApp.CudaLoopFilterChainFailFast PROPERTIES
+    set_tests_properties( DecoderApp.CudaLoopFilterChainParity DecoderApp.CudaLoopFilterChainFailFast
+                          DecoderApp.CudaLoopFilterChainFallback PROPERTIES
       FIXTURES_REQUIRED CudaLoopFilterChainProcess RUN_SERIAL TRUE LABELS gpu TIMEOUT 60
     )
   endif()

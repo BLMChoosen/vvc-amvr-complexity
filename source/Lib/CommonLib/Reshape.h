@@ -94,9 +94,19 @@ public:
   void constructReshaper();
   bool getReshapeFlag() { return m_reshape; }
   void setReshapeFlag(bool b) { m_reshape = b; }
+  static constexpr int getChromaAdjVpduCoordinate(int position, int ctuSize)
+  {
+    const int vpduSize = ctuSize == 128 ? 64 : ctuSize;
+    return position / vpduSize * vpduSize;
+  }
+  static constexpr bool isChromaAdjVpduCacheHit(int cachedX, int cachedY, int x, int y, bool isEncoder)
+  {
+    return cachedX == x && cachedY == y && !isEncoder;
+  }
+  bool chromaAdjVpduReadsLuma(const TransformUnit &tu, const CompArea &areaY) const;
   int  calculateChromaAdjVpduNei(TransformUnit &tu, const CompArea &areaY);
   void setVPDULoc(int x, int y) { m_vpduX = x, m_vpduY = y; }
-  bool isVPDUprocessed(int x, int y) { return ((x == m_vpduX) && (y == m_vpduY)); }
+  bool isVPDUprocessed(int x, int y) const { return ((x == m_vpduX) && (y == m_vpduY)); }
   void setChromaScale (int chromaScale) { m_chromaScale = chromaScale; }
   int  getChromaScale() { return m_chromaScale; }
 };// END CLASS DEFINITION Reshape

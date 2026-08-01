@@ -16,6 +16,11 @@ endif()
 add_library( ${LIB_NAME} STATIC ${SRC_FILES} ${INC_FILES} ${NATVIS_FILES} )
 target_compile_definitions( ${LIB_NAME} PUBLIC )
 
+if( VTM_ENABLE_DECODER_BATCH_PROFILING )
+  # DecCu is embedded by value in DecLib, so every consumer must see the same profiling layout.
+  target_compile_definitions( ${LIB_NAME} PUBLIC VTM_ENABLE_DECODER_BATCH_PROFILING=1 )
+endif()
+
 if( EXTENSION_360_VIDEO )
   target_compile_definitions( ${LIB_NAME} PUBLIC EXTENSION_360_VIDEO=1 )
 endif()

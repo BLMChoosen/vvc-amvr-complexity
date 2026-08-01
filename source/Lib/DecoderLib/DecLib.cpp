@@ -982,6 +982,9 @@ void DecLib::executeLoopFilters()
     && cs.pps->getNumSlicesInPic() == 1 && m_pcPic->numSlices == 1
     && !cs.picHeader->getVirtualBoundariesPresentFlag() && !cs.sps->getLadfEnabled()
     && !chainCcAlf
+    // Intermediate luma trace checkpoints would require diagnostic downloads after every GPU stage.
+    // Keep the normative CPU pipeline intact whenever tracing is compiled in instead of emitting partial traces.
+    && !ENABLE_TRACING
     && (!chainAlf || ((chainPcv.lumaWidth & 3) == 0 && (chainPcv.lumaHeight & 3) == 0));
 
   if (cudaChainEligible)
@@ -1013,7 +1016,11 @@ void DecLib::executeLoopFilters()
                         SampleAdaptiveOffset::PictureProcessing::CollectLumaOnly);
       // A signalled SAO stage can reconstruct to an all-disabled picture. The normative CPU
       // implementation returns before producing CTU work in that case, so omit the GPU stage.
-      if (chainSao && saoCtus.empty()) chainSao = false;
+      if (chainSao && std::none_of(saoCtus.begin(), saoCtus.end(),
+                                   [](const vtm::CudaSaoLumaCtuParam &ctu) { return ctu.enabled != 0; }))
+      {
+        chainSao = false;
+      }
     }
 
     std::vector<vtm::CudaAlfCtuParam> alfCtus;
@@ -1090,12 +1097,41 @@ void DecLib::executeLoopFilters()
                    | (chainSao ? vtm::CUDA_LOOP_FILTER_SAO : 0)
                    | (chainAlf ? vtm::CUDA_LOOP_FILTER_ALF : 0);
 
-    vtm::CudaMirrorHandle mirror = 0;
-    if (frame.stages != 0)
+    // Descriptor collection can prove that the selected luma pipeline has no work. In
+    // particular, a DBF-only picture with no luma edges is a normative no-op on luma.
+    // Finish the independent CPU chroma work without even looking up a CUDA mirror.
+    const bool dbfOnlyWithoutLumaTasks =
+      frame.stages == vtm::CUDA_LOOP_FILTER_DBF && dbfTasks.empty();
+    if (frame.stages == 0 || dbfOnlyWithoutLumaTasks)
     {
-      mirror = m_computeState->cudaContext.pictureMirrorHandle(
-        m_pcPic, vtm::CudaPictureRole::Reconstruction);
+      if (chainDbf)
+      {
+        m_deblockingFilter.deblockingFilterPic(
+          cs, nullptr, DeblockingFilter::PictureProcessing::ChromaOnly);
+      }
+      CS::setRefinedMotionField(cs);
+      if (chainSaoPicture)
+      {
+        m_cSAO.SAOProcess(cs, cs.picture->getSAO(), nullptr,
+                          SampleAdaptiveOffset::PictureProcessing::ChromaOnly);
+      }
+      if (chainLmcsPicture) m_cReshaper.setRecReshaped(false);
+
+      const bool chromaAlf = cs.sps->getALFEnabledFlag()
+        && (cs.slice->getAlfEnabledFlag(COMPONENT_Cb) || cs.slice->getAlfEnabledFlag(COMPONENT_Cr));
+      if (chromaAlf) m_cALF.ALFProcess(cs, false, true);
+#if GREEN_METADATA_SEI_ENABLED
+      m_featureCounter.addSAO(cs.m_featureCounter);
+      m_featureCounter.addALF(cs.m_featureCounter);
+      m_featureCounter.addBoundaryStrengths(cs.m_featureCounter);
+#endif
+      m_pcPic->cs->slice->stopProcessingTimer();
+      return;
     }
+
+    vtm::CudaMirrorHandle mirror = 0;
+    mirror = m_computeState->cudaContext.pictureMirrorHandle(
+      m_pcPic, vtm::CudaPictureRole::Reconstruction);
     const vtm::CudaLoopFilterChainDispatchResult preflight =
       m_computeState->cudaContext.preflightLoopFilterChain(
         mirror, frame, chainLmcs ? lmcsLut.data() : nullptr,

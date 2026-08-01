@@ -276,10 +276,7 @@ void DeblockingFilter::deblockingFilterPic(CodingStructure &cs,
   }
 
 #if GREEN_METADATA_SEI_ENABLED
-  if (processing != PictureProcessing::ChromaOnly)
-  {
-    cs.m_featureCounter.addBoundaryStrengths(tempFeatureCounter);
-  }
+  cs.m_featureCounter.addBoundaryStrengths(tempFeatureCounter);
 #endif
   if (processing != PictureProcessing::CollectLumaOnly)
   {
@@ -289,8 +286,11 @@ void DeblockingFilter::deblockingFilterPic(CodingStructure &cs,
     }
     DTRACE_PIC_COMP(D_REC_CB_CHROMA_LF, cs, cs.getRecoBuf(), COMPONENT_Cb);
     DTRACE_PIC_COMP(D_REC_CB_CHROMA_LF, cs, cs.getRecoBuf(), COMPONENT_Cr);
-    DTRACE    ( g_trace_ctx, D_CRC, "DeblockingFilter" );
-    DTRACE_CRC( g_trace_ctx, D_CRC, cs, cs.getRecoBuf() );
+    if (processing == PictureProcessing::All)
+    {
+      DTRACE    ( g_trace_ctx, D_CRC, "DeblockingFilter" );
+      DTRACE_CRC( g_trace_ctx, D_CRC, cs, cs.getRecoBuf() );
+    }
   }
 }
 
@@ -462,21 +462,27 @@ void DeblockingFilter::deblockCu(CodingUnit &cu, const EdgeDir edgeDir)
         {
           es |= xGetBoundaryStrengthSingle(cu, edgeDir, localPos, ChannelType::LUMA);
 #if GREEN_METADATA_SEI_ENABLED
-          const int bsY = es.getBoundaryStrength(COMPONENT_Y);
-          cu.m_featureCounter.boundaryStrength[bsY]++;
-          cu.m_featureCounter.boundaryStrengthPel[bsY] += pelsInPart;
+          if (m_pictureProcessing != PictureProcessing::ChromaOnly)
+          {
+            const int bsY = es.getBoundaryStrength(COMPONENT_Y);
+            cu.m_featureCounter.boundaryStrength[bsY]++;
+            cu.m_featureCounter.boundaryStrengthPel[bsY] += pelsInPart;
+          }
 #endif
         }
         if (cu.treeType != TREE_L && isChromaEnabled(cu.chromaFormat) && cu.blocks[COMPONENT_Cb].valid())
         {
           es |= xGetBoundaryStrengthSingle(cu, edgeDir, localPos, ChannelType::CHROMA);
 #if GREEN_METADATA_SEI_ENABLED
-          const int bsCb = es.getBoundaryStrength(COMPONENT_Cb);
-          const int bsCr = es.getBoundaryStrength(COMPONENT_Cr);
-          cu.m_featureCounter.boundaryStrength[bsCb]++;
-          cu.m_featureCounter.boundaryStrength[bsCr]++;
-          cu.m_featureCounter.boundaryStrengthPel[bsCb] += pelsInPart;
-          cu.m_featureCounter.boundaryStrengthPel[bsCr] += pelsInPart;
+          if (m_pictureProcessing != PictureProcessing::CollectLumaOnly)
+          {
+            const int bsCb = es.getBoundaryStrength(COMPONENT_Cb);
+            const int bsCr = es.getBoundaryStrength(COMPONENT_Cr);
+            cu.m_featureCounter.boundaryStrength[bsCb]++;
+            cu.m_featureCounter.boundaryStrength[bsCr]++;
+            cu.m_featureCounter.boundaryStrengthPel[bsCb] += pelsInPart;
+            cu.m_featureCounter.boundaryStrengthPel[bsCr] += pelsInPart;
+          }
 #endif
         }
         m_edgeStrengths[edgeDir][rasterIdx] = es;

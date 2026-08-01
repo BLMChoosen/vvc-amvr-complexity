@@ -36,6 +36,7 @@
 
 #include "CudaPictureMirror.h"
 #include "CudaDistortion.h"
+#include "CudaDecoderTransform.h"
 #include "CudaQpa.h"
 #include "CudaAlf.h"
 #include "CommonLib/CudaDeblocking.h"
@@ -168,6 +169,8 @@ public:
   std::uint64_t qpaBatchDispatchCount() const;
   std::uint64_t qpaTaskCount() const;
   std::uint64_t qpaBatchFailureCount() const noexcept;
+  bool computeDecoderTransformBatch(const CudaDecoderTransformBatch &batch);
+  std::uint64_t decoderTransformBatchDispatchCount() const;
   bool isAlfAccelerationAvailable() const noexcept;
   CudaAlfDispatchResult filterAlfLumaFrame(CudaMirrorHandle reconstructionMirror,
                                            const CudaAlfLumaFrame &frame,

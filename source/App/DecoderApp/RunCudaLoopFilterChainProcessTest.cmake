@@ -96,4 +96,35 @@ if( TEST_MODE STREQUAL "FAILFAST" )
   return()
 endif()
 
+if( TEST_MODE STREQUAL "FALLBACK" )
+  set( TEST_CPU_YUV "${TEST_WORK_DIR}/decoded-fallback-reference.yuv" )
+  set( TEST_FALLBACK_YUV "${TEST_WORK_DIR}/decoded-forced-fallback.yuv" )
+  file( REMOVE "${TEST_CPU_YUV}" "${TEST_FALLBACK_YUV}" )
+  execute_process(
+    COMMAND "${TEST_DECODER}" -b "${TEST_BITSTREAM}" -o "${TEST_CPU_YUV}"
+      --GPUBackend=cpu --SEIDecodedPictureHash=1
+    RESULT_VARIABLE CPU_RESULT OUTPUT_VARIABLE CPU_STDOUT ERROR_VARIABLE CPU_STDERR
+  )
+  execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env VTM_CUDA_LOOP_FILTER_CHAIN_TEST_NOT_ELIGIBLE=1
+      "${TEST_DECODER}" -b "${TEST_BITSTREAM}" -o "${TEST_FALLBACK_YUV}"
+      --GPUBackend=cuda --GPUDevice=0 --GPUExperimentalLoopFilterChain=1 --SEIDecodedPictureHash=1
+    RESULT_VARIABLE FALLBACK_RESULT OUTPUT_VARIABLE FALLBACK_STDOUT ERROR_VARIABLE FALLBACK_STDERR
+  )
+  if( NOT CPU_RESULT EQUAL 0 OR NOT FALLBACK_RESULT EQUAL 0 )
+    message( FATAL_ERROR "CUDA loop-filter chain fallback decode failed (CPU=${CPU_RESULT}, fallback=${FALLBACK_RESULT}):\n${CPU_STDOUT}\n${CPU_STDERR}\n${FALLBACK_STDOUT}\n${FALLBACK_STDERR}" )
+  endif()
+  file( SHA256 "${TEST_CPU_YUV}" CPU_SHA256 )
+  file( SHA256 "${TEST_FALLBACK_YUV}" FALLBACK_SHA256 )
+  if( NOT CPU_SHA256 STREQUAL FALLBACK_SHA256 )
+    message( FATAL_ERROR "CUDA preflight fallback double-processed or changed output: CPU=${CPU_SHA256}, fallback=${FALLBACK_SHA256}" )
+  endif()
+  string( REGEX MATCH "CUDA loop-filter chain frames/pixels/DBF tasks/SAO CTUs/ALF CTUs: 0/0/0/0/0" ZERO_DISPATCH "${FALLBACK_STDOUT}${FALLBACK_STDERR}" )
+  string( REGEX MATCH "failures/not-eligible: 0/1" ONE_REJECTION "${FALLBACK_STDOUT}${FALLBACK_STDERR}" )
+  if( ZERO_DISPATCH STREQUAL "" OR ONE_REJECTION STREQUAL "" )
+    message( FATAL_ERROR "forced preflight rejection did not use the original CPU pipeline exactly once:\n${FALLBACK_STDOUT}\n${FALLBACK_STDERR}" )
+  endif()
+  return()
+endif()
+
 message( FATAL_ERROR "Unknown CUDA loop-filter chain process test mode: ${TEST_MODE}" )

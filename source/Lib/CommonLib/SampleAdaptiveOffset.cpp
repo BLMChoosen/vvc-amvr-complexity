@@ -730,8 +730,11 @@ void SampleAdaptiveOffset::SAOProcess(CodingStructure &cs, SAOBlkParam *saoBlkPa
     }
     DTRACE_PIC_COMP(D_REC_CB_CHROMA_SAO, cs, cs.getRecoBuf(), COMPONENT_Cb);
     DTRACE_PIC_COMP(D_REC_CB_CHROMA_SAO, cs, cs.getRecoBuf(), COMPONENT_Cr);
-    DTRACE    ( g_trace_ctx, D_CRC, "SAO" );
-    DTRACE_CRC( g_trace_ctx, D_CRC, cs, cs.getRecoBuf() );
+    if (processing == PictureProcessing::All)
+    {
+      DTRACE    ( g_trace_ctx, D_CRC, "SAO" );
+      DTRACE_CRC( g_trace_ctx, D_CRC, cs, cs.getRecoBuf() );
+    }
   }
 }
 

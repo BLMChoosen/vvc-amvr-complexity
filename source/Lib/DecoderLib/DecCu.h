@@ -47,6 +47,9 @@
 #include "CommonLib/IntraPrediction.h"
 #include "CommonLib/Unit.h"
 #include "CommonLib/Reshape.h"
+#if VTM_ENABLE_DECODER_BATCH_PROFILING
+#include <memory>
+#endif
 //! \ingroup DecoderLib
 //! \{
 
@@ -89,9 +92,27 @@ protected:
   PelStorage        *m_tmpStorageCtu;
 
 private:
+#if VTM_ENABLE_DECODER_BATCH_PROFILING
+  struct McProfile;
+
+  int  xProfilePrepareMcCu(CodingUnit &cu);
+  void xProfileQueueMcCu(CodingUnit &cu, int path);
+  void xProfileLmcsChromaAdj();
+  void xProfileIbcBufferReset();
+  void xProfileIbcVpduReset();
+  void xProfileIbcPreMvConsumer();
+  void xProfileIbcFill(CodingUnit &cu, bool queued);
+  void xProfileTransformBlock(TransformUnit &tu, ComponentID compID);
+  void xProfileInverseTransform(TransformUnit &tu, ComponentID compID, const QpParam &qp);
+#endif
+
   TrQuant*          m_pcTrQuant;
   IntraPrediction*  m_pcIntraPred;
   InterPrediction*  m_pcInterPred;
+
+#if VTM_ENABLE_DECODER_BATCH_PROFILING
+  std::unique_ptr<McProfile> m_mcProfile;
+#endif
 
 
   MotionInfo        m_SubPuMiBuf[(MAX_CU_SIZE * MAX_CU_SIZE) >> (MIN_CU_LOG2 << 1)];
