@@ -1065,9 +1065,7 @@ void DecLib::executeLoopFilters()
           mirror, frame, cudaCtus.data(), static_cast<std::uint32_t>(cudaCtus.size()));
         if (dispatch == vtm::CudaAlfDispatchResult::Executed)
         {
-          m_computeState->cudaContext.markDevicePlaneModified(mirror, 0);
-          // The decoded-picture hash, reference-picture consumers and YUV writer are host readers today.
-          m_computeState->cudaContext.ensureHostPlane(mirror, 0);
+          // filterAlfLumaFrame publishes the committed result back to the host before returning Executed.
           filteredOnCuda = true;
 #if GREEN_METADATA_SEI_ENABLED
           cs.m_featureCounter.alfLumaType7 += enabledPixels / 16;

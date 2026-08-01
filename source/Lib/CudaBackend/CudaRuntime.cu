@@ -1296,8 +1296,8 @@ AlfAccelerationStats alfStats(const RuntimeContext *context) noexcept
   stats.parameterUploadBytes = context->alfParameterUploadBytes;
   stats.diagnosticDownloadBytes = context->alfDiagnosticDownloadBytes;
   stats.commitBytes = context->alfCommitBytes;
-  stats.synchronizations = context->alfSynchronizations;
-  stats.elapsedNanoseconds = context->alfElapsedNanoseconds;
+  stats.runtimeSynchronizations = context->alfSynchronizations;
+  stats.runtimeNanoseconds = context->alfElapsedNanoseconds;
   stats.scratchBytes = alfScratchBytes(context->alfScratch) + alfScratchBytes(context->alfRetiredScratch);
   stats.retiredScratchBytes = alfScratchBytes(context->alfRetiredScratch);
   stats.peakScratchBytes = context->alfPeakScratchBytes;

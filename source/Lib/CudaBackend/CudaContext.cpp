@@ -35,6 +35,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -210,6 +211,12 @@ struct CudaContext::Impl
   std::uint64_t qpaFailures = 0;
   bool alfAccelerationEnabled = true;
   std::uint64_t alfFailures = 0;
+  std::uint64_t alfMirrorUploadBytes = 0;
+  std::uint64_t alfMirrorDownloadBytes = 0;
+  std::uint64_t alfIntegrationSynchronizations = 0;
+  std::uint64_t alfUploadNanoseconds = 0;
+  std::uint64_t alfDownloadNanoseconds = 0;
+  std::uint64_t alfIntegrationNanoseconds = 0;
   CudaMirrorMemoryStats mirrorMemory{};
 #if VTM_CUDA_TESTING
   std::uint8_t mirrorFailurePlane = 0xff;
@@ -360,6 +367,37 @@ PictureMirror &findMirror(ContextImpl *impl, const CudaMirrorHandle handle)
     throw std::runtime_error("CUDA picture mirror handle is invalid or has been released");
   }
   return *found->second;
+}
+
+template<typename ContextImpl>
+void quarantineAlfMirrorNoexcept(ContextImpl *impl, const CudaMirrorHandle handle) noexcept
+{
+  if (impl == nullptr) return;
+  const auto found = impl->mirrors.find(handle);
+  if (handle == 0 || found == impl->mirrors.end() || found->second->host.planeCount == 0) return;
+  PictureMirrorPlane &plane = found->second->planes[0];
+  plane.state = CudaMirrorState::HostValid;
+  plane.uploadPending = false;
+  plane.downloadPending = false;
+}
+
+template<typename ContextImpl>
+void recoverAndQuarantineAlfNoexcept(ContextImpl *impl, const CudaMirrorHandle handle) noexcept
+{
+  if (impl == nullptr || impl->runtime == nullptr)
+  {
+    quarantineAlfMirrorNoexcept(impl, handle);
+    return;
+  }
+  cuda_backend::recoverAlfRuntime(impl->runtime);
+  try
+  {
+    cuda_backend::synchronizeQueue(impl->runtime, CudaQueue::Download);
+  }
+  catch (...)
+  {
+  }
+  quarantineAlfMirrorNoexcept(impl, handle);
 }
 
 const void *mapHostBlock(const PictureMirror &mirror, const std::uint8_t planeIndex, const void *hostPointer,
@@ -873,6 +911,12 @@ void CudaContext::create(const int device)
   m_impl->qpaFailures = 0;
   m_impl->alfAccelerationEnabled = true;
   m_impl->alfFailures = 0;
+  m_impl->alfMirrorUploadBytes = 0;
+  m_impl->alfMirrorDownloadBytes = 0;
+  m_impl->alfIntegrationSynchronizations = 0;
+  m_impl->alfUploadNanoseconds = 0;
+  m_impl->alfDownloadNanoseconds = 0;
+  m_impl->alfIntegrationNanoseconds = 0;
   m_impl->mirrorMemory = CudaMirrorMemoryStats{};
   m_impl->mirrorMemory.budgetBytes = CUDA_DEFAULT_MIRROR_MEMORY_BUDGET_BYTES;
   m_impl->ownerThread = std::this_thread::get_id();
@@ -1913,7 +1957,7 @@ CudaAlfDispatchResult CudaContext::filterAlfLumaFrame(const CudaMirrorHandle rec
       || (frame.bitDepth != 8 && frame.bitDepth != 10)
       || (frame.elementSize != 2 && frame.elementSize != 4)
       || pixels > std::numeric_limits<std::size_t>::max() / frame.elementSize
-      || frame.minSample > frame.maxSample)
+      || frame.minSample != 0 || frame.maxSample != (std::int32_t{ 1 } << frame.bitDepth) - 1)
   {
     return CudaAlfDispatchResult::NotEligible;
   }
@@ -1930,6 +1974,27 @@ CudaAlfDispatchResult CudaContext::filterAlfLumaFrame(const CudaMirrorHandle rec
         || ctu.height != expectedHeight || ctu.enabled > 1)
     {
       return CudaAlfDispatchResult::NotEligible;
+    }
+    if (ctu.enabled != 0)
+    {
+      const std::int32_t maximumClip = std::int32_t{ 1 } << frame.bitDepth;
+      for (std::uint32_t classIndex = 0; classIndex < CUDA_ALF_CLASSES; ++classIndex)
+      {
+        for (std::uint32_t coefficientIndex = 0; coefficientIndex < CUDA_ALF_COEFFICIENTS;
+             ++coefficientIndex)
+        {
+          const std::uint32_t parameterIndex = classIndex * CUDA_ALF_COEFFICIENTS + coefficientIndex;
+          const std::int32_t clip = ctu.clipValues[parameterIndex];
+          const std::int16_t coefficient = ctu.coefficients[parameterIndex];
+          if (clip < 0 || clip > maximumClip
+              || (coefficientIndex + 1 == CUDA_ALF_COEFFICIENTS
+                    ? coefficient != 128
+                    : coefficient < -128 || coefficient > 127))
+          {
+            return CudaAlfDispatchResult::NotEligible;
+          }
+        }
+      }
     }
   }
 
@@ -1948,6 +2013,8 @@ CudaAlfDispatchResult CudaContext::filterAlfLumaFrame(const CudaMirrorHandle rec
     return CudaAlfDispatchResult::NotEligible;
   }
 
+  const auto integrationStart = std::chrono::steady_clock::now();
+  const CudaMirrorMemoryUsage mirrorBefore = m_impl->mirrorMemory.total;
   try
   {
 #if VTM_CUDA_TESTING
@@ -1957,40 +2024,52 @@ CudaAlfDispatchResult CudaContext::filterAlfLumaFrame(const CudaMirrorHandle rec
       cuda_backend::injectAlfFailure(m_impl->runtime, CudaAlfTestFailurePoint::KernelLaunch);
     }
 #endif
+    const auto uploadStart = std::chrono::steady_clock::now();
     ensureDevicePlane(reconstructionHandle, 0);
     cuda_backend::waitFence(m_impl->runtime, CudaQueue::Alf, CudaFence::UploadComplete);
+    const auto uploadEnd = std::chrono::steady_clock::now();
+    const AlfAccelerationStats runtimeBefore = cuda_backend::alfStats(m_impl->runtime);
     cuda_backend::filterAlfLumaFrame(m_impl->runtime, mirror.planes[0].device, frame, ctus, ctuCount,
                                      classifiers);
+    const AlfAccelerationStats runtimeAfter = cuda_backend::alfStats(m_impl->runtime);
+
+    mirror.planes[0].state = CudaMirrorState::DeviceValid;
+    mirror.planes[0].uploadPending = false;
+    const auto downloadStart = std::chrono::steady_clock::now();
+    ensureHostPlane(reconstructionHandle, 0);
+    const auto integrationEnd = std::chrono::steady_clock::now();
+    const CudaMirrorMemoryUsage mirrorAfter = m_impl->mirrorMemory.total;
+    const std::uint64_t uploadBytes = mirrorAfter.uploadedBytes - mirrorBefore.uploadedBytes;
+    const std::uint64_t downloadBytes = mirrorAfter.downloadedBytes - mirrorBefore.downloadedBytes;
+    const std::uint64_t runtimeSynchronizations =
+      runtimeAfter.runtimeSynchronizations - runtimeBefore.runtimeSynchronizations;
+    m_impl->alfMirrorUploadBytes += uploadBytes;
+    m_impl->alfMirrorDownloadBytes += downloadBytes;
+    m_impl->alfIntegrationSynchronizations += runtimeSynchronizations + 1
+                                               + (uploadBytes != 0 ? 1 : 0)
+                                               + (downloadBytes != 0 ? 1 : 0);
+    m_impl->alfUploadNanoseconds += static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(uploadEnd - uploadStart).count());
+    m_impl->alfDownloadNanoseconds += static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(integrationEnd - downloadStart).count());
+    m_impl->alfIntegrationNanoseconds += static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(integrationEnd - integrationStart).count());
     return CudaAlfDispatchResult::Executed;
   }
   catch (const std::exception &error)
   {
     ++m_impl->alfFailures;
     m_impl->alfAccelerationEnabled = false;
-    // The host reconstruction remains authoritative until a fully synchronized D2D commit succeeds.
-    // Quarantine this ALF queue/mirror state before propagating the fatal backend error.
-    try
-    {
-      markHostPlaneModified(reconstructionHandle, 0);
-    }
-    catch (...)
-    {
-    }
-    cuda_backend::recoverAlfRuntime(m_impl->runtime);
+    // The host reconstruction remains authoritative. Recover outstanding work, then invalidate the local
+    // mirror state without calling a potentially throwing publication API before propagating the first error.
+    recoverAndQuarantineAlfNoexcept(m_impl.get(), reconstructionHandle);
     throw std::runtime_error(std::string("CUDA ALF execution failed: ") + error.what());
   }
   catch (...)
   {
     ++m_impl->alfFailures;
     m_impl->alfAccelerationEnabled = false;
-    try
-    {
-      markHostPlaneModified(reconstructionHandle, 0);
-    }
-    catch (...)
-    {
-    }
-    cuda_backend::recoverAlfRuntime(m_impl->runtime);
+    recoverAndQuarantineAlfNoexcept(m_impl.get(), reconstructionHandle);
     throw std::runtime_error("CUDA ALF execution failed with an unknown error");
   }
 #else
@@ -2008,6 +2087,12 @@ AlfAccelerationStats CudaContext::alfStats() const noexcept
   AlfAccelerationStats stats{};
 #if VTM_ENABLE_CUDA
   stats = cuda_backend::alfStats(m_impl->runtime);
+  stats.mirrorUploadBytes = m_impl->alfMirrorUploadBytes;
+  stats.mirrorDownloadBytes = m_impl->alfMirrorDownloadBytes;
+  stats.integrationSynchronizations = m_impl->alfIntegrationSynchronizations;
+  stats.uploadNanoseconds = m_impl->alfUploadNanoseconds;
+  stats.downloadNanoseconds = m_impl->alfDownloadNanoseconds;
+  stats.integrationNanoseconds = m_impl->alfIntegrationNanoseconds;
   stats.failures = m_impl->alfFailures;
   stats.enabled = m_impl->runtime != nullptr && m_impl->alfAccelerationEnabled;
   stats.poisoned = m_impl->runtime != nullptr && !m_impl->alfAccelerationEnabled;

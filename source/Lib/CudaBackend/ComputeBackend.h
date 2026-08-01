@@ -72,8 +72,14 @@ struct AlfAccelerationStats
   std::uint64_t parameterUploadBytes = 0;
   std::uint64_t diagnosticDownloadBytes = 0;
   std::uint64_t commitBytes = 0;
-  std::uint64_t synchronizations = 0;
-  std::uint64_t elapsedNanoseconds = 0;
+  std::uint64_t mirrorUploadBytes = 0;
+  std::uint64_t mirrorDownloadBytes = 0;
+  std::uint64_t runtimeSynchronizations = 0;
+  std::uint64_t integrationSynchronizations = 0;
+  std::uint64_t uploadNanoseconds = 0;
+  std::uint64_t runtimeNanoseconds = 0;
+  std::uint64_t downloadNanoseconds = 0;
+  std::uint64_t integrationNanoseconds = 0;
   std::uint64_t scratchBytes = 0;
   std::uint64_t retiredScratchBytes = 0;
   std::uint64_t peakScratchBytes = 0;

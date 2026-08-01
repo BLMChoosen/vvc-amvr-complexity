@@ -1209,7 +1209,8 @@ void fillAlfPattern(TestPicture &picture, const std::uint8_t bitDepth)
 }
 
 bool runAlfLumaCase(vtm::CudaContext &context, const std::uint8_t bitDepth,
-                    double *cpuMilliseconds = nullptr, double *gpuMilliseconds = nullptr)
+                    double *cpuMilliseconds = nullptr, double *gpuMilliseconds = nullptr,
+                    const bool collectDiagnostics = true)
 {
   constexpr std::uint32_t width = 1924;
   constexpr std::uint32_t height = 1084;
@@ -1288,30 +1289,34 @@ bool runAlfLumaCase(vtm::CudaContext &context, const std::uint8_t bitDepth,
   const auto cpuEnd = std::chrono::steady_clock::now();
   if (!sawDisabled || !sawPartial) return false;
 
-  std::vector<vtm::CudaAlfClassifier> gpuClassifiers(static_cast<std::size_t>(width >> 2) * (height >> 2));
+  std::vector<vtm::CudaAlfClassifier> gpuClassifiers;
+  if (collectDiagnostics)
+    gpuClassifiers.resize(static_cast<std::size_t>(width >> 2) * (height >> 2));
   int owner = 0;
   const auto mirror = context.registerPictureMirror(&owner, vtm::CudaPictureRole::Reconstruction,
                                                      picture.descriptor);
   const auto gpuStart = std::chrono::steady_clock::now();
   if (context.filterAlfLumaFrame(mirror, frame, ctus.data(), static_cast<std::uint32_t>(ctus.size()),
-                                 gpuClassifiers.data()) != vtm::CudaAlfDispatchResult::Executed)
+                                 collectDiagnostics ? gpuClassifiers.data() : nullptr)
+      != vtm::CudaAlfDispatchResult::Executed)
     return false;
-  context.markDevicePlaneModified(mirror, 0);
-  context.ensureHostPlane(mirror, 0);
   const auto gpuEnd = std::chrono::steady_clock::now();
-  unsigned transposeMask = 0;
-  for (std::uint32_t y = 0; y < height; y += 4)
+  if (collectDiagnostics)
   {
-    for (std::uint32_t x = 0; x < width; x += 4)
+    unsigned transposeMask = 0;
+    for (std::uint32_t y = 0; y < height; y += 4)
     {
-      const std::uint32_t compact = (y >> 2) * (width >> 2) + (x >> 2);
-      transposeMask |= 1u << cpuRows[y][x].transposeIdx;
-      if (gpuClassifiers[compact].classIdx != cpuRows[y][x].classIdx
-          || gpuClassifiers[compact].transposeIdx != cpuRows[y][x].transposeIdx)
-        return false;
+      for (std::uint32_t x = 0; x < width; x += 4)
+      {
+        const std::uint32_t compact = (y >> 2) * (width >> 2) + (x >> 2);
+        transposeMask |= 1u << cpuRows[y][x].transposeIdx;
+        if (gpuClassifiers[compact].classIdx != cpuRows[y][x].classIdx
+            || gpuClassifiers[compact].transposeIdx != cpuRows[y][x].transposeIdx)
+          return false;
+      }
     }
+    if (transposeMask != 0xf) return false;
   }
-  if (transposeMask != 0xf) return false;
   for (std::uint32_t y = 0; y < height; ++y)
     for (std::uint32_t x = 0; x < width; ++x)
       if (sample(x, y) != expected[static_cast<std::size_t>(y) * width + x]) return false;
@@ -1328,24 +1333,35 @@ bool benchmarkAlfFrame(vtm::CudaContext &context)
   constexpr int runs = 5;
   std::array<double, runs> cpu{};
   std::array<double, runs> gpu{};
+  // Warm allocations, kernels and driver state before recording exactly five diagnostic-free samples.
+  if (!runAlfLumaCase(context, 10, nullptr, nullptr, false)) return false;
   const vtm::AlfAccelerationStats before = context.alfStats();
   for (int run = 0; run < runs; ++run)
   {
-    if (!runAlfLumaCase(context, 10, &cpu[run], &gpu[run])) return false;
+    if (!runAlfLumaCase(context, 10, &cpu[run], &gpu[run], false)) return false;
   }
   std::sort(cpu.begin(), cpu.end());
   std::sort(gpu.begin(), gpu.end());
   const vtm::AlfAccelerationStats after = context.alfStats();
   const double cpuMedian = cpu[runs / 2];
   const double gpuMedian = gpu[runs / 2];
-  std::cout << "ALF 1924x1084 Pel" << (sizeof(Pel) * 8) << "/10-bit, 5-run median: CPU "
-            << cpuMedian << " ms, CUDA end-to-end " << gpuMedian << " ms, speedup "
+  if (after.diagnosticDownloadBytes != before.diagnosticDownloadBytes) return false;
+  std::cout << "ALF 1924x1084 Pel" << (sizeof(Pel) * 8)
+            << "/10-bit, warm-up + 5 measured diagnostic-free median: CPU "
+            << cpuMedian << " ms, CUDA integration " << gpuMedian << " ms, speedup "
             << (gpuMedian > 0.0 ? cpuMedian / gpuMedian : 0.0) << "x; telemetry delta params/diagnostic/commit "
             << (after.parameterUploadBytes - before.parameterUploadBytes) << "/"
             << (after.diagnosticDownloadBytes - before.diagnosticDownloadBytes) << "/"
-            << (after.commitBytes - before.commitBytes) << " bytes, syncs "
-            << (after.synchronizations - before.synchronizations) << ", runtime "
-            << double(after.elapsedNanoseconds - before.elapsedNanoseconds) / 1000000.0 << " ms. "
+            << (after.commitBytes - before.commitBytes) << " bytes, mirror upload/download "
+            << (after.mirrorUploadBytes - before.mirrorUploadBytes) << "/"
+            << (after.mirrorDownloadBytes - before.mirrorDownloadBytes) << " bytes, syncs runtime/integration "
+            << (after.runtimeSynchronizations - before.runtimeSynchronizations) << "/"
+            << (after.integrationSynchronizations - before.integrationSynchronizations)
+            << ", time upload/runtime/download/integration "
+            << double(after.uploadNanoseconds - before.uploadNanoseconds) / 1000000.0 << "/"
+            << double(after.runtimeNanoseconds - before.runtimeNanoseconds) / 1000000.0 << "/"
+            << double(after.downloadNanoseconds - before.downloadNanoseconds) / 1000000.0 << "/"
+            << double(after.integrationNanoseconds - before.integrationNanoseconds) / 1000000.0 << " ms. "
             << (gpuMedian < cpuMedian ? "Wall-time gate passed for this microbenchmark."
                                       : "Wall-time gate did not pass; GPUExperimentalALF remains off by default.")
             << '\n';
@@ -1391,8 +1407,6 @@ bool runAlfGeometryCase(vtm::CudaContext &context)
       || context.alfStats().failures != before.failures) return false;
   if (context.filterAlfLumaFrame(mirror, frame, validCtus.data(), static_cast<std::uint32_t>(validCtus.size()))
       != vtm::CudaAlfDispatchResult::Executed) return false;
-  context.markDevicePlaneModified(mirror, 0);
-  context.ensureHostPlane(mirror, 0);
   context.releasePictureMirror(mirror);
   return true;
 }
@@ -1415,8 +1429,6 @@ bool runAlfFailureCase(const int device, const vtm::CudaAlfTestFailurePoint fail
     if (context.filterAlfLumaFrame(smallMirror, smallFrame, smallCtus.data(),
                                    static_cast<std::uint32_t>(smallCtus.size()))
         != vtm::CudaAlfDispatchResult::Executed) return false;
-    context.markDevicePlaneModified(smallMirror, 0);
-    context.ensureHostPlane(smallMirror, 0);
   }
 
   TestPicture large(1924, 1084, sizeof(Pel), 10, 37, 1, 0, 0);
@@ -1442,14 +1454,20 @@ bool runAlfFailureCase(const int device, const vtm::CudaAlfTestFailurePoint fail
     clearMessage = std::string(error.what()).find("CUDA ALF execution failed:") != std::string::npos;
   }
   const vtm::AlfAccelerationStats stats = context.alfStats();
+  const bool quarantined = context.pictureMirrorPlaneState(largeMirror, 0) == vtm::CudaMirrorState::HostValid;
   const bool rejectedAfterPoison = context.filterAlfLumaFrame(
     largeMirror, largeFrame, largeCtus.data(), static_cast<std::uint32_t>(largeCtus.size()))
     == vtm::CudaAlfDispatchResult::NotEligible;
-  const bool valid = didThrow && clearMessage && rejectedAfterPoison && stats.failures == 1
+  bool valid = didThrow && clearMessage && rejectedAfterPoison && quarantined && stats.failures == 1
                      && stats.poisoned && !stats.enabled
                      && stats.dispatches == (releaseFailure ? 1u : 0u)
                      && stats.scratchBytes == 0 && stats.retiredScratchBytes == 0
                      && large.matchesExpected();
+  context.releasePictureMirror(largeMirror);
+  context.releasePictureMirror(smallMirror);
+  const vtm::CudaMirrorMemoryStats memory = context.pictureMirrorMemoryStats();
+  valid = valid && context.pictureMirrorCount() == 0
+          && memory.total.currentDeviceBytes == 0 && memory.total.currentPinnedBytes == 0;
   context.shutdown();
   return valid;
 }
