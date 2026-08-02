@@ -158,6 +158,7 @@ enum class FusedReason : uint8_t
   JOINT_CBCR,
   ACT,
   LMCS_CHROMA_RESIDUAL,
+  LMCS_LUMA,
   LMCS_CACHE_DEPENDENCY,
   IBC_BUFFER_RESET,
   IBC_VPDU_RESET,
@@ -174,7 +175,7 @@ const char *const fusedRefModeNames[] = {
 const char *const fusedReasonNames[] = {
   "intra_or_plt", "ibc", "gpm", "affine_or_prof", "ciip", "sub_pu", "dmvr", "bdof",
   "invalid_dpb", "rpr", "mts_or_other_transform", "scaling_list", "lfnst", "sbt", "joint_cbcr",
-  "act", "lmcs_chroma_residual", "lmcs_cache_dependency", "ibc_buffer_reset", "ibc_vpdu_reset",
+  "act", "lmcs_chroma_residual", "lmcs_luma", "lmcs_cache_dependency", "ibc_buffer_reset", "ibc_vpdu_reset",
   "ibc_pre_mv_consumer", "picture_boundary", "stream_end"
 };
 static_assert(sizeof(fusedCoreNames) / sizeof(fusedCoreNames[0]) == static_cast<size_t>(FusedCore::NUM),
@@ -206,6 +207,14 @@ static_assert(mcProfileModeReason(true, false) == McProfileReason::IBC,
               "IBC must be classified before the generic non-inter rejection");
 static_assert(mcProfileModeReason(false, false) == McProfileReason::INTRA_OR_PLT,
               "non-inter CUs must retain their dedicated rejection");
+
+constexpr bool fusedLmcsLumaActive(const bool sliceLmcsEnabled, const bool ctuLmcsEnabled)
+{
+  return sliceLmcsEnabled && ctuLmcsEnabled;
+}
+static_assert(!fusedLmcsLumaActive(false, false) && !fusedLmcsLumaActive(true, false)
+                && fusedLmcsLumaActive(true, true),
+              "fused LMCS-luma eligibility must require both the slice and CTU flags");
 
 constexpr bool mcProfileIbcFillObservable(const bool spsIbcEnabled)
 {
@@ -290,6 +299,62 @@ McProfilePath mcProfileRprVariant(const McProfilePath base, const bool rpr)
 FusedRefMode fusedRefMode(const McProfilePath path)
 {
   return static_cast<FusedRefMode>(static_cast<unsigned>(path) / 2);
+}
+
+struct McPredictionClassification
+{
+  McProfilePath path = McProfilePath::UNI;
+  std::array<bool, NUM_REF_PIC_LIST_01> effectiveLists{};
+
+  uint64_t operationCount() const
+  {
+    return static_cast<uint64_t>(effectiveLists[REF_PIC_LIST_0])
+         + static_cast<uint64_t>(effectiveLists[REF_PIC_LIST_1]);
+  }
+
+  uint64_t weightedMetadataCount() const
+  {
+    const FusedRefMode mode = fusedRefMode(path);
+    return mode == FusedRefMode::UNI_WEIGHTED || mode == FusedRefMode::BI_WEIGHTED ? operationCount() : 0;
+  }
+};
+
+McPredictionClassification mcProfileClassifyPrediction(const SliceType sliceType, const bool useWp,
+                                                        const bool useWpBi, const uint8_t bcwIdx,
+                                                        const bool directList0, const bool identicalMotion,
+                                                        const uint8_t interDir, const int refIdxList0,
+                                                        const int refIdxList1, const bool scaledReference)
+{
+  McPredictionClassification result;
+  const bool list0Used = (interDir & 1) != 0 && refIdxList0 >= 0;
+  const bool list1Used = (interDir & 2) != 0 && refIdxList1 >= 0;
+  if (directList0)
+  {
+    result.effectiveLists[REF_PIC_LIST_0] = list0Used;
+    const bool weighted = (sliceType == P_SLICE && useWp) || (sliceType == B_SLICE && useWpBi);
+    result.path = weighted ? McProfilePath::UNI_WEIGHTED : McProfilePath::UNI;
+  }
+  else if (identicalMotion)
+  {
+    result.effectiveLists[REF_PIC_LIST_0] = list0Used;
+    result.path = McProfilePath::IDENTICAL_UNI;
+  }
+  else
+  {
+    result.effectiveLists[REF_PIC_LIST_0] = list0Used;
+    result.effectiveLists[REF_PIC_LIST_1] = list1Used;
+    const bool bothLists = list0Used && list1Used;
+    if (bothLists && sliceType == B_SLICE && useWpBi && bcwIdx == BCW_DEFAULT)
+      result.path = McProfilePath::BI_WEIGHTED;
+    else if (!bothLists && ((sliceType == P_SLICE && useWp) || (sliceType == B_SLICE && useWpBi)))
+      result.path = McProfilePath::UNI_WEIGHTED;
+    else if (bothLists && bcwIdx != BCW_DEFAULT)
+      result.path = McProfilePath::BI_BCW;
+    else
+      result.path = bothLists ? McProfilePath::BI_AVG : McProfilePath::UNI;
+  }
+  result.path = mcProfileRprVariant(result.path, scaledReference);
+  return result;
 }
 
 FusedReason fusedReasonFromMc(const McProfileReason reason)
@@ -493,14 +558,12 @@ struct FusedPredictionOperationDescriptorModel
   int16_t  refIdx;
   uint16_t width;
   uint16_t height;
-  int16_t  weight[MAX_NUM_COMPONENT];
-  int16_t  offset[MAX_NUM_COMPONENT];
   uint8_t  refList;
   uint8_t  componentMask;
   uint8_t  combineMode;
   uint8_t  bcwIdx;
-  uint8_t  log2WeightDenom[MAX_NUM_COMPONENT];
   uint8_t  interpolationFlags;
+  uint8_t  reserved[3];
   uint32_t flags;
 };
 
@@ -636,6 +699,12 @@ uint64_t fusedCheckedMultiply(const uint64_t left, const uint64_t right)
   return left * right;
 }
 
+uint64_t fusedCeilDivide(const uint64_t dividend, const uint64_t divisor)
+{
+  if (divisor == 0) THROW("decoder fused-batch profiler division by zero");
+  return fusedCheckedAdd(dividend / divisor, dividend % divisor != 0 ? 1 : 0);
+}
+
 struct FusedPictureMetadataKey
 {
   uintptr_t identity = 0;
@@ -710,15 +779,20 @@ struct FusedReferenceMetadataKey
 
 struct FusedBcwMetadataKey
 {
-  uintptr_t sliceIdentity = 0;
   uint8_t bcwIdx = BCW_DEFAULT;
   int8_t weightList0 = 0;
   int8_t weightList1 = 0;
 
   bool operator==(const FusedBcwMetadataKey &other) const
   {
-    return sliceIdentity == other.sliceIdentity && bcwIdx == other.bcwIdx
-        && weightList0 == other.weightList0 && weightList1 == other.weightList1;
+    return bcwIdx == other.bcwIdx && weightList0 == other.weightList0 && weightList1 == other.weightList1;
+  }
+
+  bool matchesGlobalTable() const
+  {
+    return bcwIdx < BCW_NUM
+        && weightList0 == getBcwWeight(bcwIdx, REF_PIC_LIST_0)
+        && weightList1 == getBcwWeight(bcwIdx, REF_PIC_LIST_1);
   }
 };
 
@@ -922,6 +996,7 @@ struct FusedCoreProfile
     }
     for (const FusedBcwMetadataKey &bcw : candidate.bcwMetadata)
     {
+      if (!bcw.matchesGlobalTable()) THROW("decoder fused-batch profiler BCW metadata disagrees with global table");
       if (addUnique(seenBcwEntries, bcw,
                     [](const FusedBcwMetadataKey &a, const FusedBcwMetadataKey &b) { return a == b; }))
         sharedBcwBytesOnce = fusedCheckedAdd(sharedBcwBytesOnce, sizeof(FusedBcwMetadataModel));
@@ -1416,6 +1491,49 @@ struct DecCu::McProfile
 
   static bool runFusedSchedulerSelfTests()
   {
+    if (fusedLmcsLumaActive(false, false) || fusedLmcsLumaActive(true, false)
+        || !fusedLmcsLumaActive(true, true))
+      return false;
+
+    const uint64_t maximum = std::numeric_limits<uint64_t>::max();
+    if (fusedCeilDivide(maximum, 1) != maximum
+        || fusedCeilDivide(maximum, 2) != maximum / 2 + 1
+        || fusedCeilDivide(0, maximum) != 0)
+      return false;
+
+    const auto checkWeightedClassification = [](const SliceType sliceType, const bool useWp, const bool useWpBi,
+                                                const uint8_t interDir, const int refIdxList0,
+                                                const int refIdxList1, const McProfilePath expectedPath,
+                                                const bool expectList0, const bool expectList1,
+                                                const uint64_t expectedOperations)
+    {
+      const McPredictionClassification result = mcProfileClassifyPrediction(
+        sliceType, useWp, useWpBi, BCW_DEFAULT, false, false, interDir, refIdxList0, refIdxList1, false);
+      const std::array<int, NUM_REF_PIC_LIST_01> refIdx = { refIdxList0, refIdxList1 };
+      uint64_t metadataEntries = 0;
+      for (size_t list = 0; list < result.effectiveLists.size(); ++list)
+      {
+        if (!result.effectiveLists[list]) continue;
+        // The production metadata loop calls getRefPic only for these entries.
+        if (refIdx[list] < 0) return false;
+        metadataEntries++;
+      }
+      return result.path == expectedPath
+          && result.effectiveLists[REF_PIC_LIST_0] == expectList0
+          && result.effectiveLists[REF_PIC_LIST_1] == expectList1
+          && result.operationCount() == expectedOperations
+          && result.weightedMetadataCount() == metadataEntries;
+    };
+    if (!checkWeightedClassification(B_SLICE, false, true, 1, 0, -1, McProfilePath::UNI_WEIGHTED,
+                                      true, false, 1)
+        || !checkWeightedClassification(B_SLICE, false, true, 2, -1, 0, McProfilePath::UNI_WEIGHTED,
+                                         false, true, 1)
+        || !checkWeightedClassification(B_SLICE, false, true, 3, 0, 1, McProfilePath::BI_WEIGHTED,
+                                         true, true, 2)
+        || !checkWeightedClassification(P_SLICE, true, false, 1, 0, -1, McProfilePath::UNI_WEIGHTED,
+                                         true, false, 1))
+      return false;
+
     const auto candidate = [](const FusedRefMode mode, const uint64_t predictionUnits,
                               const uint64_t predictionOperations)
     {
@@ -1435,6 +1553,44 @@ struct DecCu::McProfile
       value.referenceMetadata.push_back(reference);
       return value;
     };
+
+    auto lmcsEligibility = std::make_unique<McProfile>(true);
+    const std::array<std::array<bool, 2>, 3> lmcsFlags = { {
+      { false, false }, { true, false }, { true, true }
+    } };
+    for (size_t index = 0; index < lmcsFlags.size(); ++index)
+    {
+      lmcsEligibility->prepareCu(index == 2 ? 1 : 0, 64, McProfileReason::NUM, false);
+      const bool active = fusedLmcsLumaActive(lmcsFlags[index][0], lmcsFlags[index][1]);
+      lmcsEligibility->beginFusedCandidate(candidate(FusedRefMode::UNI, 1, 1),
+                                            active ? FusedReason::LMCS_LUMA : FusedReason::NUM);
+      lmcsEligibility->finishFusedCandidate();
+    }
+    for (const FusedCoreProfile &core : lmcsEligibility->fusedCores)
+    {
+      if (core.consideredCus != 3 || core.eligibleCus != 2 || core.distribution.windows != 1
+          || core.distribution.totals[static_cast<size_t>(FusedMetric::CUS)] != 2
+          || core.flushReasons[static_cast<size_t>(FusedReason::PICTURE_BOUNDARY)] != 1
+          || core.rejectedCus[static_cast<size_t>(FusedReason::LMCS_LUMA)] != 1)
+        return false;
+    }
+
+    auto bcwMetadata = std::make_unique<McProfile>(true);
+    for (uintptr_t sliceIdentity : { uintptr_t{ 10 }, uintptr_t{ 20 } })
+    {
+      FusedCandidate bcwCandidate = candidate(FusedRefMode::BI_BCW, 1, 2);
+      bcwCandidate.sliceMetadata.identity = sliceIdentity;
+      bcwCandidate.referenceMetadata[0].sliceIdentity = sliceIdentity;
+      FusedBcwMetadataKey key;
+      key.bcwIdx = 0;
+      key.weightList0 = getBcwWeight(key.bcwIdx, REF_PIC_LIST_0);
+      key.weightList1 = getBcwWeight(key.bcwIdx, REF_PIC_LIST_1);
+      bcwCandidate.bcwMetadata.push_back(key);
+      bcwMetadata->beginFusedCandidate(bcwCandidate, FusedReason::NUM);
+      bcwMetadata->finishFusedCandidate();
+    }
+    for (const FusedCoreProfile &core : bcwMetadata->fusedCores)
+      if (core.sharedBcwBytesOnce != sizeof(FusedBcwMetadataModel) || core.seenBcwEntries.size() != 1) return false;
 
     auto scheduler = std::make_unique<McProfile>(true);
     scheduler->beginFusedCandidate(candidate(FusedRefMode::UNI, 1, 1), FusedReason::NUM);
@@ -1643,7 +1799,7 @@ struct DecCu::McProfile
     const uint64_t dirtyD2h = profile.distribution.totals[static_cast<size_t>(FusedMetric::DIRTY_DOWNLOAD_BYTES)];
     const uint64_t amortizedShared = profile.distribution.windows == 0
                                        ? 0
-                                       : (sharedBytes + profile.distribution.windows - 1) / profile.distribution.windows;
+                                       : fusedCeilDivide(sharedBytes, profile.distribution.windows);
     output << "},\"transfer_model\":{\"descriptor_h2d_bytes\":"
            << profile.distribution.totals[static_cast<size_t>(FusedMetric::DESCRIPTOR_BYTES)]
            << ",\"qcoeff_h2d_bytes\":"
@@ -1689,7 +1845,7 @@ struct DecCu::McProfile
     flushPipeline();
     flushFused(FusedReason::STREAM_END);
     const uint64_t reportThreadHash = static_cast<uint64_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
-    output << "DECODER_BATCH_PROFILE {\"schema\":6,\"process_id\":" << processId
+    output << "DECODER_BATCH_PROFILE {\"schema\":7,\"process_id\":" << processId
            << ",\"decoder_instance\":" << decoderInstance
            << ",\"owner_thread_hash\":" << ownerThreadHash
            << ",\"report_thread_hash\":" << reportThreadHash
@@ -2006,6 +2162,7 @@ int DecCu::xProfilePrepareMcCu(CodingUnit &cu)
   fused.sliceMetadata.numRefList1 = cu.slice->getNumRefIdx(REF_PIC_LIST_1);
   fused.sliceMetadata.useWp = cu.cs->pps->getUseWP();
   fused.sliceMetadata.useWpBi = cu.cs->pps->getWPBiPred();
+  const bool lmcsLuma = fusedLmcsLumaActive(cu.slice->getLmcsEnabledFlag(), m_pcReshape->getCTUFlag());
   const auto beginFused = [&](const FusedReason reason)
   {
     m_mcProfile->prepareFusedCu(fused, reason);
@@ -2068,20 +2225,8 @@ int DecCu::xProfilePrepareMcCu(CodingUnit &cu)
       }
     }
 
-    McProfilePath path;
-    if (directList0)
-    {
-      const SliceType sliceType = cu.slice->getSliceType();
-      const bool weighted = (sliceType == P_SLICE && cu.cs->pps->getUseWP())
-                         || (sliceType == B_SLICE && cu.cs->pps->getWPBiPred());
-      path = mcProfileRprVariant(weighted ? McProfilePath::UNI_WEIGHTED : McProfilePath::UNI,
-                                 scaledReference);
-    }
-    else if (mcProfileIdenticalMotion(pu))
-    {
-      path = mcProfileRprVariant(McProfilePath::IDENTICAL_UNI, scaledReference);
-    }
-    else
+    const bool identicalMotion = !directList0 && mcProfileIdenticalMotion(pu);
+    if (!directList0 && !identicalMotion)
     {
       bool bdofApplied = false;
       if (cu.cs->sps->getBDOFEnabledFlag() && !cu.cs->picHeader->getBdofDisabledFlag())
@@ -2101,18 +2246,13 @@ int DecCu::xProfilePrepareMcCu(CodingUnit &cu)
         return reject(McProfileReason::DMVR, false);
       }
 
-      const bool bothLists = pu.refIdx[REF_PIC_LIST_0] >= 0 && pu.refIdx[REF_PIC_LIST_1] >= 0;
-      const SliceType sliceType = cu.slice->getSliceType();
-      if (sliceType == B_SLICE && cu.cs->pps->getWPBiPred() && cu.bcwIdx == BCW_DEFAULT)
-        path = McProfilePath::BI_WEIGHTED;
-      else if (sliceType == P_SLICE && cu.cs->pps->getUseWP())
-        path = McProfilePath::UNI_WEIGHTED;
-      else if (bothLists && cu.bcwIdx != BCW_DEFAULT)
-        path = McProfilePath::BI_BCW;
-      else
-        path = bothLists ? McProfilePath::BI_AVG : McProfilePath::UNI;
-      path = mcProfileRprVariant(path, scaledReference);
     }
+
+    const McPredictionClassification classification = mcProfileClassifyPrediction(
+      cu.slice->getSliceType(), cu.cs->pps->getUseWP(), cu.cs->pps->getWPBiPred(), cu.bcwIdx,
+      directList0, identicalMotion, pu.interDir, pu.refIdx[REF_PIC_LIST_0], pu.refIdx[REF_PIC_LIST_1],
+      scaledReference);
+    const McProfilePath path = classification.path;
 
     const int pathIndex = static_cast<int>(path);
     if (cuPath >= 0 && cuPath != pathIndex)
@@ -2128,24 +2268,9 @@ int DecCu::xProfilePrepareMcCu(CodingUnit &cu)
     fused.weighted = fused.weighted || weighted;
     fused.bcw = fused.bcw || bcw;
 
-    std::array<bool, NUM_REF_PIC_LIST_01> effectiveLists{};
-    if (directList0 || mode == FusedRefMode::IDENTICAL_UNI)
-    {
-      effectiveLists[REF_PIC_LIST_0] = true;
-    }
-    else if (mode == FusedRefMode::BI_AVG || mode == FusedRefMode::BI_WEIGHTED || mode == FusedRefMode::BI_BCW)
-    {
-      effectiveLists[REF_PIC_LIST_0] = effectiveLists[REF_PIC_LIST_1] = true;
-    }
-    else
-    {
-      for (int list = 0; list < NUM_REF_PIC_LIST_01; ++list)
-        effectiveLists[list] = (pu.interDir & (1 << list)) != 0;
-    }
-
     for (int list = 0; list < NUM_REF_PIC_LIST_01; ++list)
     {
-      if (!effectiveLists[list]) continue;
+      if (!classification.effectiveLists[list]) continue;
       const RefPicList refList = static_cast<RefPicList>(list);
       const int refIdx = pu.refIdx[list];
       Picture *refPic = cu.slice->getRefPic(refList, refIdx);
@@ -2193,7 +2318,6 @@ int DecCu::xProfilePrepareMcCu(CodingUnit &cu)
     if (bcw)
     {
       FusedBcwMetadataKey bcwKey;
-      bcwKey.sliceIdentity = fused.sliceMetadata.identity;
       bcwKey.bcwIdx = cu.bcwIdx;
       bcwKey.weightList0 = getBcwWeight(cu.bcwIdx, REF_PIC_LIST_0);
       bcwKey.weightList1 = getBcwWeight(cu.bcwIdx, REF_PIC_LIST_1);
@@ -2209,7 +2333,7 @@ int DecCu::xProfilePrepareMcCu(CodingUnit &cu)
   }
   m_mcProfile->prepareCu(cu.slice->getPOC(), pixels,
                          mixedEffectivePath ? McProfileReason::MIXED_EFFECTIVE_PATH : McProfileReason::NUM, false);
-  beginFused(FusedReason::NUM);
+  beginFused(lmcsLuma ? FusedReason::LMCS_LUMA : FusedReason::NUM);
   return mixedEffectivePath ? -1 : cuPath;
 }
 

@@ -23,7 +23,7 @@ compile definition is public only in the profiling tree because `DecCu` is embed
 consumer must see the same class layout.
 
 Even in a profiling build, collection is disabled unless `VTM_DECODER_BATCH_PROFILE=1` is present. Output is one
-stable line of JSON prefixed with `DECODER_BATCH_PROFILE`. Schema 6 identifies the process, decoder instance, actual
+stable line of JSON prefixed with `DECODER_BATCH_PROFILE`. Schema 7 identifies the process, decoder instance, actual
 owner and reporting threads, hook count, thread-mismatch count, first/last POC, and picture count. Every hook locks
 the per-instance state and compares the real `std::thread::id` with the first hook owner, so a handoff is both race-free
 and visible. The complete JSON line is assembled in memory and emitted with one `fwrite` while holding a process-wide
@@ -51,7 +51,11 @@ merely the same `interDir`:
 - a separate RPR variant of every path above.
 
 The classifier mirrors the decoder conditions for identical motion, `UseWP`/`WPBiPred`, `BCW_DEFAULT`, scaled
-references, DMVR, and BDOF. IBC is tested before the generic non-inter case; compile-time assertions specifically
+references, DMVR, and BDOF.
+In a B slice with `WPBiPred`, only a PU with both real reference lists is `bi_weighted`; a uni-L0 or uni-L1 PU is
+`uni_weighted`. Effective operations require both the corresponding `interDir` bit and a nonnegative `refIdx`, so an
+inactive `refIdx=-1` is never passed to `getRefPic` or weighted-metadata lookup. IBC is tested before the generic
+non-inter case; compile-time assertions specifically
 prove that an IBC CU maps to `ibc`, not `intra_or_plt`. GPM, affine/PROF, CIIP, sub-PU MC, DMVR, BDOF, IBC, intra, and palette paths are reported
 as exclusions rather than being folded into uni/bi. A CU whose PUs require different effective paths is also
 reported separately.
@@ -93,7 +97,7 @@ The fused scheduler has a separate deferred-fill queue for each capability core,
 same-path model queued that CU. Every fused-eligible CU records exactly one post-reconstruction fill, including a CU
 whose PUs use mixed supported paths. At every consumer/reset/picture/stream boundary, each core first closes its
 window and replays its fills in CU order. An RPR CU is immediate for Core A because that core rejects it, while the
-same fill is deferred for Core B + RPR. Schema 6 exposes queued/applied counts, sequence numbers, maximum pending
+same fill is deferred for Core B + RPR. Schema 7 exposes queued/applied counts, sequence numbers, maximum pending
 depth, immediate fills, disabled-SPS no-ops, boundary checks, violations, and pending fills separately for both cores.
 
 When `SPS::getIBCFlag()` is false, these buffer writes cannot be consumed by IBC and are modeled as semantically
@@ -112,7 +116,7 @@ at picture boundaries. IBC operations are excluded from these candidate streams.
 
 ## Fused MC + residual + reconstruction windows
 
-Schema 6 adds a second, independent scheduler model for one future heterogeneous dispatch containing motion
+Schema 7 adds a second, independent scheduler model for one future heterogeneous dispatch containing motion
 compensation, dequantization/inverse transform, and reconstruction. It does not change the legacy per-path and
 per-transform-key measurements. A fused CU candidate is opened after motion derivation, accumulates every logical TU
 and every normative component `invTransformNxN` call during `xReconInter`, and is committed only after reconstruction.
@@ -144,12 +148,14 @@ containing each mode are recorded separately, as are coverage, rejection, and fl
 The transfer model assumes decoded references and the output `Picture` mirror are already resident. Recurring H2D is
 therefore limited to explicit measurement-only POD descriptors and dense `TCoeff` payloads. Each prediction-operation
 descriptor carries destination/reference plane offsets and strides, destination position, motion vector, refIdx,
-dimensions, reference list, component/combine/interpolation flags, BCW index, and effective weights/offsets. Shared
+dimensions, reference list, component/combine/interpolation flags, BCW index, and an ID for the deduplicated reference metadata. Shared
 metadata is deduplicated once by actual identity and values: output-picture layout, slice/reference mapping, weighted
-prediction parameters, RPR scale and current/reference scaling windows, and BCW weights. WP/RPR/BCW therefore have
+prediction parameters, and RPR scale/current/reference scaling windows. BCW is global rather than slice-owned: each
+entry is keyed only by `bcwIdx` plus its two effective weights and is checked against the global BCW table before it is
+charged once. WP/RPR/BCW therefore have
 explicit nonzero costs instead of being claimed as free. Shared-once H2D also includes grouped scan elements for each
 observed shape, one inverse-DCT2 matrix for each observed 1-D size, and the flat inverse-quant constants. These tables
-are amortized over the observed windows, and all byte additions/multiplications are overflow-checked. When a CPU dependency or final
+are amortized over the observed windows, and all byte additions/multiplications plus ceiling division are overflow-safe. When a CPU dependency or final
 consumer ends a window, the model conservatively charges all dirty output components in that window at `sizeof(Pel)`
 as D2H. A real range-aware mirror could download less; the report keeps this conservative charge visible instead of
 hiding it in a descriptor-only estimate. The POD sizes and element sizes are versioned in each record and are not a
@@ -207,12 +213,12 @@ the table did not change from the preceding corrected report. An intermediate me
 unobservable disabled-SPS buffer resets produced smaller runs and was discarded. IBC pending-fill and LMCS cache
 boundary coverage is therefore static/focal in this corpus, not dynamic codec coverage. The runner additionally
 launched two profiling decoder processes concurrently on RA 8.
-Both complete schema-6 records parsed independently, their `(process_id, decoder_instance)` identities were distinct,
+Both complete schema-7 records parsed independently, their `(process_id, decoder_instance)` identities were distinct,
 their owner-thread mismatch counters were zero, and both decoded hashes matched the RA 8 hash above.
 
 ### Transform/dequant coverage preflight
 
-Schema 6 retains profiling of each physical inter `invTransformNxN` call by component, transform size, effective transform,
+Schema 7 retains profiling of each physical inter `invTransformNxN` call by component, transform size, effective transform,
 dequant path, QP, coefficient count, nonzero coefficient count, and the relevant fallback features. It also records
 CBF/non-CBF block counts and potential per-key batches inside each existing reconstruction-dependency window. This
 instrumentation remains compile-time gated and is absent from the normal build.
@@ -255,26 +261,30 @@ transform.
 
 | Row | Eligible / considered CUs | Windows | CU | TU | Component pixels | Prediction ops | Transform tasks | Estimated transfer/run |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| RA 8 | 811 / 1,372 | 98 | 7/31/63/56 | 7/31/63/56 | 1,023/8,191/16,383/10,464 | 7/31/127/88 | 15/63/255/145 | 1,049,460 B |
-| RA 10 | 604 / 1,213 | 103 | 3/15/63/55 | 3/15/63/55 | 511/4,095/16,383/13,056 | 7/31/127/107 | 7/63/127/159 | 934,532 B |
-| LD 8 | 540 / 1,050 | 53 | 7/31/63/52 | 7/31/63/52 | 2,047/16,383/32,767/20,928 | 15/63/127/75 | 15/127/255/141 | 1,087,744 B |
-| LD 10 | 594 / 1,153 | 76 | 7/31/63/56 | 7/31/63/56 | 1,023/8,191/16,383/12,960 | 7/63/127/104 | 15/63/255/165 | 1,099,528 B |
+| RA 8 | 811 / 1,372 | 98 | 7/31/63/56 | 7/31/63/56 | 1,023/8,191/16,383/10,464 | 7/31/127/88 | 15/63/255/145 | 1,042,140 B |
+| RA 10 | 604 / 1,213 | 103 | 3/15/63/55 | 3/15/63/55 | 511/4,095/16,383/13,056 | 7/31/127/107 | 7/63/127/159 | 926,972 B |
+| LD 8 | 540 / 1,050 | 53 | 7/31/63/52 | 7/31/63/52 | 2,047/16,383/32,767/20,928 | 15/63/127/75 | 15/127/255/141 | 1,080,664 B |
+| LD 10 | 594 / 1,153 | 76 | 7/31/63/56 | 7/31/63/56 | 1,023/8,191/16,383/12,960 | 7/63/127/104 | 15/63/255/165 | 1,091,372 B |
 
 Across the four independent runs there were 330 windows and 2,549 eligible of 4,788 considered CUs. Recurring
-descriptor H2D was 686,084 bytes, qcoeff H2D was 2,194,176 bytes, per-run shared tables and metadata summed to
-134,492 bytes, and the conservative dirty-boundary D2H charge was 1,156,512 bytes, for 4,171,264 estimated transfer bytes across the
+descriptor H2D was 655,988 bytes, qcoeff H2D was 2,194,176 bytes, per-run shared tables and metadata summed to
+134,472 bytes, and the conservative dirty-boundary D2H charge was 1,156,512 bytes, for 4,141,148 estimated transfer bytes across the
 four runs. Rejections were: 1,797 intra/palette CUs, 99 GPM, 4 affine/PROF, 263 CIIP, 50 BDOF, and 26 joint-CbCr.
 The runner-merged histogram upper bounds/exact maxima were: CU and TU `7/31/63/56`, luma pixels
 `1,023/4,095/16,383/13,952`, component pixels `1,023/8,191/16,383/20,928`, prediction operations
 `7/31/127/107`, and component-transform tasks `15/63/255/165`. Recurring per-window transfer (descriptors, qcoeff,
-and dirty D2H, excluding shared-once tables) was `8,191/32,767/131,071/128,244` bytes. The report's aggregate was
+and dirty D2H, excluding shared-once tables) was `8,191/32,767/131,071/134,676` bytes. The report's aggregate was
 computed by merging the emitted 65-bucket histograms, not by averaging per-row percentiles.
 
-The schema-6 runner recomputes rejection/coverage sums, flush/window sums, metric/transfer correspondence,
+The schema-7 runner recomputes rejection/coverage sums, flush/window sums, metric/transfer correspondence,
 shared-byte decomposition, every histogram quantile, exact-maximum bucket membership, and per-core IBC ordering. It
-rejects older schema-5 records. Before collection begins, an isolated heap-owned executable self-test exercises
+rejects older schema-6 records. Before collection begins, an isolated heap-owned executable self-test exercises
 uni-to-bi batching, a mixed multi-PU CU, independent fused IBC fills, RPR Core A/Core B handling including a first CU
 after a POC boundary, WP/RPR incremental metadata costs, and whole-CU discard after a supported then unsupported TU.
+The same executable test drives the production WP classifier for B-slice uni-L0, uni-L1, and bi prediction plus
+P-slice uni prediction, including `refIdx=-1` on the inactive list, operation counts, and metadata counts. It also
+proves that the same BCW entry observed through two slice identities costs exactly one metadata record and exercises
+ceiling division at `UINT64_MAX` without an overflowing pre-addition.
 Failure aborts profiler construction; successful tests do not change the decoder instance or any emitted counters.
 
 The corpus contains no RPR, so Core A and Core B + RPR are numerically identical here; this run does not dynamically

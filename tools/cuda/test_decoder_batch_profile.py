@@ -104,7 +104,7 @@ class DecoderBatchProfileRunnerTest(unittest.TestCase):
 
     def test_profile_json_contract(self):
         payload = json.dumps({
-            "schema": 6,
+            "schema": 7,
             "process_id": 10,
             "decoder_instance": 1,
             "owner_thread_hash": 20,
@@ -127,7 +127,7 @@ class DecoderBatchProfileRunnerTest(unittest.TestCase):
     def test_two_concurrent_instance_records_are_independently_parseable(self):
         def record(process_id):
             return PROFILE_PREFIX + json.dumps({
-                "schema": 6, "process_id": process_id, "decoder_instance": 1,
+                "schema": 7, "process_id": process_id, "decoder_instance": 1,
                 "owner_thread_hash": process_id + 10, "report_thread_hash": process_id + 10,
                 "hook_calls": 4, "thread_mismatch_hooks": 0,
                 "scheduler_self_test": self_test_marker(),
@@ -148,7 +148,7 @@ class DecoderBatchProfileRunnerTest(unittest.TestCase):
 
     def test_pending_ibc_fill_cannot_cross_boundary(self):
         payload = {
-            "schema": 6, "process_id": 1, "decoder_instance": 1,
+            "schema": 7, "process_id": 1, "decoder_instance": 1,
             "owner_thread_hash": 2, "report_thread_hash": 2,
             "hook_calls": 1, "thread_mismatch_hooks": 0,
             "scheduler_self_test": self_test_marker(),
@@ -189,11 +189,51 @@ class DecoderBatchProfileRunnerTest(unittest.TestCase):
         self.assertNotIn("PATH_CHANGE", fused_reason)
         self.assertIn("else if (fusedCandidate.rpr) rejectFusedCandidate(FusedReason::RPR, true);", source)
 
-    def test_schema_five_and_failed_self_test_are_rejected(self):
-        with self.assertRaisesRegex(RuntimeError, "unsupported decoder batching schema: 5"):
-            parse_profile(PROFILE_PREFIX + json.dumps({"schema": 5}))
+    def test_weighted_classifier_uses_actual_reference_lists(self):
+        source = (Path(__file__).resolve().parents[2] / "source/Lib/DecoderLib/DecCu.cpp").read_text(
+            encoding="utf-8")
+        classifier = source[source.index("McPredictionClassification mcProfileClassifyPrediction"):
+                            source.index("FusedReason fusedReasonFromMc")]
+        self.assertIn("bothLists && sliceType == B_SLICE && useWpBi", classifier)
+        self.assertIn("!bothLists && ((sliceType == P_SLICE && useWp)", classifier)
+        self.assertIn("(interDir & 1) != 0 && refIdxList0 >= 0", classifier)
+        self.assertIn("(interDir & 2) != 0 && refIdxList1 >= 0", classifier)
+        self.assertIn("if (refIdx[list] < 0) return false;", source)
+        self.assertIn("const McPredictionClassification classification = mcProfileClassifyPrediction(", source)
+
+    def test_bcw_metadata_is_global_and_ceil_divide_is_overflow_safe(self):
+        source = (Path(__file__).resolve().parents[2] / "source/Lib/DecoderLib/DecCu.cpp").read_text(
+            encoding="utf-8")
+        bcw_key = source[source.index("struct FusedBcwMetadataKey"):source.index("struct FusedCandidate")]
+        self.assertNotIn("sliceIdentity", bcw_key)
+        self.assertIn("matchesGlobalTable", bcw_key)
+        ceil_divide = source[source.index("uint64_t fusedCeilDivide"):
+                             source.index("struct FusedPictureMetadataKey")]
+        self.assertNotIn("dividend + divisor", ceil_divide)
+        self.assertIn("dividend / divisor", ceil_divide)
+        self.assertIn("dividend % divisor", ceil_divide)
+        self.assertIn("fusedCeilDivide(maximum, 2) != maximum / 2 + 1", source)
+
+    def test_lmcs_luma_uses_both_flags_and_aggregates_as_a_distinct_rejection(self):
+        source = (Path(__file__).resolve().parents[2] / "source/Lib/DecoderLib/DecCu.cpp").read_text(
+            encoding="utf-8")
+        self.assertIn("return sliceLmcsEnabled && ctuLmcsEnabled;", source)
+        self.assertIn("beginFused(lmcsLuma ? FusedReason::LMCS_LUMA : FusedReason::NUM);", source)
+        self.assertIn("{ false, false }, { true, false }, { true, true }", source)
+        first = {"fused_windows": fused_windows()}
+        second = {"fused_windows": fused_windows()}
+        for profile in (first, second):
+            for core in profile["fused_windows"]["cores"].values():
+                core["rejections"]["lmcs_luma"] = core["rejections"].pop("intra_or_plt")
+        aggregate = aggregate_fused_profiles([first, second])
+        self.assertEqual(aggregate["core_a"]["rejections"]["lmcs_luma"],
+                         {"cus": 2, "luma_pixels": 32})
+
+    def test_schema_six_and_failed_self_test_are_rejected(self):
+        with self.assertRaisesRegex(RuntimeError, "unsupported decoder batching schema: 6"):
+            parse_profile(PROFILE_PREFIX + json.dumps({"schema": 6}))
         payload = {
-            "schema": 6, "process_id": 1, "decoder_instance": 1,
+            "schema": 7, "process_id": 1, "decoder_instance": 1,
             "owner_thread_hash": 2, "report_thread_hash": 2, "hook_calls": 1,
             "thread_mismatch_hooks": 0,
             "scheduler_self_test": {"passed": False},
@@ -203,7 +243,7 @@ class DecoderBatchProfileRunnerTest(unittest.TestCase):
 
     def test_fused_rejection_and_quantile_mismatches_are_rejected(self):
         payload = {
-            "schema": 6, "process_id": 1, "decoder_instance": 1,
+            "schema": 7, "process_id": 1, "decoder_instance": 1,
             "owner_thread_hash": 2, "report_thread_hash": 2, "hook_calls": 1,
             "thread_mismatch_hooks": 0, "scheduler_self_test": self_test_marker(),
             "ibc_buffer_fills": {
@@ -225,7 +265,7 @@ class DecoderBatchProfileRunnerTest(unittest.TestCase):
     def test_missing_or_duplicate_profile_is_rejected(self):
         with self.assertRaisesRegex(RuntimeError, "exactly one"):
             parse_profile("no profile")
-        record = PROFILE_PREFIX + '{"schema":6}'
+        record = PROFILE_PREFIX + '{"schema":7}'
         with self.assertRaisesRegex(RuntimeError, "exactly one"):
             parse_profile(record + "\n" + record)
 
@@ -258,7 +298,7 @@ class DecoderBatchProfileRunnerTest(unittest.TestCase):
 
     def test_fused_transfer_mismatch_is_rejected(self):
         payload = {
-            "schema": 6, "process_id": 1, "decoder_instance": 1,
+            "schema": 7, "process_id": 1, "decoder_instance": 1,
             "owner_thread_hash": 2, "report_thread_hash": 2, "hook_calls": 1,
             "thread_mismatch_hooks": 0,
             "scheduler_self_test": self_test_marker(),

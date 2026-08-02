@@ -165,7 +165,7 @@ def parse_profile(text: str) -> dict:
     if len(records) != 1:
         raise RuntimeError(f"expected exactly one {PROFILE_PREFIX.strip()} record, found {len(records)}")
     record = records[0]
-    if record.get("schema") != 6:
+    if record.get("schema") != 7:
         raise RuntimeError(f"unsupported decoder batching schema: {record.get('schema')}")
     for field in ("process_id", "decoder_instance", "owner_thread_hash", "report_thread_hash", "hook_calls"):
         if not isinstance(record.get(field), int) or record[field] <= 0:
