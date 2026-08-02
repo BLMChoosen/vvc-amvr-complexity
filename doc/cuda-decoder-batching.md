@@ -142,9 +142,14 @@ runner to merge independent processes without inventing samples. Reference-mode 
 containing each mode are recorded separately, as are coverage, rejection, and flush reasons.
 
 The transfer model assumes decoded references and the output `Picture` mirror are already resident. Recurring H2D is
-therefore limited to explicit measurement-only POD descriptors and dense `TCoeff` payloads. Shared-once H2D is shown
-separately: grouped scan elements for each observed shape, one inverse-DCT2 matrix for each observed 1-D size, and the
-flat inverse-quant constants. These tables are amortized over the observed windows. When a CPU dependency or final
+therefore limited to explicit measurement-only POD descriptors and dense `TCoeff` payloads. Each prediction-operation
+descriptor carries destination/reference plane offsets and strides, destination position, motion vector, refIdx,
+dimensions, reference list, component/combine/interpolation flags, BCW index, and effective weights/offsets. Shared
+metadata is deduplicated once by actual identity and values: output-picture layout, slice/reference mapping, weighted
+prediction parameters, RPR scale and current/reference scaling windows, and BCW weights. WP/RPR/BCW therefore have
+explicit nonzero costs instead of being claimed as free. Shared-once H2D also includes grouped scan elements for each
+observed shape, one inverse-DCT2 matrix for each observed 1-D size, and the flat inverse-quant constants. These tables
+are amortized over the observed windows, and all byte additions/multiplications are overflow-checked. When a CPU dependency or final
 consumer ends a window, the model conservatively charges all dirty output components in that window at `sizeof(Pel)`
 as D2H. A real range-aware mirror could download less; the report keeps this conservative charge visible instead of
 hiding it in a descriptor-only estimate. The POD sizes and element sizes are versioned in each record and are not a
@@ -250,20 +255,27 @@ transform.
 
 | Row | Eligible / considered CUs | Windows | CU | TU | Component pixels | Prediction ops | Transform tasks | Estimated transfer/run |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| RA 8 | 811 / 1,372 | 98 | 7/31/63/56 | 7/31/63/56 | 1,023/8,191/16,383/10,464 | 7/31/127/88 | 15/63/255/145 | 943,504 B |
-| RA 10 | 604 / 1,213 | 103 | 3/15/63/55 | 3/15/63/55 | 511/4,095/16,383/13,056 | 7/31/127/107 | 7/63/127/159 | 828,032 B |
-| LD 8 | 540 / 1,050 | 53 | 7/31/63/52 | 7/31/63/52 | 2,047/16,383/32,767/20,928 | 15/63/127/75 | 15/127/255/141 | 988,000 B |
-| LD 10 | 594 / 1,153 | 76 | 7/31/63/56 | 7/31/63/56 | 1,023/8,191/16,383/12,960 | 7/63/127/104 | 15/63/255/165 | 985,288 B |
+| RA 8 | 811 / 1,372 | 98 | 7/31/63/56 | 7/31/63/56 | 1,023/8,191/16,383/10,464 | 7/31/127/88 | 15/63/255/145 | 1,049,460 B |
+| RA 10 | 604 / 1,213 | 103 | 3/15/63/55 | 3/15/63/55 | 511/4,095/16,383/13,056 | 7/31/127/107 | 7/63/127/159 | 934,532 B |
+| LD 8 | 540 / 1,050 | 53 | 7/31/63/52 | 7/31/63/52 | 2,047/16,383/32,767/20,928 | 15/63/127/75 | 15/127/255/141 | 1,087,744 B |
+| LD 10 | 594 / 1,153 | 76 | 7/31/63/56 | 7/31/63/56 | 1,023/8,191/16,383/12,960 | 7/63/127/104 | 15/63/255/165 | 1,099,528 B |
 
 Across the four independent runs there were 330 windows and 2,549 eligible of 4,788 considered CUs. Recurring
-descriptor H2D was 264,248 bytes, qcoeff H2D was 2,194,176 bytes, per-run shared tables summed to 129,888 bytes, and
-the conservative dirty-boundary D2H charge was 1,156,512 bytes, for 3,744,824 estimated transfer bytes across the
+descriptor H2D was 686,084 bytes, qcoeff H2D was 2,194,176 bytes, per-run shared tables and metadata summed to
+134,492 bytes, and the conservative dirty-boundary D2H charge was 1,156,512 bytes, for 4,171,264 estimated transfer bytes across the
 four runs. Rejections were: 1,797 intra/palette CUs, 99 GPM, 4 affine/PROF, 263 CIIP, 50 BDOF, and 26 joint-CbCr.
 The runner-merged histogram upper bounds/exact maxima were: CU and TU `7/31/63/56`, luma pixels
 `1,023/4,095/16,383/13,952`, component pixels `1,023/8,191/16,383/20,928`, prediction operations
 `7/31/127/107`, and component-transform tasks `15/63/255/165`. Recurring per-window transfer (descriptors, qcoeff,
 and dirty D2H, excluding shared-once tables) was `8,191/32,767/131,071/128,244` bytes. The report's aggregate was
 computed by merging the emitted 65-bucket histograms, not by averaging per-row percentiles.
+
+The schema-6 runner recomputes rejection/coverage sums, flush/window sums, metric/transfer correspondence,
+shared-byte decomposition, every histogram quantile, exact-maximum bucket membership, and per-core IBC ordering. It
+rejects older schema-5 records. Before collection begins, an isolated heap-owned executable self-test exercises
+uni-to-bi batching, a mixed multi-PU CU, independent fused IBC fills, RPR Core A/Core B handling including a first CU
+after a POC boundary, WP/RPR incremental metadata costs, and whole-CU discard after a supported then unsupported TU.
+Failure aborts profiler construction; successful tests do not change the decoder instance or any emitted counters.
 
 The corpus contains no RPR, so Core A and Core B + RPR are numerically identical here; this run does not dynamically
 measure the incremental coverage of RPR. It also contains no weighted-prediction mode, IBC consumer, LMCS cache miss,
