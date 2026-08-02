@@ -131,6 +131,15 @@ actual LMCS VPDU-cache miss remain hard boundaries. Intra/palette, IBC, GPM, aff
 invalid DPB references, MTS/other transforms, scaling lists, LFNST, SBT, joint CbCr, ACT, and LMCS chroma-residual
 scaling are explicit rejection reasons.
 
+LMCS luma mapping is also outside both fused capability sets. The exact `xReconInter` predicate is preserved: only
+`slice.getLmcsEnabledFlag() && m_pcReshape->getCTUFlag()` rejects the whole CU as `lmcs_luma` and closes the preceding
+window. A slice with LMCS enabled but the current CTU flag disabled remains eligible unless another listed exclusion
+applies. POC processing runs before this rejection, so a previous-picture window is attributed to `picture_boundary`
+rather than being incorrectly merged into or flushed by the new picture's LMCS rejection.
+`DecCu::m_pcReshape` is initialized to null. The production predicate returns immediately while the slice LMCS flag
+is false without reading that pointer; if LMCS is true before reshaper initialization, profiling fails explicitly
+instead of dereferencing null. Normal decoder initialization still supplies the externally owned reshaper.
+
 Two capability sets are measured concurrently:
 
 - **Core A** accepts heterogeneous uni, identical-uni, weighted uni/bi, bi-average, and BCW plus regular DCT2 and
@@ -245,12 +254,13 @@ kernels.
 
 ## Decision status
 
-No fixed task/pixel threshold is used. Kernel launch cost, descriptor preparation, transfers, residency, and overlap
-must be benchmarked with a prototype before a break-even point can be justified. The corrected distributions are
-reported as measurements only. No decoder-inter kernel is implemented in this change; implementation or rejection is
-deferred until a prototype supplies a kernel cost model for the measured residual-bearing RA/LD 8/10 workloads.
+No fixed task/pixel threshold is used. The corrected distributions remain valid as measurements only; they do not by
+themselves imply a break-even point or future implementation work. A subsequent isolated backend-only prototype was
+executed, received a no-go decision, and was removed without integration into the production decoder. The retained
+decision and criteria for reopening are recorded in the
+[CUDA fused decoder prototype tombstone](cuda-decoder-fused-prototype.md).
 
-### Schema-6 fused-window measurement
+### Schema-7 fused-window measurement
 
 The residual-bearing 256x144, four-picture corpus was decoded again after the fused-window instrumentation. In every
 row the normal executable, profiling executable with collection disabled, and profiling executable with collection
@@ -285,12 +295,22 @@ The same executable test drives the production WP classifier for B-slice uni-L0,
 P-slice uni prediction, including `refIdx=-1` on the inactive list, operation counts, and metadata counts. It also
 proves that the same BCW entry observed through two slice identities costs exactly one metadata record and exercises
 ceiling division at `UINT64_MAX` without an overflowing pre-addition.
+LMCS eligibility is exercised as three runtime cases: slice/CTU off/off and on/off remain eligible, while on/on is
+rejected from both cores; the test also verifies that a preceding POC is closed by `picture_boundary` first.
+The lifecycle case uses a real `Reshape`, proves slice-off with a null pointer short-circuits, and requires slice-on
+with a null pointer to fail explicitly.
 Failure aborts profiler construction; successful tests do not change the decoder instance or any emitted counters.
+
+The four matrix streams contain no `lmcs_luma` rejection, so the corrected eligibility rule does not change their
+330 windows or 2,549 eligible CUs. A separate forced-LMCS encoder smoke reported `Reshape:1`, but its decoded inter
+slices still did not signal the slice/CTU on/on condition; it is not counted as dynamic `lmcs_luma` coverage. The
+on/on boundary is therefore executable focal coverage, not corpus evidence, and no reduction is invented.
 
 The corpus contains no RPR, so Core A and Core B + RPR are numerically identical here; this run does not dynamically
 measure the incremental coverage of RPR. It also contains no weighted-prediction mode, IBC consumer, LMCS cache miss,
 scaling list, MTS, LFNST, SBT, or ACT candidate. Those boundaries remain source/focal coverage, not corpus evidence.
-The windows are materially larger than the earlier per-transform-key groups, but the measurement alone does not show
-that a fused CUDA implementation is faster: kernel time, launch cost, overlap, and the conservative dirty-download
-assumption remain unmeasured. The data supports prototyping one heterogeneous fused unit before selecting thresholds;
-it does not support enabling such a path or claiming an end-to-end gain.
+The windows are materially larger than the earlier per-transform-key groups, and those Schema-7 measurements remain
+valid. They do not establish a CUDA speedup or imply additional implementation work. The subsequent backend-only
+prototype received a no-go decision and was removed, so this report does not recommend selecting thresholds, enabling
+such a path, or claiming an end-to-end gain; see the
+[prototype tombstone](cuda-decoder-fused-prototype.md).

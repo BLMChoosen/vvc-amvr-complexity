@@ -1247,9 +1247,14 @@ void DecLib::executeLoopFilters()
     tasks.reserve(static_cast<std::size_t>(std::min<std::uint64_t>(dbfPixels / 4,
                                                                    vtm::CUDA_DBF_MAX_TASKS)));
     const auto collectionStart = std::chrono::steady_clock::now();
-    m_deblockingFilter.deblockingFilterPic(cs, &tasks);
+    m_deblockingFilter.deblockingFilterPic(
+      cs, &tasks, DeblockingFilter::PictureProcessing::CollectLumaOnly);
     m_computeState->cudaContext.recordDbfDescriptorCollection(static_cast<std::uint64_t>(
       std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - collectionStart).count()));
+    // Descriptor collection is side-effect free for reconstructed samples. Complete the independent
+    // chroma phase exactly once on the CPU; luma is owned exclusively by the selected CUDA path.
+    m_deblockingFilter.deblockingFilterPic(
+      cs, nullptr, DeblockingFilter::PictureProcessing::ChromaOnly);
     if (isChromaEnabled(cs.sps->getChromaFormatIdc()))
     {
       m_computeState->cudaContext.markHostPlaneModified(mirror, 1);

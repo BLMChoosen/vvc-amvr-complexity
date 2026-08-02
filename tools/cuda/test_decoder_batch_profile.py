@@ -217,7 +217,18 @@ class DecoderBatchProfileRunnerTest(unittest.TestCase):
     def test_lmcs_luma_uses_both_flags_and_aggregates_as_a_distinct_rejection(self):
         source = (Path(__file__).resolve().parents[2] / "source/Lib/DecoderLib/DecCu.cpp").read_text(
             encoding="utf-8")
+        header = (Path(__file__).resolve().parents[2] / "source/Lib/DecoderLib/DecCu.h").read_text(
+            encoding="utf-8")
         self.assertIn("return sliceLmcsEnabled && ctuLmcsEnabled;", source)
+        lifecycle = source[source.index("bool fusedLmcsLumaActive"):
+                           source.index("bool mcProfileIbcFillObservable")]
+        self.assertLess(lifecycle.index("if (!sliceLmcsEnabled) return false;"),
+                        lifecycle.index("reshape->getCTUFlag()"))
+        self.assertIn("if (reshape == nullptr) THROW", lifecycle)
+        self.assertIn("m_pcReshape = nullptr;", header)
+        self.assertIn("fusedLmcsLumaActive(cu.slice->getLmcsEnabledFlag(), m_pcReshape)", source)
+        self.assertIn("fusedLmcsLumaActive(false, nullptr)", source)
+        self.assertIn("fusedLmcsLumaActive(true, nullptr)", source)
         self.assertIn("beginFused(lmcsLuma ? FusedReason::LMCS_LUMA : FusedReason::NUM);", source)
         self.assertIn("{ false, false }, { true, false }, { true, true }", source)
         first = {"fused_windows": fused_windows()}

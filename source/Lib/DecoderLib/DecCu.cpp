@@ -208,13 +208,20 @@ static_assert(mcProfileModeReason(true, false) == McProfileReason::IBC,
 static_assert(mcProfileModeReason(false, false) == McProfileReason::INTRA_OR_PLT,
               "non-inter CUs must retain their dedicated rejection");
 
-constexpr bool fusedLmcsLumaActive(const bool sliceLmcsEnabled, const bool ctuLmcsEnabled)
+constexpr bool fusedLmcsLumaFlagsActive(const bool sliceLmcsEnabled, const bool ctuLmcsEnabled)
 {
   return sliceLmcsEnabled && ctuLmcsEnabled;
 }
-static_assert(!fusedLmcsLumaActive(false, false) && !fusedLmcsLumaActive(true, false)
-                && fusedLmcsLumaActive(true, true),
+static_assert(!fusedLmcsLumaFlagsActive(false, false) && !fusedLmcsLumaFlagsActive(true, false)
+                && fusedLmcsLumaFlagsActive(true, true),
               "fused LMCS-luma eligibility must require both the slice and CTU flags");
+
+bool fusedLmcsLumaActive(const bool sliceLmcsEnabled, Reshape *reshape)
+{
+  if (!sliceLmcsEnabled) return false;
+  if (reshape == nullptr) THROW("decoder fused-batch profiler requires an initialized reshaper for LMCS");
+  return fusedLmcsLumaFlagsActive(true, reshape->getCTUFlag());
+}
 
 constexpr bool mcProfileIbcFillObservable(const bool spsIbcEnabled)
 {
@@ -1491,9 +1498,21 @@ struct DecCu::McProfile
 
   static bool runFusedSchedulerSelfTests()
   {
-    if (fusedLmcsLumaActive(false, false) || fusedLmcsLumaActive(true, false)
-        || !fusedLmcsLumaActive(true, true))
-      return false;
+    Reshape lmcsReshape;
+    lmcsReshape.setCTUFlag(false);
+    if (fusedLmcsLumaActive(false, nullptr) || fusedLmcsLumaActive(true, &lmcsReshape)) return false;
+    lmcsReshape.setCTUFlag(true);
+    if (!fusedLmcsLumaActive(true, &lmcsReshape)) return false;
+    bool nullReshapeRejected = false;
+    try
+    {
+      (void) fusedLmcsLumaActive(true, nullptr);
+    }
+    catch (...)
+    {
+      nullReshapeRejected = true;
+    }
+    if (!nullReshapeRejected) return false;
 
     const uint64_t maximum = std::numeric_limits<uint64_t>::max();
     if (fusedCeilDivide(maximum, 1) != maximum
@@ -1561,7 +1580,9 @@ struct DecCu::McProfile
     for (size_t index = 0; index < lmcsFlags.size(); ++index)
     {
       lmcsEligibility->prepareCu(index == 2 ? 1 : 0, 64, McProfileReason::NUM, false);
-      const bool active = fusedLmcsLumaActive(lmcsFlags[index][0], lmcsFlags[index][1]);
+      lmcsReshape.setCTUFlag(lmcsFlags[index][1]);
+      const bool active = fusedLmcsLumaActive(lmcsFlags[index][0],
+                                               lmcsFlags[index][0] ? &lmcsReshape : nullptr);
       lmcsEligibility->beginFusedCandidate(candidate(FusedRefMode::UNI, 1, 1),
                                             active ? FusedReason::LMCS_LUMA : FusedReason::NUM);
       lmcsEligibility->finishFusedCandidate();
@@ -2162,7 +2183,7 @@ int DecCu::xProfilePrepareMcCu(CodingUnit &cu)
   fused.sliceMetadata.numRefList1 = cu.slice->getNumRefIdx(REF_PIC_LIST_1);
   fused.sliceMetadata.useWp = cu.cs->pps->getUseWP();
   fused.sliceMetadata.useWpBi = cu.cs->pps->getWPBiPred();
-  const bool lmcsLuma = fusedLmcsLumaActive(cu.slice->getLmcsEnabledFlag(), m_pcReshape->getCTUFlag());
+  const bool lmcsLuma = fusedLmcsLumaActive(cu.slice->getLmcsEnabledFlag(), m_pcReshape);
   const auto beginFused = [&](const FusedReason reason)
   {
     m_mcProfile->prepareFusedCu(fused, reason);

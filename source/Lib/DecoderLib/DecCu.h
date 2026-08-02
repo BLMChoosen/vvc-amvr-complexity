@@ -69,7 +69,7 @@ public:
 
   /// destroy internal buffers
   void  decompressCtu     ( CodingStructure& cs, const UnitArea& ctuArea );
-  Reshape*          m_pcReshape;
+  Reshape*          m_pcReshape = nullptr;
   Reshape* getReshape     () { return m_pcReshape; }
   void              initDecCuReshaper(Reshape* pcReshape, ChromaFormat chromaFormatIdc);
   void destoryDecCuReshaprBuf();
