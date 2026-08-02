@@ -102,6 +102,7 @@ private:
   void xProfileIbcVpduReset();
   void xProfileIbcPreMvConsumer();
   void xProfileIbcFill(CodingUnit &cu, bool queued);
+  void xProfileFinishFusedCu();
   void xProfileTransformBlock(TransformUnit &tu, ComponentID compID);
   void xProfileInverseTransform(TransformUnit &tu, ComponentID compID, const QpParam &qp);
 #endif

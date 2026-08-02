@@ -50,10 +50,13 @@
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
+#include <limits>
 #include <mutex>
 #include <sstream>
 #include <string>
 #include <thread>
+#include <type_traits>
+#include <vector>
 #if defined(_WIN32)
 #include <process.h>
 #else
@@ -117,6 +120,69 @@ enum class McProfileReason : uint8_t
   STREAM_END,
   NUM
 };
+
+enum class FusedCore : uint8_t
+{
+  CORE_A = 0,
+  CORE_B_RPR,
+  NUM
+};
+
+enum class FusedRefMode : uint8_t
+{
+  UNI = 0,
+  IDENTICAL_UNI,
+  UNI_WEIGHTED,
+  BI_AVG,
+  BI_WEIGHTED,
+  BI_BCW,
+  NUM
+};
+
+enum class FusedReason : uint8_t
+{
+  INTRA_OR_PLT = 0,
+  IBC,
+  GPM,
+  AFFINE_OR_PROF,
+  CIIP,
+  SUB_PU,
+  DMVR,
+  BDOF,
+  INVALID_DPB_REFERENCE,
+  RPR,
+  MTS_OR_OTHER_TRANSFORM,
+  SCALING_LIST,
+  LFNST,
+  SBT,
+  JOINT_CBCR,
+  ACT,
+  LMCS_CHROMA_RESIDUAL,
+  LMCS_CACHE_DEPENDENCY,
+  IBC_BUFFER_RESET,
+  IBC_VPDU_RESET,
+  IBC_PRE_MV_CONSUMER,
+  PICTURE_BOUNDARY,
+  STREAM_END,
+  NUM
+};
+
+const char *const fusedCoreNames[] = { "core_a", "core_b_rpr" };
+const char *const fusedRefModeNames[] = {
+  "uni", "identical_uni", "uni_weighted", "bi_avg", "bi_weighted", "bi_bcw"
+};
+const char *const fusedReasonNames[] = {
+  "intra_or_plt", "ibc", "gpm", "affine_or_prof", "ciip", "sub_pu", "dmvr", "bdof",
+  "invalid_dpb", "rpr", "mts_or_other_transform", "scaling_list", "lfnst", "sbt", "joint_cbcr",
+  "act", "lmcs_chroma_residual", "lmcs_cache_dependency", "ibc_buffer_reset", "ibc_vpdu_reset",
+  "ibc_pre_mv_consumer", "picture_boundary", "stream_end"
+};
+static_assert(sizeof(fusedCoreNames) / sizeof(fusedCoreNames[0]) == static_cast<size_t>(FusedCore::NUM),
+              "fused core names are incomplete");
+static_assert(sizeof(fusedRefModeNames) / sizeof(fusedRefModeNames[0]) == static_cast<size_t>(FusedRefMode::NUM),
+              "fused reference-mode names are incomplete");
+static_assert(sizeof(fusedReasonNames) / sizeof(fusedReasonNames[0]) == static_cast<size_t>(FusedReason::NUM),
+              "fused reason names are incomplete");
 
 const char *const mcProfilePathNames[] = {
   "uni", "uni_rpr", "identical_uni", "identical_uni_rpr", "uni_weighted", "uni_weighted_rpr",
@@ -219,6 +285,28 @@ bool mcProfileIdenticalMotion(const PredictionUnit &pu)
 McProfilePath mcProfileRprVariant(const McProfilePath base, const bool rpr)
 {
   return rpr ? static_cast<McProfilePath>(static_cast<unsigned>(base) + 1) : base;
+}
+
+FusedRefMode fusedRefMode(const McProfilePath path)
+{
+  return static_cast<FusedRefMode>(static_cast<unsigned>(path) / 2);
+}
+
+FusedReason fusedReasonFromMc(const McProfileReason reason)
+{
+  switch (reason)
+  {
+  case McProfileReason::INTRA_OR_PLT: return FusedReason::INTRA_OR_PLT;
+  case McProfileReason::IBC: return FusedReason::IBC;
+  case McProfileReason::GPM: return FusedReason::GPM;
+  case McProfileReason::AFFINE_OR_PROF: return FusedReason::AFFINE_OR_PROF;
+  case McProfileReason::CIIP: return FusedReason::CIIP;
+  case McProfileReason::SUB_PU: return FusedReason::SUB_PU;
+  case McProfileReason::DMVR: return FusedReason::DMVR;
+  case McProfileReason::BDOF: return FusedReason::BDOF;
+  case McProfileReason::INVALID_DPB_REFERENCE: return FusedReason::INVALID_DPB_REFERENCE;
+  default: return FusedReason::NUM;
+  }
 }
 
 struct LogHistogram
@@ -373,6 +461,501 @@ struct TransformProfileSample
   std::array<bool, static_cast<size_t>(TransformFeature::NUM)> features{};
 };
 
+// These are measurement-only POD layouts, not a promised kernel ABI. They make the descriptor-byte model explicit
+// and reproducible while the profiler evaluates whether a fused dispatch is worth implementing.
+struct FusedCuDescriptorModel
+{
+  uint64_t outputPictureMetadataId;
+  uint64_t sliceMetadataId;
+  uint32_t destinationPlaneOffset[MAX_NUM_COMPONENT];
+  uint32_t destinationStride[MAX_NUM_COMPONENT];
+  int32_t  x;
+  int32_t  y;
+  uint16_t width;
+  uint16_t height;
+  uint16_t predictionUnitCount;
+  uint16_t transformTaskCount;
+  uint32_t flags;
+  int32_t  poc;
+};
+
+struct FusedPredictionOperationDescriptorModel
+{
+  uint64_t referenceMetadataId;
+  uint32_t destinationPlaneOffset[MAX_NUM_COMPONENT];
+  uint32_t destinationStride[MAX_NUM_COMPONENT];
+  uint32_t referencePlaneOffset[MAX_NUM_COMPONENT];
+  uint32_t referenceStride[MAX_NUM_COMPONENT];
+  int32_t  destinationX;
+  int32_t  destinationY;
+  int32_t  mvHor;
+  int32_t  mvVer;
+  int16_t  refIdx;
+  uint16_t width;
+  uint16_t height;
+  int16_t  weight[MAX_NUM_COMPONENT];
+  int16_t  offset[MAX_NUM_COMPONENT];
+  uint8_t  refList;
+  uint8_t  componentMask;
+  uint8_t  combineMode;
+  uint8_t  bcwIdx;
+  uint8_t  log2WeightDenom[MAX_NUM_COMPONENT];
+  uint8_t  interpolationFlags;
+  uint32_t flags;
+};
+
+struct FusedPictureMetadataModel
+{
+  uint64_t pictureIdentity;
+  uint64_t residentOutputHandle;
+  uint32_t planeOffset[MAX_NUM_COMPONENT];
+  uint32_t stride[MAX_NUM_COMPONENT];
+  uint32_t width[MAX_NUM_COMPONENT];
+  uint32_t height[MAX_NUM_COMPONENT];
+  int32_t  poc;
+  uint8_t  chromaFormat;
+  uint8_t  bitDepthLuma;
+  uint8_t  bitDepthChroma;
+  uint8_t  flags;
+};
+
+struct FusedSliceMetadataModel
+{
+  uint64_t sliceIdentity;
+  uint64_t pictureMetadataId;
+  uint16_t numReferences[NUM_REF_PIC_LIST_01];
+  int16_t  clipMinimum[MAX_NUM_COMPONENT];
+  int16_t  clipMaximum[MAX_NUM_COMPONENT];
+  uint8_t  sliceType;
+  uint8_t  flags;
+  uint8_t  chromaFormat;
+  uint8_t  reserved;
+};
+
+struct FusedReferenceMetadataModel
+{
+  uint64_t referenceIdentity;
+  uint64_t residentReferenceHandle;
+  uint64_t sliceMetadataId;
+  uint32_t planeOffset[MAX_NUM_COMPONENT];
+  uint32_t stride[MAX_NUM_COMPONENT];
+  uint32_t width[MAX_NUM_COMPONENT];
+  uint32_t height[MAX_NUM_COMPONENT];
+  int32_t  referencePoc;
+  int16_t  refIdx;
+  uint8_t  refList;
+  uint8_t  flags;
+};
+
+struct FusedWeightedPredictionMetadataModel
+{
+  int32_t codedWeight[MAX_NUM_COMPONENT];
+  int32_t codedOffset[MAX_NUM_COMPONENT];
+  int32_t weight[MAX_NUM_COMPONENT];
+  int32_t offset[MAX_NUM_COMPONENT];
+  int32_t shift[MAX_NUM_COMPONENT];
+  int32_t round[MAX_NUM_COMPONENT];
+  uint32_t log2WeightDenom[MAX_NUM_COMPONENT];
+  uint8_t presentMask;
+  uint8_t reserved[3];
+};
+
+struct FusedRprMetadataModel
+{
+  int32_t scaleX;
+  int32_t scaleY;
+  int32_t currentWindowLeft;
+  int32_t currentWindowRight;
+  int32_t currentWindowTop;
+  int32_t currentWindowBottom;
+  int32_t referenceWindowLeft;
+  int32_t referenceWindowRight;
+  int32_t referenceWindowTop;
+  int32_t referenceWindowBottom;
+  uint8_t currentChromaFormat;
+  uint8_t referenceChromaFormat;
+  uint8_t flags;
+  uint8_t reserved;
+};
+
+struct FusedBcwMetadataModel
+{
+  int8_t  weightList0;
+  int8_t  weightList1;
+  uint8_t bcwIdx;
+  uint8_t log2WeightBase;
+};
+
+struct FusedTransformDescriptorModel
+{
+  uint32_t coefficientOffset;
+  uint32_t residualOffset;
+  uint16_t width;
+  uint16_t height;
+  int16_t  qp;
+  uint8_t  component;
+  uint8_t  horizontalTransform;
+  uint8_t  verticalTransform;
+  uint8_t  flags;
+};
+
+static_assert(std::is_trivial<FusedCuDescriptorModel>::value &&
+                std::is_standard_layout<FusedCuDescriptorModel>::value,
+              "fused CU descriptor model must remain POD");
+static_assert(std::is_trivial<FusedPredictionOperationDescriptorModel>::value &&
+                std::is_standard_layout<FusedPredictionOperationDescriptorModel>::value,
+              "fused prediction descriptor model must remain POD");
+static_assert(std::is_trivial<FusedTransformDescriptorModel>::value &&
+                std::is_standard_layout<FusedTransformDescriptorModel>::value,
+              "fused transform descriptor model must remain POD");
+static_assert(std::is_trivial<FusedPictureMetadataModel>::value &&
+                std::is_standard_layout<FusedPictureMetadataModel>::value
+                && std::is_trivial<FusedSliceMetadataModel>::value
+                && std::is_standard_layout<FusedSliceMetadataModel>::value
+                && std::is_trivial<FusedReferenceMetadataModel>::value
+                && std::is_standard_layout<FusedReferenceMetadataModel>::value
+                && std::is_trivial<FusedWeightedPredictionMetadataModel>::value
+                && std::is_standard_layout<FusedWeightedPredictionMetadataModel>::value
+                && std::is_trivial<FusedRprMetadataModel>::value
+                && std::is_standard_layout<FusedRprMetadataModel>::value
+                && std::is_trivial<FusedBcwMetadataModel>::value
+                && std::is_standard_layout<FusedBcwMetadataModel>::value,
+              "fused shared metadata models must remain POD");
+
+uint64_t fusedCheckedAdd(const uint64_t left, const uint64_t right)
+{
+  if (right > std::numeric_limits<uint64_t>::max() - left)
+    THROW("decoder fused-batch profiler byte counter overflow");
+  return left + right;
+}
+
+uint64_t fusedCheckedMultiply(const uint64_t left, const uint64_t right)
+{
+  if (left != 0 && right > std::numeric_limits<uint64_t>::max() / left)
+    THROW("decoder fused-batch profiler byte counter overflow");
+  return left * right;
+}
+
+struct FusedPictureMetadataKey
+{
+  uintptr_t identity = 0;
+  int poc = 0;
+  unsigned width = 0;
+  unsigned height = 0;
+  unsigned chromaFormat = 0;
+  unsigned bitDepthLuma = 0;
+  unsigned bitDepthChroma = 0;
+
+  bool operator==(const FusedPictureMetadataKey &other) const
+  {
+    return identity == other.identity && poc == other.poc && width == other.width && height == other.height
+        && chromaFormat == other.chromaFormat && bitDepthLuma == other.bitDepthLuma
+        && bitDepthChroma == other.bitDepthChroma;
+  }
+};
+
+struct FusedSliceMetadataKey
+{
+  uintptr_t identity = 0;
+  uintptr_t pictureIdentity = 0;
+  int poc = 0;
+  int sliceType = 0;
+  int numRefList0 = 0;
+  int numRefList1 = 0;
+  bool useWp = false;
+  bool useWpBi = false;
+
+  bool operator==(const FusedSliceMetadataKey &other) const
+  {
+    return identity == other.identity && pictureIdentity == other.pictureIdentity && poc == other.poc
+        && sliceType == other.sliceType && numRefList0 == other.numRefList0 && numRefList1 == other.numRefList1
+        && useWp == other.useWp && useWpBi == other.useWpBi;
+  }
+};
+
+struct FusedReferenceMetadataKey
+{
+  uintptr_t sliceIdentity = 0;
+  uintptr_t referenceIdentity = 0;
+  int referencePoc = 0;
+  int refIdx = -1;
+  int refList = 0;
+  int scaleX = 0;
+  int scaleY = 0;
+  std::array<int, 4> currentWindow{};
+  std::array<int, 4> referenceWindow{};
+  std::array<int, MAX_NUM_COMPONENT> codedWeight{};
+  std::array<int, MAX_NUM_COMPONENT> codedOffset{};
+  std::array<int, MAX_NUM_COMPONENT> weight{};
+  std::array<int, MAX_NUM_COMPONENT> offset{};
+  std::array<int, MAX_NUM_COMPONENT> shift{};
+  std::array<int, MAX_NUM_COMPONENT> round{};
+  std::array<uint32_t, MAX_NUM_COMPONENT> log2WeightDenom{};
+  uint8_t bcwIdx = BCW_DEFAULT;
+  bool weighted = false;
+  bool rpr = false;
+  bool bcw = false;
+
+  bool operator==(const FusedReferenceMetadataKey &other) const
+  {
+    return sliceIdentity == other.sliceIdentity && referenceIdentity == other.referenceIdentity
+        && referencePoc == other.referencePoc && refIdx == other.refIdx && refList == other.refList
+        && scaleX == other.scaleX && scaleY == other.scaleY && currentWindow == other.currentWindow
+        && referenceWindow == other.referenceWindow && codedWeight == other.codedWeight
+        && codedOffset == other.codedOffset && weight == other.weight && offset == other.offset
+        && shift == other.shift && round == other.round && log2WeightDenom == other.log2WeightDenom
+        && bcwIdx == other.bcwIdx && weighted == other.weighted && rpr == other.rpr && bcw == other.bcw;
+  }
+};
+
+struct FusedBcwMetadataKey
+{
+  uintptr_t sliceIdentity = 0;
+  uint8_t bcwIdx = BCW_DEFAULT;
+  int8_t weightList0 = 0;
+  int8_t weightList1 = 0;
+
+  bool operator==(const FusedBcwMetadataKey &other) const
+  {
+    return sliceIdentity == other.sliceIdentity && bcwIdx == other.bcwIdx
+        && weightList0 == other.weightList0 && weightList1 == other.weightList1;
+  }
+};
+
+struct FusedCandidate
+{
+  bool active = false;
+  uint64_t cus = 0;
+  uint64_t tus = 0;
+  uint64_t lumaPixels = 0;
+  uint64_t componentPixels = 0;
+  uint64_t predictionUnits = 0;
+  uint64_t predictionOperations = 0;
+  uint64_t transformTasks = 0;
+  uint64_t descriptorBytes = 0;
+  uint64_t qcoeffBytes = 0;
+  bool rpr = false;
+  bool weighted = false;
+  bool bcw = false;
+  uint64_t rprPredictionOperations = 0;
+  FusedPictureMetadataKey pictureMetadata;
+  FusedSliceMetadataKey sliceMetadata;
+  std::vector<FusedReferenceMetadataKey> referenceMetadata;
+  std::vector<FusedBcwMetadataKey> bcwMetadata;
+  std::array<uint64_t, static_cast<size_t>(FusedRefMode::NUM)> refModes{};
+  std::array<bool, transformSizeClasses * transformSizeClasses> scanShapes{};
+  std::array<bool, transformSizeClasses> dct2Sizes{};
+  std::array<FusedReason, static_cast<size_t>(FusedCore::NUM)> rejections = {
+    FusedReason::NUM, FusedReason::NUM
+  };
+};
+
+struct FusedWindow
+{
+  uint64_t cus = 0;
+  uint64_t tus = 0;
+  uint64_t lumaPixels = 0;
+  uint64_t componentPixels = 0;
+  uint64_t predictionUnits = 0;
+  uint64_t predictionOperations = 0;
+  uint64_t transformTasks = 0;
+  uint64_t descriptorBytes = 0;
+  uint64_t qcoeffBytes = 0;
+  uint64_t dirtyDownloadBytes = 0;
+  std::array<uint64_t, static_cast<size_t>(FusedRefMode::NUM)> refModes{};
+
+  bool empty() const { return cus == 0; }
+
+  void add(const FusedCandidate &candidate)
+  {
+    cus += candidate.cus;
+    tus += candidate.tus;
+    lumaPixels += candidate.lumaPixels;
+    componentPixels += candidate.componentPixels;
+    predictionUnits += candidate.predictionUnits;
+    predictionOperations += candidate.predictionOperations;
+    transformTasks += candidate.transformTasks;
+    descriptorBytes = fusedCheckedAdd(descriptorBytes, candidate.descriptorBytes);
+    qcoeffBytes = fusedCheckedAdd(qcoeffBytes, candidate.qcoeffBytes);
+    dirtyDownloadBytes = fusedCheckedAdd(dirtyDownloadBytes,
+                                          fusedCheckedMultiply(candidate.componentPixels, sizeof(Pel)));
+    for (size_t mode = 0; mode < refModes.size(); ++mode) refModes[mode] += candidate.refModes[mode];
+  }
+};
+
+enum class FusedMetric : uint8_t
+{
+  CUS = 0,
+  TUS,
+  LUMA_PIXELS,
+  COMPONENT_PIXELS,
+  PREDICTION_OPERATIONS,
+  TRANSFORM_TASKS,
+  DESCRIPTOR_BYTES,
+  QCOEFF_BYTES,
+  DIRTY_DOWNLOAD_BYTES,
+  TOTAL_TRANSFER_BYTES,
+  NUM
+};
+
+const char *const fusedMetricNames[] = {
+  "cus", "tus", "luma_pixels", "component_pixels", "prediction_operations", "transform_tasks",
+  "descriptor_bytes", "qcoeff_bytes", "dirty_download_bytes", "total_transfer_bytes"
+};
+static_assert(sizeof(fusedMetricNames) / sizeof(fusedMetricNames[0]) == static_cast<size_t>(FusedMetric::NUM),
+              "fused metric names are incomplete");
+
+struct FusedDistribution
+{
+  std::array<LogHistogram, static_cast<size_t>(FusedMetric::NUM)> metrics;
+  std::array<uint64_t, static_cast<size_t>(FusedMetric::NUM)> totals{};
+  std::array<uint64_t, static_cast<size_t>(FusedRefMode::NUM)> refModePredictionUnits{};
+  std::array<uint64_t, static_cast<size_t>(FusedRefMode::NUM)> refModeWindows{};
+  uint64_t windows = 0;
+
+  void add(const FusedWindow &window)
+  {
+    const std::array<uint64_t, static_cast<size_t>(FusedMetric::NUM)> values = {
+      window.cus, window.tus, window.lumaPixels, window.componentPixels, window.predictionOperations,
+      window.transformTasks, window.descriptorBytes, window.qcoeffBytes, window.dirtyDownloadBytes,
+      fusedCheckedAdd(fusedCheckedAdd(window.descriptorBytes, window.qcoeffBytes), window.dirtyDownloadBytes)
+    };
+    windows++;
+    for (size_t metric = 0; metric < values.size(); ++metric)
+    {
+      metrics[metric].add(values[metric]);
+      totals[metric] = fusedCheckedAdd(totals[metric], values[metric]);
+    }
+    for (size_t mode = 0; mode < window.refModes.size(); ++mode)
+    {
+      refModePredictionUnits[mode] += window.refModes[mode];
+      if (window.refModes[mode] != 0) refModeWindows[mode]++;
+    }
+  }
+};
+
+struct FusedCoreProfile
+{
+  FusedWindow active;
+  FusedDistribution distribution;
+  std::array<uint64_t, static_cast<size_t>(FusedReason::NUM)> flushReasons{};
+  std::array<uint64_t, static_cast<size_t>(FusedReason::NUM)> rejectedCus{};
+  std::array<uint64_t, static_cast<size_t>(FusedReason::NUM)> rejectedPixels{};
+  std::array<bool, transformSizeClasses * transformSizeClasses> scanShapes{};
+  std::array<bool, transformSizeClasses> dct2Sizes{};
+  uint64_t consideredCus = 0;
+  uint64_t consideredPixels = 0;
+  uint64_t eligibleCus = 0;
+  uint64_t eligiblePixels = 0;
+  uint64_t sharedScanBytesOnce = 0;
+  uint64_t sharedMatrixBytesOnce = 0;
+  uint64_t sharedDequantBytesOnce = 0;
+  uint64_t sharedPictureBytesOnce = 0;
+  uint64_t sharedSliceBytesOnce = 0;
+  uint64_t sharedReferenceBytesOnce = 0;
+  uint64_t sharedWeightedBytesOnce = 0;
+  uint64_t sharedRprBytesOnce = 0;
+  uint64_t sharedBcwBytesOnce = 0;
+  uint64_t rprCus = 0;
+  uint64_t rprPredictionOperations = 0;
+  uint64_t weightedPredictionUnits = 0;
+  uint64_t bcwPredictionUnits = 0;
+  IbcFillModel ibcFills;
+  uint64_t ibcImmediateFills = 0;
+  uint64_t ibcBoundaryChecks = 0;
+  uint64_t ibcBoundaryViolations = 0;
+  std::vector<FusedPictureMetadataKey> seenPictures;
+  std::vector<FusedSliceMetadataKey> seenSlices;
+  std::vector<FusedReferenceMetadataKey> seenReferences;
+  std::vector<FusedReferenceMetadataKey> seenWeightedReferences;
+  std::vector<FusedReferenceMetadataKey> seenRprReferences;
+  std::vector<FusedBcwMetadataKey> seenBcwEntries;
+
+  template<typename T, typename Predicate>
+  static bool addUnique(std::vector<T> &values, const T &value, Predicate same)
+  {
+    for (const T &existing : values)
+      if (same(existing, value)) return false;
+    values.push_back(value);
+    return true;
+  }
+
+  void addSharedMetadata(const FusedCandidate &candidate)
+  {
+    if (addUnique(seenPictures, candidate.pictureMetadata,
+                  [](const FusedPictureMetadataKey &a, const FusedPictureMetadataKey &b) { return a == b; }))
+      sharedPictureBytesOnce = fusedCheckedAdd(sharedPictureBytesOnce, sizeof(FusedPictureMetadataModel));
+    if (addUnique(seenSlices, candidate.sliceMetadata,
+                  [](const FusedSliceMetadataKey &a, const FusedSliceMetadataKey &b) { return a == b; }))
+      sharedSliceBytesOnce = fusedCheckedAdd(sharedSliceBytesOnce, sizeof(FusedSliceMetadataModel));
+
+    for (const FusedReferenceMetadataKey &reference : candidate.referenceMetadata)
+    {
+      const auto sameBase = [](const FusedReferenceMetadataKey &a, const FusedReferenceMetadataKey &b)
+      {
+        return a.sliceIdentity == b.sliceIdentity && a.referenceIdentity == b.referenceIdentity
+            && a.referencePoc == b.referencePoc && a.refIdx == b.refIdx && a.refList == b.refList;
+      };
+      if (addUnique(seenReferences, reference, sameBase))
+        sharedReferenceBytesOnce = fusedCheckedAdd(sharedReferenceBytesOnce, sizeof(FusedReferenceMetadataModel));
+      if (reference.weighted
+          && addUnique(seenWeightedReferences, reference,
+                       [](const FusedReferenceMetadataKey &a, const FusedReferenceMetadataKey &b)
+                       {
+                         return a.sliceIdentity == b.sliceIdentity && a.refIdx == b.refIdx && a.refList == b.refList
+                             && a.codedWeight == b.codedWeight && a.codedOffset == b.codedOffset
+                             && a.weight == b.weight && a.offset == b.offset && a.shift == b.shift
+                             && a.round == b.round && a.log2WeightDenom == b.log2WeightDenom;
+                       }))
+        sharedWeightedBytesOnce = fusedCheckedAdd(sharedWeightedBytesOnce,
+                                                  sizeof(FusedWeightedPredictionMetadataModel));
+      if (reference.rpr
+          && addUnique(seenRprReferences, reference,
+                       [](const FusedReferenceMetadataKey &a, const FusedReferenceMetadataKey &b)
+                       {
+                         return a.sliceIdentity == b.sliceIdentity && a.referenceIdentity == b.referenceIdentity
+                             && a.refIdx == b.refIdx && a.refList == b.refList && a.scaleX == b.scaleX
+                             && a.scaleY == b.scaleY && a.currentWindow == b.currentWindow
+                             && a.referenceWindow == b.referenceWindow;
+                       }))
+        sharedRprBytesOnce = fusedCheckedAdd(sharedRprBytesOnce, sizeof(FusedRprMetadataModel));
+    }
+    for (const FusedBcwMetadataKey &bcw : candidate.bcwMetadata)
+    {
+      if (addUnique(seenBcwEntries, bcw,
+                    [](const FusedBcwMetadataKey &a, const FusedBcwMetadataKey &b) { return a == b; }))
+        sharedBcwBytesOnce = fusedCheckedAdd(sharedBcwBytesOnce, sizeof(FusedBcwMetadataModel));
+    }
+  }
+
+  void addSharedTables(const FusedCandidate &candidate)
+  {
+    addSharedMetadata(candidate);
+    if (candidate.transformTasks != 0 && sharedDequantBytesOnce == 0)
+      sharedDequantBytesOnce = sizeof(g_invQuantScales);
+    for (size_t shape = 0; shape < scanShapes.size(); ++shape)
+    {
+      if (!candidate.scanShapes[shape] || scanShapes[shape]) continue;
+      scanShapes[shape] = true;
+      const unsigned widthLog2 = static_cast<unsigned>(shape / transformSizeClasses);
+      const unsigned heightLog2 = static_cast<unsigned>(shape % transformSizeClasses);
+      const uint64_t samples = fusedCheckedMultiply(uint64_t{ 1 } << widthLog2,
+                                                     uint64_t{ 1 } << heightLog2);
+      sharedScanBytesOnce = fusedCheckedAdd(sharedScanBytesOnce,
+                                             fusedCheckedMultiply(samples, sizeof(ScanElement)));
+    }
+    for (size_t sizeLog2 = 0; sizeLog2 < dct2Sizes.size(); ++sizeLog2)
+    {
+      if (!candidate.dct2Sizes[sizeLog2] || dct2Sizes[sizeLog2]) continue;
+      dct2Sizes[sizeLog2] = true;
+      const uint64_t size = uint64_t{ 1 } << sizeLog2;
+      sharedMatrixBytesOnce = fusedCheckedAdd(sharedMatrixBytesOnce,
+                                               fusedCheckedMultiply(fusedCheckedMultiply(size, size),
+                                                                    sizeof(TMatrixCoeff)));
+    }
+  }
+};
+
 unsigned transformSizeClass(const unsigned size)
 {
   return std::min<unsigned>(floorLog2(size), transformSizeClasses - 1);
@@ -426,10 +1009,15 @@ struct DecCu::McProfile
   TransformAggregate transformTotals;
   std::array<uint64_t, static_cast<size_t>(McProfileReason::NUM)> flushReasons{};
   std::array<uint64_t, static_cast<size_t>(McProfileReason::NUM)> rejectedCus{};
+  std::array<FusedCoreProfile, static_cast<size_t>(FusedCore::NUM)> fusedCores;
+  FusedCandidate fusedCandidate;
+  std::array<bool, static_cast<size_t>(FusedCore::NUM)> lastFusedHadCandidate{};
+  std::array<bool, static_cast<size_t>(FusedCore::NUM)> lastFusedDeferredFill{};
   IbcFillModel ibcFills;
   std::mutex stateMutex;
   uint64_t processId = mcProfileProcessId();
-  uint64_t decoderInstance = mcProfileDecoderInstances.fetch_add(1, std::memory_order_relaxed) + 1;
+  uint64_t decoderInstance = 0;
+  bool schedulerSelfTestPassed = false;
   std::thread::id ownerThread;
   uint64_t ownerThreadHash = 0;
   uint64_t hookCalls = 0;
@@ -455,6 +1043,160 @@ struct DecCu::McProfile
   uint64_t ibcBoundaryViolations = 0;
   uint64_t ibcPrepareChecks = 0;
   uint64_t ibcPrepareViolations = 0;
+
+  void flushFusedCore(const size_t core, const FusedReason reason)
+  {
+    FusedCoreProfile &profile = fusedCores[core];
+    if (!profile.active.empty())
+    {
+      profile.distribution.add(profile.active);
+      profile.flushReasons[static_cast<size_t>(reason)]++;
+      profile.active = {};
+    }
+    profile.ibcBoundaryChecks++;
+    profile.ibcFills.completeInOrder();
+    if (!profile.ibcFills.boundaryIsValid()) profile.ibcBoundaryViolations++;
+  }
+
+  void flushFused(const FusedReason reason)
+  {
+    for (size_t core = 0; core < fusedCores.size(); ++core) flushFusedCore(core, reason);
+  }
+
+  void rejectFusedCandidate(const FusedReason reason, const bool coreAOnly = false)
+  {
+    if (!fusedCandidate.active) return;
+    const size_t lastCore = coreAOnly ? 1 : fusedCores.size();
+    for (size_t core = 0; core < lastCore; ++core)
+    {
+      if (fusedCandidate.rejections[core] != FusedReason::NUM) continue;
+      flushFusedCore(core, reason);
+      fusedCandidate.rejections[core] = reason;
+    }
+  }
+
+  void beginFusedCandidate(const FusedCandidate &candidate, const FusedReason rejection)
+  {
+    if (fusedCandidate.active)
+    {
+      // A prior candidate reaching this point would mean a missing post-CU hook. Keep the measurement conservative.
+      rejectFusedCandidate(FusedReason::STREAM_END);
+      finishFusedCandidate();
+    }
+    fusedCandidate = candidate;
+    fusedCandidate.active = true;
+    fusedCandidate.cus = 1;
+    fusedCandidate.descriptorBytes = fusedCheckedAdd(sizeof(FusedCuDescriptorModel),
+                                                      fusedCheckedMultiply(fusedCandidate.predictionOperations,
+                                                        sizeof(FusedPredictionOperationDescriptorModel)));
+    for (FusedCoreProfile &core : fusedCores)
+    {
+      core.consideredCus++;
+      core.consideredPixels += fusedCandidate.lumaPixels;
+    }
+    if (rejection != FusedReason::NUM) rejectFusedCandidate(rejection);
+    else if (fusedCandidate.rpr) rejectFusedCandidate(FusedReason::RPR, true);
+  }
+
+  void finishFusedCandidate()
+  {
+    if (!fusedCandidate.active) return;
+    lastFusedHadCandidate.fill(false);
+    lastFusedDeferredFill.fill(false);
+    for (size_t core = 0; core < fusedCores.size(); ++core)
+    {
+      FusedCoreProfile &profile = fusedCores[core];
+      lastFusedHadCandidate[core] = true;
+      const FusedReason rejection = fusedCandidate.rejections[core];
+      if (rejection != FusedReason::NUM)
+      {
+        profile.rejectedCus[static_cast<size_t>(rejection)]++;
+        profile.rejectedPixels[static_cast<size_t>(rejection)] += fusedCandidate.lumaPixels;
+        continue;
+      }
+      profile.active.add(fusedCandidate);
+      profile.addSharedTables(fusedCandidate);
+      profile.eligibleCus++;
+      profile.eligiblePixels += fusedCandidate.lumaPixels;
+      lastFusedDeferredFill[core] = true;
+      if (fusedCandidate.rpr)
+      {
+        profile.rprCus++;
+        profile.rprPredictionOperations += fusedCandidate.rprPredictionOperations;
+      }
+      profile.weightedPredictionUnits +=
+        fusedCandidate.refModes[static_cast<size_t>(FusedRefMode::UNI_WEIGHTED)]
+        + fusedCandidate.refModes[static_cast<size_t>(FusedRefMode::BI_WEIGHTED)];
+      profile.bcwPredictionUnits += fusedCandidate.refModes[static_cast<size_t>(FusedRefMode::BI_BCW)];
+    }
+    fusedCandidate = {};
+  }
+
+  void recordFusedTransformBlock()
+  {
+    if (!fusedCandidate.active) return;
+    fusedCandidate.tus++;
+  }
+
+  static FusedReason fusedTransformRejection(const TransformProfileSample &sample)
+  {
+    if (sample.dequantPath == DequantPath::DEPENDENT_SCALING_LIST
+        || sample.dequantPath == DequantPath::SCALAR_SCALING_LIST)
+      return FusedReason::SCALING_LIST;
+    if (sample.features[static_cast<size_t>(TransformFeature::LFNST)]) return FusedReason::LFNST;
+    if (sample.features[static_cast<size_t>(TransformFeature::SBT)]) return FusedReason::SBT;
+    if (sample.features[static_cast<size_t>(TransformFeature::JOINT_CBCR)]) return FusedReason::JOINT_CBCR;
+    if (sample.features[static_cast<size_t>(TransformFeature::ACT)]) return FusedReason::ACT;
+    if (sample.features[static_cast<size_t>(TransformFeature::LMCS)]) return FusedReason::LMCS_CHROMA_RESIDUAL;
+    if (sample.features[static_cast<size_t>(TransformFeature::MTS)]
+        || (!sample.features[static_cast<size_t>(TransformFeature::DCT2)]
+            && !sample.features[static_cast<size_t>(TransformFeature::TRANSFORM_SKIP)]))
+      return FusedReason::MTS_OR_OTHER_TRANSFORM;
+    return FusedReason::NUM;
+  }
+
+  void recordFusedInverseTransform(const TransformProfileSample &sample)
+  {
+    if (!fusedCandidate.active) return;
+    const FusedReason rejection = fusedTransformRejection(sample);
+    if (rejection != FusedReason::NUM)
+    {
+      rejectFusedCandidate(rejection);
+      return;
+    }
+    fusedCandidate.transformTasks++;
+    fusedCandidate.qcoeffBytes = fusedCheckedAdd(fusedCandidate.qcoeffBytes,
+                                                 fusedCheckedMultiply(sample.coefficients, sizeof(TCoeff)));
+    fusedCandidate.descriptorBytes = fusedCheckedAdd(fusedCandidate.descriptorBytes,
+                                                      sizeof(FusedTransformDescriptorModel));
+    const size_t shape = static_cast<size_t>(sample.widthLog2) * transformSizeClasses + sample.heightLog2;
+    fusedCandidate.scanShapes[shape] = true;
+    if (sample.features[static_cast<size_t>(TransformFeature::DCT2)])
+    {
+      fusedCandidate.dct2Sizes[sample.widthLog2] = true;
+      fusedCandidate.dct2Sizes[sample.heightLog2] = true;
+    }
+  }
+
+  void fusedDependency(const FusedReason reason, const bool rejectCurrent)
+  {
+    flushFused(reason);
+    if (rejectCurrent) rejectFusedCandidate(reason);
+  }
+
+  void prepareFusedCu(const FusedCandidate &candidate, const FusedReason rejection)
+  {
+    std::lock_guard<std::mutex> lock(stateMutex);
+    validateHookThreadLocked();
+    beginFusedCandidate(candidate, rejection);
+  }
+
+  void finishFusedCu()
+  {
+    std::lock_guard<std::mutex> lock(stateMutex);
+    validateHookThreadLocked();
+    finishFusedCandidate();
+  }
 
   void validateHookThreadLocked()
   {
@@ -528,6 +1270,7 @@ struct DecCu::McProfile
     {
       flushMc(McProfileReason::PICTURE_BOUNDARY);
       flushPipeline();
+      flushFused(FusedReason::PICTURE_BOUNDARY);
       lastPoc = poc;
       pictures++;
     }
@@ -577,12 +1320,14 @@ struct DecCu::McProfile
     std::lock_guard<std::mutex> lock(stateMutex);
     validateHookThreadLocked();
     transformBlocks[transformShapeIndex(component, widthLog2, heightLog2)].add(pixels, cbf);
+    if (component == COMPONENT_Y) recordFusedTransformBlock();
   }
 
   void recordInverseTransform(const TransformProfileSample &sample)
   {
     std::lock_guard<std::mutex> lock(stateMutex);
     validateHookThreadLocked();
+    recordFusedInverseTransform(sample);
     inverseTransformTasks++;
     inverseTransformPixels += sample.pixels;
     transformTotals.add(sample.pixels, sample.coefficients, sample.nonzeroCoefficients);
@@ -626,6 +1371,7 @@ struct DecCu::McProfile
     validateHookThreadLocked();
     flushMc(McProfileReason::LMCS_CHROMA_ADJ);
     flushPipeline();
+    fusedDependency(FusedReason::LMCS_CACHE_DEPENDENCY, true);
   }
 
   void ibcBufferBoundary(const McProfileReason reason)
@@ -634,15 +1380,163 @@ struct DecCu::McProfile
     validateHookThreadLocked();
     flushMc(reason);
     flushPipeline();
+    const FusedReason fusedReason = reason == McProfileReason::IBC_BUFFER_RESET ? FusedReason::IBC_BUFFER_RESET
+                                    : reason == McProfileReason::IBC_VPDU_RESET ? FusedReason::IBC_VPDU_RESET
+                                                                               : FusedReason::IBC_PRE_MV_CONSUMER;
+    fusedDependency(fusedReason, false);
     ibcBoundaryChecks++;
     if (!ibcFills.boundaryIsValid()) ibcBoundaryViolations++;
   }
 
-  void recordPendingIbcFill(const bool observable)
+  void recordPendingIbcFill(const bool observable, const bool legacyQueued)
   {
     std::lock_guard<std::mutex> lock(stateMutex);
     validateHookThreadLocked();
-    ibcFills.enqueue(observable);
+    if (legacyQueued) ibcFills.enqueue(observable);
+    for (size_t core = 0; core < fusedCores.size(); ++core)
+    {
+      if (!lastFusedHadCandidate[core]) continue;
+      FusedCoreProfile &profile = fusedCores[core];
+      if (lastFusedDeferredFill[core])
+      {
+        profile.ibcFills.enqueue(observable);
+      }
+      else if (observable)
+      {
+        profile.ibcImmediateFills++;
+      }
+      else
+      {
+        profile.ibcFills.enqueue(false);
+      }
+      lastFusedHadCandidate[core] = false;
+      lastFusedDeferredFill[core] = false;
+    }
+  }
+
+  static bool runFusedSchedulerSelfTests()
+  {
+    const auto candidate = [](const FusedRefMode mode, const uint64_t predictionUnits,
+                              const uint64_t predictionOperations)
+    {
+      FusedCandidate value;
+      value.lumaPixels = 64;
+      value.componentPixels = 96;
+      value.predictionUnits = predictionUnits;
+      value.predictionOperations = predictionOperations;
+      value.refModes[static_cast<size_t>(mode)] = predictionUnits;
+      value.pictureMetadata.identity = 1;
+      value.sliceMetadata.identity = 2;
+      value.sliceMetadata.pictureIdentity = 1;
+      FusedReferenceMetadataKey reference;
+      reference.sliceIdentity = 2;
+      reference.referenceIdentity = 3;
+      reference.refIdx = 0;
+      value.referenceMetadata.push_back(reference);
+      return value;
+    };
+
+    auto scheduler = std::make_unique<McProfile>(true);
+    scheduler->beginFusedCandidate(candidate(FusedRefMode::UNI, 1, 1), FusedReason::NUM);
+    scheduler->finishFusedCandidate();
+    scheduler->recordPendingIbcFill(true, false);
+    FusedCandidate bi = candidate(FusedRefMode::BI_AVG, 1, 2);
+    scheduler->beginFusedCandidate(bi, FusedReason::NUM);
+    scheduler->finishFusedCandidate();
+    scheduler->recordPendingIbcFill(true, false);
+    scheduler->fusedDependency(FusedReason::IBC_PRE_MV_CONSUMER, false);
+    for (const FusedCoreProfile &core : scheduler->fusedCores)
+    {
+      if (core.distribution.windows != 1
+          || core.distribution.totals[static_cast<size_t>(FusedMetric::CUS)] != 2
+          || core.ibcFills.totalQueued != 2 || core.ibcFills.totalApplied != 2
+          || !core.ibcFills.boundaryIsValid()) return false;
+    }
+    if (scheduler->ibcFills.totalQueued != 0) return false;
+
+    FusedCandidate mixed = candidate(FusedRefMode::UNI, 2, 3);
+    mixed.refModes[static_cast<size_t>(FusedRefMode::UNI)] = 1;
+    mixed.refModes[static_cast<size_t>(FusedRefMode::BI_AVG)] = 1;
+    scheduler->beginFusedCandidate(mixed, FusedReason::NUM);
+    scheduler->finishFusedCandidate();
+    scheduler->recordPendingIbcFill(true, false);
+    scheduler->fusedDependency(FusedReason::IBC_BUFFER_RESET, false);
+    for (const FusedCoreProfile &core : scheduler->fusedCores)
+      if (core.ibcFills.totalQueued != 3 || core.ibcFills.totalApplied != 3) return false;
+
+    auto metadata = std::make_unique<McProfile>(true);
+    FusedCandidate plain = candidate(FusedRefMode::UNI, 1, 1);
+    metadata->beginFusedCandidate(plain, FusedReason::NUM);
+    metadata->finishFusedCandidate();
+    metadata->flushFused(FusedReason::PICTURE_BOUNDARY);
+    const FusedCoreProfile &plainCore = metadata->fusedCores[static_cast<size_t>(FusedCore::CORE_B_RPR)];
+    const uint64_t plainShared = fusedCheckedAdd(fusedCheckedAdd(plainCore.sharedPictureBytesOnce,
+                                                                 plainCore.sharedSliceBytesOnce),
+                                                 plainCore.sharedReferenceBytesOnce);
+    FusedCandidate rpr = candidate(FusedRefMode::UNI_WEIGHTED, 1, 1);
+    rpr.rpr = true;
+    rpr.weighted = true;
+    rpr.rprPredictionOperations = 1;
+    rpr.referenceMetadata[0].weighted = true;
+    rpr.referenceMetadata[0].rpr = true;
+    rpr.referenceMetadata[0].scaleX = 1;
+    rpr.referenceMetadata[0].scaleY = 1;
+    rpr.referenceMetadata[0].weight[0] = 1;
+    metadata->beginFusedCandidate(rpr, FusedReason::NUM);
+    metadata->finishFusedCandidate();
+    metadata->recordPendingIbcFill(true, false);
+    metadata->flushFused(FusedReason::STREAM_END);
+    const FusedCoreProfile &rprCore = metadata->fusedCores[static_cast<size_t>(FusedCore::CORE_B_RPR)];
+    if (metadata->fusedCores[static_cast<size_t>(FusedCore::CORE_A)].ibcImmediateFills != 1
+        || rprCore.ibcFills.totalQueued != 1 || rprCore.ibcFills.totalApplied != 1
+        || rprCore.sharedWeightedBytesOnce != sizeof(FusedWeightedPredictionMetadataModel)
+        || rprCore.sharedRprBytesOnce != sizeof(FusedRprMetadataModel)
+        || fusedCheckedAdd(plainShared, fusedCheckedAdd(rprCore.sharedWeightedBytesOnce,
+                                                       rprCore.sharedRprBytesOnce)) <= plainShared)
+      return false;
+
+    auto pocBoundary = std::make_unique<McProfile>(true);
+    pocBoundary->prepareCu(0, 64, McProfileReason::NUM, false);
+    pocBoundary->beginFusedCandidate(candidate(FusedRefMode::UNI, 1, 1), FusedReason::NUM);
+    pocBoundary->finishFusedCandidate();
+    pocBoundary->recordPendingIbcFill(true, false);
+    pocBoundary->prepareCu(1, 64, McProfileReason::NUM, false);
+    const FusedCoreProfile &beforeRpr = pocBoundary->fusedCores[static_cast<size_t>(FusedCore::CORE_B_RPR)];
+    if (beforeRpr.distribution.windows != 1 || beforeRpr.ibcFills.totalApplied != 1) return false;
+    pocBoundary->beginFusedCandidate(rpr, FusedReason::NUM);
+    if (pocBoundary->fusedCandidate.rejections[static_cast<size_t>(FusedCore::CORE_A)] != FusedReason::RPR
+        || pocBoundary->fusedCandidate.rejections[static_cast<size_t>(FusedCore::CORE_B_RPR)] != FusedReason::NUM)
+      return false;
+
+    auto discard = std::make_unique<McProfile>(true);
+    discard->beginFusedCandidate(candidate(FusedRefMode::UNI, 1, 1), FusedReason::NUM);
+    TransformProfileSample supported;
+    supported.widthLog2 = 2;
+    supported.heightLog2 = 2;
+    supported.pixels = 16;
+    supported.coefficients = 16;
+    supported.features[static_cast<size_t>(TransformFeature::DCT2)] = true;
+    discard->recordFusedInverseTransform(supported);
+    TransformProfileSample unsupported = supported;
+    unsupported.features[static_cast<size_t>(TransformFeature::DCT2)] = false;
+    unsupported.features[static_cast<size_t>(TransformFeature::MTS)] = true;
+    discard->recordFusedInverseTransform(unsupported);
+    discard->finishFusedCandidate();
+    for (const FusedCoreProfile &core : discard->fusedCores)
+    {
+      if (core.eligibleCus != 0 || core.distribution.windows != 0
+          || core.rejectedCus[static_cast<size_t>(FusedReason::MTS_OR_OTHER_TRANSFORM)] != 1)
+        return false;
+    }
+    return true;
+  }
+
+  explicit McProfile(const bool isolatedSelfTest = false)
+  {
+    if (isolatedSelfTest) return;
+    decoderInstance = mcProfileDecoderInstances.fetch_add(1, std::memory_order_relaxed) + 1;
+    schedulerSelfTestPassed = runFusedSchedulerSelfTests();
+    if (!schedulerSelfTestPassed) THROW("decoder fused-batch profiler scheduler/model self-test failed");
   }
 
   static void appendDistribution(std::ostream &output, const RunDistribution &distribution)
@@ -678,19 +1572,132 @@ struct DecCu::McProfile
            << ",\"zero_cbf_pixels\":" << aggregate.zeroCbfPixels << '}';
   }
 
+  static void appendFusedMetric(std::ostream &output, const LogHistogram &histogram, const uint64_t total)
+  {
+    output << "{\"total\":" << total
+           << ",\"p50_upper\":" << histogram.quantileUpperBound(50)
+           << ",\"p90_upper\":" << histogram.quantileUpperBound(90)
+           << ",\"p99_upper\":" << histogram.quantileUpperBound(99)
+           << ",\"max\":" << histogram.maximum << ",\"log2_buckets\":[";
+    for (size_t bucket = 0; bucket < histogram.buckets.size(); ++bucket)
+    {
+      if (bucket != 0) output << ',';
+      output << histogram.buckets[bucket];
+    }
+    output << "]}";
+  }
+
+  static void appendFusedCore(std::ostream &output, const FusedCoreProfile &profile)
+  {
+    uint64_t sharedBytes = fusedCheckedAdd(profile.sharedScanBytesOnce, profile.sharedMatrixBytesOnce);
+    sharedBytes = fusedCheckedAdd(sharedBytes, profile.sharedDequantBytesOnce);
+    sharedBytes = fusedCheckedAdd(sharedBytes, profile.sharedPictureBytesOnce);
+    sharedBytes = fusedCheckedAdd(sharedBytes, profile.sharedSliceBytesOnce);
+    sharedBytes = fusedCheckedAdd(sharedBytes, profile.sharedReferenceBytesOnce);
+    sharedBytes = fusedCheckedAdd(sharedBytes, profile.sharedWeightedBytesOnce);
+    sharedBytes = fusedCheckedAdd(sharedBytes, profile.sharedRprBytesOnce);
+    sharedBytes = fusedCheckedAdd(sharedBytes, profile.sharedBcwBytesOnce);
+    output << "{\"coverage\":{\"considered_cus\":" << profile.consideredCus
+           << ",\"considered_luma_pixels\":" << profile.consideredPixels
+           << ",\"eligible_cus\":" << profile.eligibleCus
+           << ",\"eligible_luma_pixels\":" << profile.eligiblePixels
+           << ",\"rejected_cus\":" << (profile.consideredCus - profile.eligibleCus)
+           << ",\"rejected_luma_pixels\":" << (profile.consideredPixels - profile.eligiblePixels) << "}"
+           << ",\"windows\":" << profile.distribution.windows << ",\"metrics\":{";
+    for (size_t metric = 0; metric < profile.distribution.metrics.size(); ++metric)
+    {
+      if (metric != 0) output << ',';
+      output << '\"' << fusedMetricNames[metric] << "\":";
+      appendFusedMetric(output, profile.distribution.metrics[metric], profile.distribution.totals[metric]);
+    }
+    output << "},\"ref_modes\":{";
+    bool comma = false;
+    for (size_t mode = 0; mode < profile.distribution.refModePredictionUnits.size(); ++mode)
+    {
+      if (profile.distribution.refModePredictionUnits[mode] == 0) continue;
+      output << (comma ? ",\"" : "\"") << fusedRefModeNames[mode]
+             << "\":{\"prediction_units\":" << profile.distribution.refModePredictionUnits[mode]
+             << ",\"windows\":" << profile.distribution.refModeWindows[mode] << '}';
+      comma = true;
+    }
+    output << "},\"rejections\":{";
+    comma = false;
+    for (size_t reason = 0; reason < profile.rejectedCus.size(); ++reason)
+    {
+      if (profile.rejectedCus[reason] == 0) continue;
+      output << (comma ? ",\"" : "\"") << fusedReasonNames[reason] << "\":{\"cus\":"
+             << profile.rejectedCus[reason] << ",\"luma_pixels\":" << profile.rejectedPixels[reason] << '}';
+      comma = true;
+    }
+    output << "},\"flush_reasons\":{";
+    comma = false;
+    for (size_t reason = 0; reason < profile.flushReasons.size(); ++reason)
+    {
+      if (profile.flushReasons[reason] == 0) continue;
+      output << (comma ? ",\"" : "\"") << fusedReasonNames[reason] << "\":" << profile.flushReasons[reason];
+      comma = true;
+    }
+    const uint64_t recurringH2d = fusedCheckedAdd(
+      profile.distribution.totals[static_cast<size_t>(FusedMetric::DESCRIPTOR_BYTES)],
+      profile.distribution.totals[static_cast<size_t>(FusedMetric::QCOEFF_BYTES)]);
+    const uint64_t dirtyD2h = profile.distribution.totals[static_cast<size_t>(FusedMetric::DIRTY_DOWNLOAD_BYTES)];
+    const uint64_t amortizedShared = profile.distribution.windows == 0
+                                       ? 0
+                                       : (sharedBytes + profile.distribution.windows - 1) / profile.distribution.windows;
+    output << "},\"transfer_model\":{\"descriptor_h2d_bytes\":"
+           << profile.distribution.totals[static_cast<size_t>(FusedMetric::DESCRIPTOR_BYTES)]
+           << ",\"qcoeff_h2d_bytes\":"
+           << profile.distribution.totals[static_cast<size_t>(FusedMetric::QCOEFF_BYTES)]
+           << ",\"shared_scan_bytes_once\":" << profile.sharedScanBytesOnce
+           << ",\"shared_matrix_bytes_once\":" << profile.sharedMatrixBytesOnce
+           << ",\"shared_dequant_constant_bytes_once\":" << profile.sharedDequantBytesOnce
+           << ",\"shared_picture_metadata_bytes_once\":" << profile.sharedPictureBytesOnce
+           << ",\"shared_slice_metadata_bytes_once\":" << profile.sharedSliceBytesOnce
+           << ",\"shared_reference_metadata_bytes_once\":" << profile.sharedReferenceBytesOnce
+           << ",\"shared_weighted_prediction_metadata_bytes_once\":" << profile.sharedWeightedBytesOnce
+           << ",\"shared_rpr_metadata_bytes_once\":" << profile.sharedRprBytesOnce
+           << ",\"shared_bcw_metadata_bytes_once\":" << profile.sharedBcwBytesOnce
+           << ",\"shared_bytes_once\":" << sharedBytes
+           << ",\"shared_bytes_amortized_per_window\":" << amortizedShared
+           << ",\"dirty_boundary_d2h_bytes\":" << dirtyD2h
+           << ",\"estimated_h2d_bytes_run\":" << fusedCheckedAdd(recurringH2d, sharedBytes)
+           << ",\"estimated_d2h_bytes_run\":" << dirtyD2h
+           << ",\"estimated_total_transfer_bytes_run\":"
+           << fusedCheckedAdd(fusedCheckedAdd(recurringH2d, sharedBytes), dirtyD2h)
+           << "},\"feature_coverage\":{\"rpr_cus\":" << profile.rprCus
+           << ",\"rpr_prediction_operations\":" << profile.rprPredictionOperations
+           << ",\"weighted_prediction_units\":" << profile.weightedPredictionUnits
+           << ",\"bcw_prediction_units\":" << profile.bcwPredictionUnits
+           << "},\"ibc_deferred_fills\":{\"queued\":" << profile.ibcFills.totalQueued
+           << ",\"applied\":" << profile.ibcFills.totalApplied
+           << ",\"max_pending\":" << profile.ibcFills.maximumPending
+           << ",\"pending\":" << profile.ibcFills.pending
+           << ",\"immediate\":" << profile.ibcImmediateFills
+           << ",\"disabled_sps_noops\":" << profile.ibcFills.disabledSpsNoops
+           << ",\"last_queued_sequence\":" << profile.ibcFills.lastQueuedSequence
+           << ",\"last_applied_sequence\":" << profile.ibcFills.lastAppliedSequence
+           << ",\"boundary_checks\":" << profile.ibcBoundaryChecks
+           << ",\"boundary_violations\":" << profile.ibcBoundaryViolations << "}}";
+  }
+
   void report()
   {
     std::ostringstream output;
     std::lock_guard<std::mutex> stateLock(stateMutex);
+    finishFusedCandidate();
     flushMc(McProfileReason::STREAM_END);
     flushPipeline();
+    flushFused(FusedReason::STREAM_END);
     const uint64_t reportThreadHash = static_cast<uint64_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
-    output << "DECODER_BATCH_PROFILE {\"schema\":4,\"process_id\":" << processId
+    output << "DECODER_BATCH_PROFILE {\"schema\":6,\"process_id\":" << processId
            << ",\"decoder_instance\":" << decoderInstance
            << ",\"owner_thread_hash\":" << ownerThreadHash
            << ",\"report_thread_hash\":" << reportThreadHash
            << ",\"hook_calls\":" << hookCalls
            << ",\"thread_mismatch_hooks\":" << threadMismatchHooks
+           << ",\"scheduler_self_test\":{\"passed\":" << (schedulerSelfTestPassed ? "true" : "false")
+           << ",\"weighted_metadata_extra_bytes\":" << sizeof(FusedWeightedPredictionMetadataModel)
+           << ",\"rpr_metadata_extra_bytes\":" << sizeof(FusedRprMetadataModel) << "}"
            << ",\"first_poc\":" << firstPoc << ",\"last_poc\":" << lastPoc
            << ",\"pictures\":" << pictures << ",\"total_pixels\":" << totalPixels
            << ",\"eligible_pixels\":" << eligiblePixels << ",\"eligible_cus\":" << eligibleCus
@@ -789,6 +1796,31 @@ struct DecCu::McProfile
           }
         }
       }
+    }
+    output << "}}";
+    output << ",\"fused_windows\":{\"model\":\"mc_dequant_inverse_transform_reconstruction\""
+           << ",\"assumptions\":{\"references_resident\":true,\"output_mirror_resident\":true"
+           << ",\"heterogeneous_mc_paths\":true,\"heterogeneous_components\":true"
+           << ",\"heterogeneous_transform_shapes\":true,\"heterogeneous_ts_dct2\":true"
+           << ",\"dirty_output_downloaded_at_cpu_boundaries\":true}"
+           << ",\"descriptor_layout_bytes\":{\"cu\":" << sizeof(FusedCuDescriptorModel)
+           << ",\"prediction_operation\":" << sizeof(FusedPredictionOperationDescriptorModel)
+           << ",\"transform_task\":" << sizeof(FusedTransformDescriptorModel)
+           << ",\"qcoeff_element\":" << sizeof(TCoeff)
+           << ",\"pel_element\":" << sizeof(Pel)
+           << ",\"scan_element\":" << sizeof(ScanElement)
+           << ",\"matrix_element\":" << sizeof(TMatrixCoeff)
+           << "},\"shared_metadata_layout_bytes\":{\"picture\":" << sizeof(FusedPictureMetadataModel)
+           << ",\"slice\":" << sizeof(FusedSliceMetadataModel)
+           << ",\"reference\":" << sizeof(FusedReferenceMetadataModel)
+           << ",\"weighted_prediction\":" << sizeof(FusedWeightedPredictionMetadataModel)
+           << ",\"rpr\":" << sizeof(FusedRprMetadataModel)
+           << ",\"bcw\":" << sizeof(FusedBcwMetadataModel) << "},\"cores\":{";
+    for (size_t core = 0; core < fusedCores.size(); ++core)
+    {
+      if (core != 0) output << ',';
+      output << '\"' << fusedCoreNames[core] << "\":";
+      appendFusedCore(output, fusedCores[core]);
     }
     output << "}}";
     output << ",\"ibc_buffer_fills\":{\"queued\":" << ibcFills.totalQueued
@@ -927,6 +1959,9 @@ void DecCu::decompressCtu( CodingStructure& cs, const UnitArea& ctuArea )
         THROW( "Invalid prediction mode" );
         break;
       }
+#if VTM_ENABLE_DECODER_BATCH_PROFILING
+      xProfileFinishFusedCu();
+#endif
 
       m_pcInterPred->xFillIBCBuffer(currCU);
 #if VTM_ENABLE_DECODER_BATCH_PROFILING
@@ -947,9 +1982,38 @@ int DecCu::xProfilePrepareMcCu(CodingUnit &cu)
   if (!m_mcProfile || !cu.Y().valid()) return -1;
 
   const uint64_t pixels = static_cast<uint64_t>(cu.Y().width) * static_cast<uint64_t>(cu.Y().height);
+  uint64_t componentPixels = 0;
+  for (unsigned component = 0; component < getNumberValidComponents(cu.chromaFormat); ++component)
+  {
+    const CompArea &area = cu.blocks[component];
+    if (area.valid()) componentPixels += static_cast<uint64_t>(area.width) * static_cast<uint64_t>(area.height);
+  }
+  FusedCandidate fused;
+  fused.lumaPixels = pixels;
+  fused.componentPixels = componentPixels;
+  fused.pictureMetadata.identity = reinterpret_cast<uintptr_t>(cu.cs->picture);
+  fused.pictureMetadata.poc = cu.slice->getPOC();
+  fused.pictureMetadata.width = cu.cs->pps->getPicWidthInLumaSamples();
+  fused.pictureMetadata.height = cu.cs->pps->getPicHeightInLumaSamples();
+  fused.pictureMetadata.chromaFormat = static_cast<unsigned>(cu.chromaFormat);
+  fused.pictureMetadata.bitDepthLuma = cu.cs->sps->getBitDepth(ChannelType::LUMA);
+  fused.pictureMetadata.bitDepthChroma = cu.cs->sps->getBitDepth(ChannelType::CHROMA);
+  fused.sliceMetadata.identity = reinterpret_cast<uintptr_t>(cu.slice);
+  fused.sliceMetadata.pictureIdentity = fused.pictureMetadata.identity;
+  fused.sliceMetadata.poc = cu.slice->getPOC();
+  fused.sliceMetadata.sliceType = static_cast<int>(cu.slice->getSliceType());
+  fused.sliceMetadata.numRefList0 = cu.slice->getNumRefIdx(REF_PIC_LIST_0);
+  fused.sliceMetadata.numRefList1 = cu.slice->getNumRefIdx(REF_PIC_LIST_1);
+  fused.sliceMetadata.useWp = cu.cs->pps->getUseWP();
+  fused.sliceMetadata.useWpBi = cu.cs->pps->getWPBiPred();
+  const auto beginFused = [&](const FusedReason reason)
+  {
+    m_mcProfile->prepareFusedCu(fused, reason);
+  };
   const auto reject = [&](const McProfileReason reason, const bool reconstructionDependency)
   {
     m_mcProfile->prepareCu(cu.slice->getPOC(), pixels, reason, reconstructionDependency);
+    beginFused(fusedReasonFromMc(reason));
     return -1;
   };
 
@@ -971,6 +2035,7 @@ int DecCu::xProfilePrepareMcCu(CodingUnit &cu)
   const bool chroma = isChromaEnabled(cu.chromaFormat) && cu.Cb().valid();
   const bool directList0 = !(luma && (chroma || !isChromaEnabled(cu.chromaFormat)));
   int cuPath = -1;
+  bool mixedEffectivePath = false;
   for (auto &pu : CU::traversePUs(cu))
   {
     if (pu.ciipFlag)
@@ -1052,17 +2117,100 @@ int DecCu::xProfilePrepareMcCu(CodingUnit &cu)
     const int pathIndex = static_cast<int>(path);
     if (cuPath >= 0 && cuPath != pathIndex)
     {
-      return reject(McProfileReason::MIXED_EFFECTIVE_PATH, false);
+      mixedEffectivePath = true;
     }
-    cuPath = pathIndex;
+    if (cuPath < 0) cuPath = pathIndex;
+    const FusedRefMode mode = fusedRefMode(path);
+    fused.refModes[static_cast<size_t>(mode)]++;
+    fused.predictionUnits++;
+    const bool weighted = mode == FusedRefMode::UNI_WEIGHTED || mode == FusedRefMode::BI_WEIGHTED;
+    const bool bcw = mode == FusedRefMode::BI_BCW;
+    fused.weighted = fused.weighted || weighted;
+    fused.bcw = fused.bcw || bcw;
+
+    std::array<bool, NUM_REF_PIC_LIST_01> effectiveLists{};
+    if (directList0 || mode == FusedRefMode::IDENTICAL_UNI)
+    {
+      effectiveLists[REF_PIC_LIST_0] = true;
+    }
+    else if (mode == FusedRefMode::BI_AVG || mode == FusedRefMode::BI_WEIGHTED || mode == FusedRefMode::BI_BCW)
+    {
+      effectiveLists[REF_PIC_LIST_0] = effectiveLists[REF_PIC_LIST_1] = true;
+    }
+    else
+    {
+      for (int list = 0; list < NUM_REF_PIC_LIST_01; ++list)
+        effectiveLists[list] = (pu.interDir & (1 << list)) != 0;
+    }
+
+    for (int list = 0; list < NUM_REF_PIC_LIST_01; ++list)
+    {
+      if (!effectiveLists[list]) continue;
+      const RefPicList refList = static_cast<RefPicList>(list);
+      const int refIdx = pu.refIdx[list];
+      Picture *refPic = cu.slice->getRefPic(refList, refIdx);
+      FusedReferenceMetadataKey reference;
+      reference.sliceIdentity = fused.sliceMetadata.identity;
+      reference.referenceIdentity = reinterpret_cast<uintptr_t>(refPic);
+      reference.referencePoc = refPic->poc;
+      reference.refIdx = refIdx;
+      reference.refList = list;
+      reference.weighted = weighted;
+      reference.rpr = refPic->isRefScaled(cu.cs->sps, cu.cs->pps);
+      reference.bcw = bcw;
+      reference.bcwIdx = cu.bcwIdx;
+      const ScalingRatio &ratio = cu.slice->getScalingRatio(refList, refIdx);
+      reference.scaleX = ratio.x;
+      reference.scaleY = ratio.y;
+      const Window &currentWindow = cu.cs->pps->getScalingWindow();
+      const Window &referenceWindow = refPic->getScalingWindow();
+      reference.currentWindow = { currentWindow.getWindowLeftOffset(), currentWindow.getWindowRightOffset(),
+                                  currentWindow.getWindowTopOffset(), currentWindow.getWindowBottomOffset() };
+      reference.referenceWindow = { referenceWindow.getWindowLeftOffset(), referenceWindow.getWindowRightOffset(),
+                                    referenceWindow.getWindowTopOffset(), referenceWindow.getWindowBottomOffset() };
+      if (weighted)
+      {
+        const WPScalingParam *wp = cu.slice->getWpScaling(refList, refIdx);
+        for (unsigned component = 0; component < MAX_NUM_COMPONENT; ++component)
+        {
+          reference.codedWeight[component] = wp[component].codedWeight;
+          reference.codedOffset[component] = wp[component].codedOffset;
+          reference.weight[component] = wp[component].w;
+          reference.offset[component] = wp[component].offset;
+          reference.shift[component] = wp[component].shift;
+          reference.round[component] = wp[component].round;
+          reference.log2WeightDenom[component] = wp[component].log2WeightDenom;
+        }
+      }
+      fused.referenceMetadata.push_back(reference);
+      fused.predictionOperations++;
+      if (reference.rpr)
+      {
+        fused.rpr = true;
+        fused.rprPredictionOperations++;
+      }
+    }
+    if (bcw)
+    {
+      FusedBcwMetadataKey bcwKey;
+      bcwKey.sliceIdentity = fused.sliceMetadata.identity;
+      bcwKey.bcwIdx = cu.bcwIdx;
+      bcwKey.weightList0 = getBcwWeight(cu.bcwIdx, REF_PIC_LIST_0);
+      bcwKey.weightList1 = getBcwWeight(cu.bcwIdx, REF_PIC_LIST_1);
+      fused.bcwMetadata.push_back(bcwKey);
+    }
   }
 
   if (cuPath < 0)
   {
-    return reject(McProfileReason::MIXED_EFFECTIVE_PATH, false);
+    m_mcProfile->prepareCu(cu.slice->getPOC(), pixels, McProfileReason::MIXED_EFFECTIVE_PATH, false);
+    beginFused(FusedReason::SUB_PU);
+    return -1;
   }
-  m_mcProfile->prepareCu(cu.slice->getPOC(), pixels, McProfileReason::NUM, false);
-  return cuPath;
+  m_mcProfile->prepareCu(cu.slice->getPOC(), pixels,
+                         mixedEffectivePath ? McProfileReason::MIXED_EFFECTIVE_PATH : McProfileReason::NUM, false);
+  beginFused(FusedReason::NUM);
+  return mixedEffectivePath ? -1 : cuPath;
 }
 
 void DecCu::xProfileQueueMcCu(CodingUnit &cu, const int path)
@@ -1094,8 +2242,13 @@ void DecCu::xProfileIbcPreMvConsumer()
 
 void DecCu::xProfileIbcFill(CodingUnit &cu, const bool queued)
 {
-  if (!m_mcProfile || !queued) return;
-  m_mcProfile->recordPendingIbcFill(mcProfileIbcFillObservable(cu.slice->getSPS()->getIBCFlag()));
+  if (!m_mcProfile) return;
+  m_mcProfile->recordPendingIbcFill(mcProfileIbcFillObservable(cu.slice->getSPS()->getIBCFlag()), queued);
+}
+
+void DecCu::xProfileFinishFusedCu()
+{
+  if (m_mcProfile) m_mcProfile->finishFusedCu();
 }
 
 void DecCu::xProfileTransformBlock(TransformUnit &tu, const ComponentID compID)

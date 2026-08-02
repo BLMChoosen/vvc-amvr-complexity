@@ -2762,66 +2762,6 @@ bool CudaContext::computeQpaBatch(const CudaMirrorHandle sourceHandle, const Cud
 #endif
 }
 
-bool CudaContext::computeDecoderTransformBatch(const CudaDecoderTransformBatch &batch)
-{
-#if VTM_ENABLE_CUDA
-  if (m_impl->runtime == nullptr || batch.tasks == nullptr || batch.quantizedCoefficients == nullptr
-      || batch.prediction == nullptr || batch.output == nullptr || batch.taskCount == 0
-      || batch.taskCount > CUDA_MAX_DECODER_TRANSFORM_TASKS
-      || batch.coefficientCount > CUDA_MAX_DECODER_TRANSFORM_SAMPLES
-      || batch.predictionCount > CUDA_MAX_DECODER_TRANSFORM_SAMPLES
-      || batch.outputCount > CUDA_MAX_DECODER_TRANSFORM_SAMPLES)
-  {
-    return false;
-  }
-  for (std::uint32_t index = 0; index < batch.taskCount; ++index)
-  {
-    const CudaDecoderTransformTask &task = batch.tasks[index];
-    const std::uint64_t samples = static_cast<std::uint64_t>(task.width) * task.height;
-    const bool powerOfTwo = task.width != 0 && task.height != 0
-                         && (task.width & (task.width - 1)) == 0 && (task.height & (task.height - 1)) == 0;
-    if (!powerOfTwo || task.width > 32 || task.height > 32 || task.width < 2 || task.height < 2
-        || task.mode > CudaDecoderTransformMode::TransformSkip || task.dependentQuant > 1
-        || task.dequantShift < -31 || task.dequantShift > 62
-        || (task.mode == CudaDecoderTransformMode::Dct2
-            && (task.firstTransformShift == 0 || task.firstTransformShift > 62
-                || task.secondTransformShift == 0 || task.secondTransformShift > 62))
-        || task.inverseQuantScale <= 0 || task.coefficientMinimum > task.coefficientMaximum
-        || task.residualMinimum > task.residualMaximum || task.sampleMinimum > task.sampleMaximum
-        || static_cast<std::uint64_t>(task.coefficientOffset) + samples > batch.coefficientCount
-        || static_cast<std::uint64_t>(task.predictionOffset) + samples > batch.predictionCount
-        || static_cast<std::uint64_t>(task.outputOffset) + samples > batch.outputCount
-        || (task.dependentQuant && (batch.scan == nullptr
-             || static_cast<std::uint64_t>(task.scanOffset) + samples > batch.scanCount))
-        || (task.mode == CudaDecoderTransformMode::Dct2
-            && (batch.matrices == nullptr
-                || static_cast<std::uint64_t>(task.horizontalMatrixOffset) + task.width * task.width
-                     > batch.matrixCoefficientCount
-                || static_cast<std::uint64_t>(task.verticalMatrixOffset) + task.height * task.height
-                     > batch.matrixCoefficientCount)))
-    {
-      return false;
-    }
-  }
-  requireRuntime(m_impl.get());
-  cuda_backend::computeDecoderTransformBatch(m_impl->runtime, batch);
-  return true;
-#else
-  (void) batch;
-  return false;
-#endif
-}
-
-std::uint64_t CudaContext::decoderTransformBatchDispatchCount() const
-{
-#if VTM_ENABLE_CUDA
-  requireRuntime(m_impl.get());
-  return cuda_backend::decoderTransformBatchDispatchCount(m_impl->runtime);
-#else
-  return 0;
-#endif
-}
-
 std::uint64_t CudaContext::distortionBatchDispatchCount() const
 {
 #if VTM_ENABLE_CUDA

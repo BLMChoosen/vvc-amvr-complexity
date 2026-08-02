@@ -23,7 +23,7 @@ compile definition is public only in the profiling tree because `DecCu` is embed
 consumer must see the same class layout.
 
 Even in a profiling build, collection is disabled unless `VTM_DECODER_BATCH_PROFILE=1` is present. Output is one
-stable line of JSON prefixed with `DECODER_BATCH_PROFILE`. Schema 3 identifies the process, decoder instance, actual
+stable line of JSON prefixed with `DECODER_BATCH_PROFILE`. Schema 6 identifies the process, decoder instance, actual
 owner and reporting threads, hook count, thread-mismatch count, first/last POC, and picture count. Every hook locks
 the per-instance state and compares the real `std::thread::id` with the first hook owner, so a handoff is both race-free
 and visible. The complete JSON line is assembled in memory and emitted with one `fwrite` while holding a process-wide
@@ -89,6 +89,13 @@ derivation may consume IBC state before `xReconInter`. The later prepare/classif
 effective flush. The JSON records queued/applied counts, maximum pending depth, sequence numbers, boundary and prepare
 checks/violations, and pending-at-report; the runner rejects any order or boundary violation.
 
+The fused scheduler has a separate deferred-fill queue for each capability core, independent of whether the older
+same-path model queued that CU. Every fused-eligible CU records exactly one post-reconstruction fill, including a CU
+whose PUs use mixed supported paths. At every consumer/reset/picture/stream boundary, each core first closes its
+window and replays its fills in CU order. An RPR CU is immediate for Core A because that core rejects it, while the
+same fill is deferred for Core B + RPR. Schema 6 exposes queued/applied counts, sequence numbers, maximum pending
+depth, immediate fills, disabled-SPS no-ops, boundary checks, violations, and pending fills separately for both cores.
+
 When `SPS::getIBCFlag()` is false, these buffer writes cannot be consumed by IBC and are modeled as semantically
 unobservable no-ops. The same exact predicate suppresses reset boundaries, avoiding false batch fragmentation. A
 compile-time model assertion enqueues two fills without an intervening flush, completes both in order, checks the
@@ -102,6 +109,46 @@ current CPU decoder still executes its physical fill immediately after each CU.
 The same probe records actual nonzero inter `invTransformNxN` component calls and ordinary inter reconstruction CUs.
 Those distributions also cross CTUs and rows, but are flushed before consumers that require reconstructed samples and
 at picture boundaries. IBC operations are excluded from these candidate streams.
+
+## Fused MC + residual + reconstruction windows
+
+Schema 6 adds a second, independent scheduler model for one future heterogeneous dispatch containing motion
+compensation, dequantization/inverse transform, and reconstruction. It does not change the legacy per-path and
+per-transform-key measurements. A fused CU candidate is opened after motion derivation, accumulates every logical TU
+and every normative component `invTransformNxN` call during `xReconInter`, and is committed only after reconstruction.
+If any PU or TU is unsupported, the previous window is closed and the entire current CU is rejected before any of its
+work is counted. There is no partial-CU coverage.
+
+The fused model deliberately does **not** close a window when uni/identical/weighted/bi-average/BCW mode changes, when
+RPR status changes in Core B, or when component, transform width/height, or supported transform type changes. Regular
+DCT2 and transform skip can coexist in one window. It closes only for a real reconstructed-pixel dependency, an
+unsupported feature, a POC boundary, or stream end. The already-audited IBC pre-MV/deferred-fill/reset points and an
+actual LMCS VPDU-cache miss remain hard boundaries. Intra/palette, IBC, GPM, affine/PROF, CIIP, sub-PU, DMVR, BDOF,
+invalid DPB references, MTS/other transforms, scaling lists, LFNST, SBT, joint CbCr, ACT, and LMCS chroma-residual
+scaling are explicit rejection reasons.
+
+Two capability sets are measured concurrently:
+
+- **Core A** accepts heterogeneous uni, identical-uni, weighted uni/bi, bi-average, and BCW plus regular DCT2 and
+  transform skip, but rejects RPR and all exclusions above.
+- **Core B + RPR** is identical except that scaled-reference prediction is accepted. It still does not model the
+  other excluded tools.
+
+Each completed window contributes constant-memory logarithmic histograms for logical CUs, logical TUs (one count at
+the luma block of each inter TU), luma and all-component pixels, reference prediction operations, normative
+component-transform tasks, descriptor bytes, quantized-coefficient bytes, dirty-boundary downloads, and total
+transfer bytes. The JSON retains all 65 histogram buckets, totals, maximum, and p50/p90/p99 upper bounds, allowing the
+runner to merge independent processes without inventing samples. Reference-mode totals and the number of windows
+containing each mode are recorded separately, as are coverage, rejection, and flush reasons.
+
+The transfer model assumes decoded references and the output `Picture` mirror are already resident. Recurring H2D is
+therefore limited to explicit measurement-only POD descriptors and dense `TCoeff` payloads. Shared-once H2D is shown
+separately: grouped scan elements for each observed shape, one inverse-DCT2 matrix for each observed 1-D size, and the
+flat inverse-quant constants. These tables are amortized over the observed windows. When a CPU dependency or final
+consumer ends a window, the model conservatively charges all dirty output components in that window at `sizeof(Pel)`
+as D2H. A real range-aware mirror could download less; the report keeps this conservative charge visible instead of
+hiding it in a descriptor-only estimate. The POD sizes and element sizes are versioned in each record and are not a
+promised kernel ABI.
 
 ## Reproducible residual-bearing matrix
 
@@ -155,12 +202,12 @@ the table did not change from the preceding corrected report. An intermediate me
 unobservable disabled-SPS buffer resets produced smaller runs and was discarded. IBC pending-fill and LMCS cache
 boundary coverage is therefore static/focal in this corpus, not dynamic codec coverage. The runner additionally
 launched two profiling decoder processes concurrently on RA 8.
-Both complete schema-4 records parsed independently, their `(process_id, decoder_instance)` identities were distinct,
+Both complete schema-6 records parsed independently, their `(process_id, decoder_instance)` identities were distinct,
 their owner-thread mismatch counters were zero, and both decoded hashes matched the RA 8 hash above.
 
 ### Transform/dequant coverage preflight
 
-Schema 4 profiles each physical inter `invTransformNxN` call by component, transform size, effective transform,
+Schema 6 retains profiling of each physical inter `invTransformNxN` call by component, transform size, effective transform,
 dequant path, QP, coefficient count, nonzero coefficient count, and the relevant fallback features. It also records
 CBF/non-CBF block counts and potential per-key batches inside each existing reconstruction-dependency window. This
 instrumentation remains compile-time gated and is absent from the normal build.
@@ -191,3 +238,37 @@ No fixed task/pixel threshold is used. Kernel launch cost, descriptor preparatio
 must be benchmarked with a prototype before a break-even point can be justified. The corrected distributions are
 reported as measurements only. No decoder-inter kernel is implemented in this change; implementation or rejection is
 deferred until a prototype supplies a kernel cost model for the measured residual-bearing RA/LD 8/10 workloads.
+
+### Schema-6 fused-window measurement
+
+The residual-bearing 256x144, four-picture corpus was decoded again after the fused-window instrumentation. In every
+row the normal executable, profiling executable with collection disabled, and profiling executable with collection
+enabled produced the same decoded SHA-256 shown in the earlier table. Values below are in `p50/p90/p99/max` order:
+the three percentiles are upper bounds of logarithmic buckets, while `max` is exact. Consequently a percentile upper
+bound can be greater than the exact maximum. `TU` is a logical inter TU; `transform` is a nonzero normative component
+transform.
+
+| Row | Eligible / considered CUs | Windows | CU | TU | Component pixels | Prediction ops | Transform tasks | Estimated transfer/run |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| RA 8 | 811 / 1,372 | 98 | 7/31/63/56 | 7/31/63/56 | 1,023/8,191/16,383/10,464 | 7/31/127/88 | 15/63/255/145 | 943,504 B |
+| RA 10 | 604 / 1,213 | 103 | 3/15/63/55 | 3/15/63/55 | 511/4,095/16,383/13,056 | 7/31/127/107 | 7/63/127/159 | 828,032 B |
+| LD 8 | 540 / 1,050 | 53 | 7/31/63/52 | 7/31/63/52 | 2,047/16,383/32,767/20,928 | 15/63/127/75 | 15/127/255/141 | 988,000 B |
+| LD 10 | 594 / 1,153 | 76 | 7/31/63/56 | 7/31/63/56 | 1,023/8,191/16,383/12,960 | 7/63/127/104 | 15/63/255/165 | 985,288 B |
+
+Across the four independent runs there were 330 windows and 2,549 eligible of 4,788 considered CUs. Recurring
+descriptor H2D was 264,248 bytes, qcoeff H2D was 2,194,176 bytes, per-run shared tables summed to 129,888 bytes, and
+the conservative dirty-boundary D2H charge was 1,156,512 bytes, for 3,744,824 estimated transfer bytes across the
+four runs. Rejections were: 1,797 intra/palette CUs, 99 GPM, 4 affine/PROF, 263 CIIP, 50 BDOF, and 26 joint-CbCr.
+The runner-merged histogram upper bounds/exact maxima were: CU and TU `7/31/63/56`, luma pixels
+`1,023/4,095/16,383/13,952`, component pixels `1,023/8,191/16,383/20,928`, prediction operations
+`7/31/127/107`, and component-transform tasks `15/63/255/165`. Recurring per-window transfer (descriptors, qcoeff,
+and dirty D2H, excluding shared-once tables) was `8,191/32,767/131,071/128,244` bytes. The report's aggregate was
+computed by merging the emitted 65-bucket histograms, not by averaging per-row percentiles.
+
+The corpus contains no RPR, so Core A and Core B + RPR are numerically identical here; this run does not dynamically
+measure the incremental coverage of RPR. It also contains no weighted-prediction mode, IBC consumer, LMCS cache miss,
+scaling list, MTS, LFNST, SBT, or ACT candidate. Those boundaries remain source/focal coverage, not corpus evidence.
+The windows are materially larger than the earlier per-transform-key groups, but the measurement alone does not show
+that a fused CUDA implementation is faster: kernel time, launch cost, overlap, and the conservative dirty-download
+assumption remain unmeasured. The data supports prototyping one heterogeneous fused unit before selecting thresholds;
+it does not support enabling such a path or claiming an end-to-end gain.

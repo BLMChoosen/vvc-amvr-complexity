@@ -7,7 +7,6 @@ add_library( ${LIB_NAME} STATIC
   ../CommonLib/CudaDeblocking.h
   ../CommonLib/CudaLoopFilterChain.h
   CudaDistortion.h
-  CudaDecoderTransform.h
   CudaQpa.h
   CudaContext.cpp
   CudaContext.h

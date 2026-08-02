@@ -165,13 +165,20 @@ def parse_profile(text: str) -> dict:
     if len(records) != 1:
         raise RuntimeError(f"expected exactly one {PROFILE_PREFIX.strip()} record, found {len(records)}")
     record = records[0]
-    if record.get("schema") != 4:
+    if record.get("schema") != 6:
         raise RuntimeError(f"unsupported decoder batching schema: {record.get('schema')}")
     for field in ("process_id", "decoder_instance", "owner_thread_hash", "report_thread_hash", "hook_calls"):
         if not isinstance(record.get(field), int) or record[field] <= 0:
             raise RuntimeError(f"invalid decoder batching identity field {field}: {record.get(field)}")
     if record.get("thread_mismatch_hooks") != 0:
         raise RuntimeError(f"decoder batching hooks changed owner thread: {record.get('thread_mismatch_hooks')}")
+    self_test = record.get("scheduler_self_test")
+    if not isinstance(self_test, dict) or self_test.get("passed") is not True \
+            or not isinstance(self_test.get("weighted_metadata_extra_bytes"), int) \
+            or self_test["weighted_metadata_extra_bytes"] <= 0 \
+            or not isinstance(self_test.get("rpr_metadata_extra_bytes"), int) \
+            or self_test["rpr_metadata_extra_bytes"] <= 0:
+        raise RuntimeError(f"decoder fused scheduler/model self-test is missing or failed: {self_test}")
     fills = record.get("ibc_buffer_fills")
     if not isinstance(fills, dict):
         raise RuntimeError("decoder batching record has no IBC-buffer fill model")
@@ -184,7 +191,230 @@ def parse_profile(text: str) -> dict:
     workload = record.get("transform_workload")
     if not isinstance(workload, dict) or not isinstance(workload.get("totals"), dict):
         raise RuntimeError("decoder batching record has no transform workload")
+    fused = record.get("fused_windows")
+    if not isinstance(fused, dict) or fused.get("model") != "mc_dequant_inverse_transform_reconstruction":
+        raise RuntimeError("decoder batching record has no fused-window model")
+    assumptions = fused.get("assumptions")
+    required_assumptions = (
+        "references_resident", "output_mirror_resident", "heterogeneous_mc_paths",
+        "heterogeneous_components", "heterogeneous_transform_shapes", "heterogeneous_ts_dct2",
+        "dirty_output_downloaded_at_cpu_boundaries",
+    )
+    if not isinstance(assumptions, dict) or any(assumptions.get(key) is not True for key in required_assumptions):
+        raise RuntimeError(f"fused-window residency/heterogeneity assumptions are incomplete: {assumptions}")
+    cores = fused.get("cores")
+    if not isinstance(cores, dict) or set(cores) != {"core_a", "core_b_rpr"}:
+        raise RuntimeError(f"fused-window core set is invalid: {cores}")
+    metric_names = (
+        "cus", "tus", "luma_pixels", "component_pixels", "prediction_operations", "transform_tasks",
+        "descriptor_bytes", "qcoeff_bytes", "dirty_download_bytes", "total_transfer_bytes",
+    )
+    descriptor_layout = fused.get("descriptor_layout_bytes")
+    shared_layout = fused.get("shared_metadata_layout_bytes")
+    if not isinstance(descriptor_layout, dict) or any(
+            not isinstance(descriptor_layout.get(name), int) or descriptor_layout[name] <= 0
+            for name in ("cu", "prediction_operation", "transform_task", "qcoeff_element", "pel_element")):
+        raise RuntimeError(f"fused-window recurring descriptor layout is incomplete: {descriptor_layout}")
+    if not isinstance(shared_layout, dict) or any(
+            not isinstance(shared_layout.get(name), int) or shared_layout[name] <= 0
+            for name in ("picture", "slice", "reference", "weighted_prediction", "rpr", "bcw")):
+        raise RuntimeError(f"fused-window shared metadata layout is incomplete: {shared_layout}")
+    for core_name, core in cores.items():
+        if not isinstance(core, dict):
+            raise RuntimeError(f"{core_name} fused-window record is invalid")
+        coverage = core.get("coverage")
+        if not isinstance(coverage, dict) \
+                or coverage.get("considered_cus") != coverage.get("eligible_cus", 0) + coverage.get("rejected_cus", 0) \
+                or coverage.get("considered_luma_pixels") != coverage.get("eligible_luma_pixels", 0) \
+                + coverage.get("rejected_luma_pixels", 0):
+            raise RuntimeError(f"{core_name} fused-window coverage does not balance: {coverage}")
+        rejections = core.get("rejections")
+        if not isinstance(rejections, dict) \
+                or sum(item.get("cus", -1) for item in rejections.values()) != coverage["rejected_cus"] \
+                or sum(item.get("luma_pixels", -1) for item in rejections.values()) \
+                != coverage["rejected_luma_pixels"]:
+            raise RuntimeError(f"{core_name} fused-window rejection totals do not match coverage: {rejections}")
+        flush_reasons = core.get("flush_reasons")
+        if not isinstance(flush_reasons, dict) or sum(flush_reasons.values()) != core.get("windows"):
+            raise RuntimeError(f"{core_name} fused-window flush totals do not match windows: {flush_reasons}")
+        metrics = core.get("metrics")
+        if not isinstance(metrics, dict) or any(name not in metrics for name in metric_names):
+            raise RuntimeError(f"{core_name} fused-window metrics are incomplete")
+        for metric_name in metric_names:
+            metric = metrics[metric_name]
+            if not isinstance(metric, dict) or any(not isinstance(metric.get(key), int) or metric[key] < 0
+                                                   for key in ("total", "p50_upper", "p90_upper", "p99_upper", "max")):
+                raise RuntimeError(f"{core_name} fused-window metric is invalid: {metric_name}={metric}")
+            buckets = metric.get("log2_buckets")
+            if not isinstance(buckets, list) or len(buckets) != 65 \
+                    or any(not isinstance(value, int) or value < 0 for value in buckets) \
+                    or sum(buckets) != core.get("windows"):
+                raise RuntimeError(f"{core_name} fused-window histogram is invalid: {metric_name}")
+            if metric["p50_upper"] != histogram_quantile_upper(buckets, 50) \
+                    or metric["p90_upper"] != histogram_quantile_upper(buckets, 90) \
+                    or metric["p99_upper"] != histogram_quantile_upper(buckets, 99):
+                raise RuntimeError(f"{core_name} fused-window quantiles do not match buckets: {metric_name}")
+            maximum_bucket = 0 if metric["max"] == 0 else metric["max"].bit_length()
+            if maximum_bucket >= len(buckets) or (core.get("windows", 0) != 0 and buckets[maximum_bucket] == 0):
+                raise RuntimeError(f"{core_name} fused-window maximum does not match buckets: {metric_name}")
+        if metrics["cus"]["total"] != coverage["eligible_cus"] \
+                or metrics["luma_pixels"]["total"] != coverage["eligible_luma_pixels"]:
+            raise RuntimeError(f"{core_name} fused-window metrics do not match coverage")
+        if metrics["total_transfer_bytes"]["total"] != metrics["descriptor_bytes"]["total"] \
+                + metrics["qcoeff_bytes"]["total"] + metrics["dirty_download_bytes"]["total"]:
+            raise RuntimeError(f"{core_name} recurring transfer metric does not balance")
+        transfer = core.get("transfer_model")
+        if not isinstance(transfer, dict):
+            raise RuntimeError(f"{core_name} fused-window transfer model is missing")
+        shared = transfer.get("shared_bytes_once")
+        descriptor = transfer.get("descriptor_h2d_bytes")
+        qcoeff = transfer.get("qcoeff_h2d_bytes")
+        dirty = transfer.get("dirty_boundary_d2h_bytes")
+        if any(not isinstance(value, int) or value < 0 for value in (shared, descriptor, qcoeff, dirty)):
+            raise RuntimeError(f"{core_name} fused-window transfer fields are invalid: {transfer}")
+        shared_fields = (
+            "shared_scan_bytes_once", "shared_matrix_bytes_once", "shared_dequant_constant_bytes_once",
+            "shared_picture_metadata_bytes_once", "shared_slice_metadata_bytes_once",
+            "shared_reference_metadata_bytes_once", "shared_weighted_prediction_metadata_bytes_once",
+            "shared_rpr_metadata_bytes_once", "shared_bcw_metadata_bytes_once",
+        )
+        if any(not isinstance(transfer.get(field), int) or transfer[field] < 0 for field in shared_fields) \
+                or shared != sum(transfer[field] for field in shared_fields):
+            raise RuntimeError(f"{core_name} fused-window shared metadata does not balance: {transfer}")
+        windows = core["windows"]
+        expected_amortized = (shared + windows - 1) // windows if windows else 0
+        if transfer.get("shared_bytes_amortized_per_window") != expected_amortized:
+            raise RuntimeError(f"{core_name} fused-window amortized shared bytes are invalid: {transfer}")
+        if descriptor != metrics["descriptor_bytes"]["total"] \
+                or qcoeff != metrics["qcoeff_bytes"]["total"] \
+                or dirty != metrics["dirty_download_bytes"]["total"]:
+            raise RuntimeError(f"{core_name} fused-window transfer fields disagree with metrics")
+        if transfer.get("estimated_h2d_bytes_run") != descriptor + qcoeff + shared \
+                or transfer.get("estimated_d2h_bytes_run") != dirty \
+                or transfer.get("estimated_total_transfer_bytes_run") != descriptor + qcoeff + shared + dirty:
+            raise RuntimeError(f"{core_name} fused-window transfer model does not balance: {transfer}")
+        feature_coverage = core.get("feature_coverage")
+        if not isinstance(feature_coverage, dict) or any(
+                not isinstance(feature_coverage.get(field), int) or feature_coverage[field] < 0
+                for field in ("rpr_cus", "rpr_prediction_operations", "weighted_prediction_units",
+                              "bcw_prediction_units")):
+            raise RuntimeError(f"{core_name} fused-window feature coverage is invalid: {feature_coverage}")
+        fused_fills = core.get("ibc_deferred_fills")
+        if not isinstance(fused_fills, dict) or fused_fills.get("pending") != 0 \
+                or fused_fills.get("boundary_violations") != 0 \
+                or fused_fills.get("queued") != fused_fills.get("applied") \
+                or fused_fills.get("last_queued_sequence") != fused_fills.get("last_applied_sequence"):
+            raise RuntimeError(f"{core_name} deferred IBC fills crossed a boundary or reordered: {fused_fills}")
     return record
+
+
+def fused_case_summary(profile: dict) -> dict:
+    """Retain the decision inputs without inventing a launch threshold or speedup claim."""
+    return {
+        name: {
+            "coverage": core["coverage"],
+            "windows": core["windows"],
+            "metrics": core["metrics"],
+            "ref_modes": core["ref_modes"],
+            "rejections": core["rejections"],
+            "flush_reasons": core["flush_reasons"],
+            "transfer_model": core["transfer_model"],
+            "feature_coverage": core["feature_coverage"],
+            "ibc_deferred_fills": core["ibc_deferred_fills"],
+        }
+        for name, core in profile["fused_windows"]["cores"].items()
+    }
+
+
+def histogram_quantile_upper(buckets: list[int], percentile: int) -> int:
+    count = sum(buckets)
+    if count == 0:
+        return 0
+    rank = (count * percentile + 99) // 100
+    cumulative = 0
+    for index, frequency in enumerate(buckets):
+        cumulative += frequency
+        if cumulative >= rank:
+            if index == 0:
+                return 0
+            if index == 64:
+                return (1 << 64) - 1
+            return (1 << index) - 1
+    raise RuntimeError("fused-window histogram rank was not reached")
+
+
+def aggregate_fused_profiles(profiles: list[dict]) -> dict:
+    """Merge constant-memory histograms and counters across independently decoded corpus rows."""
+    aggregate: dict[str, dict] = {}
+    for core_name in ("core_a", "core_b_rpr"):
+        cores = [profile["fused_windows"]["cores"][core_name] for profile in profiles]
+        windows = sum(core["windows"] for core in cores)
+        coverage = {
+            field: sum(core["coverage"][field] for core in cores)
+            for field in cores[0]["coverage"]
+        }
+        metrics = {}
+        for metric_name in cores[0]["metrics"]:
+            buckets = [sum(core["metrics"][metric_name]["log2_buckets"][index] for core in cores)
+                       for index in range(65)]
+            metrics[metric_name] = {
+                "total": sum(core["metrics"][metric_name]["total"] for core in cores),
+                "p50_upper": histogram_quantile_upper(buckets, 50),
+                "p90_upper": histogram_quantile_upper(buckets, 90),
+                "p99_upper": histogram_quantile_upper(buckets, 99),
+                "max": max(core["metrics"][metric_name]["max"] for core in cores),
+                "log2_buckets": buckets,
+            }
+        ref_mode_names = set().union(*(core["ref_modes"] for core in cores))
+        ref_modes = {
+            name: {
+                "prediction_units": sum(core["ref_modes"].get(name, {}).get("prediction_units", 0) for core in cores),
+                "windows": sum(core["ref_modes"].get(name, {}).get("windows", 0) for core in cores),
+            }
+            for name in sorted(ref_mode_names)
+        }
+        rejection_names = set().union(*(core["rejections"] for core in cores))
+        rejections = {
+            name: {
+                "cus": sum(core["rejections"].get(name, {}).get("cus", 0) for core in cores),
+                "luma_pixels": sum(core["rejections"].get(name, {}).get("luma_pixels", 0) for core in cores),
+            }
+            for name in sorted(rejection_names)
+        }
+        flush_names = set().union(*(core["flush_reasons"] for core in cores))
+        flush_reasons = {
+            name: sum(core["flush_reasons"].get(name, 0) for core in cores)
+            for name in sorted(flush_names)
+        }
+        transfer_fields = set().union(*(core["transfer_model"] for core in cores))
+        transfer = {
+            field: sum(core["transfer_model"].get(field, 0) for core in cores)
+            for field in sorted(transfer_fields)
+            if field != "shared_bytes_amortized_per_window"
+        }
+        transfer["shared_bytes_amortized_per_window"] = (
+            (transfer["shared_bytes_once"] + windows - 1) // windows if windows else 0
+        )
+        feature_fields = set().union(*(core["feature_coverage"] for core in cores))
+        feature_coverage = {
+            field: sum(core["feature_coverage"].get(field, 0) for core in cores)
+            for field in sorted(feature_fields)
+        }
+        fill_fields = set().union(*(core["ibc_deferred_fills"] for core in cores))
+        ibc_fills = {
+            field: (max(core["ibc_deferred_fills"].get(field, 0) for core in cores)
+                    if field == "max_pending"
+                    else sum(core["ibc_deferred_fills"].get(field, 0) for core in cores))
+            for field in sorted(fill_fields)
+            if field not in ("last_queued_sequence", "last_applied_sequence", "pending")
+        }
+        ibc_fills["pending"] = 0
+        aggregate[core_name] = {
+            "coverage": coverage, "windows": windows, "metrics": metrics, "ref_modes": ref_modes,
+            "rejections": rejections, "flush_reasons": flush_reasons, "transfer_model": transfer,
+            "feature_coverage": feature_coverage, "ibc_deferred_fills": ibc_fills,
+        }
+    return aggregate
 
 
 def decode(
@@ -272,6 +502,7 @@ def main() -> int:
             "configs": {name: artifact(path) for name, path in configs.items()},
         },
         "cases": {},
+        "fused_window_summaries": {},
     }
 
     inputs: dict[int, Path] = {}
@@ -341,6 +572,8 @@ def main() -> int:
             if profile is None or profile["inverse_transform"]["runs"] == 0 \
                     or profile["inverse_transform"]["tasks_max"] == 0:
                 raise RuntimeError(f"{case_name}: generated stream contains no nonzero inter-CBF transform work")
+            if any(core["windows"] == 0 for core in profile["fused_windows"]["cores"].values()):
+                raise RuntimeError(f"{case_name}: generated stream contains no fused candidate window")
             if profile["pictures"] < args.frames:
                 raise RuntimeError(f"{case_name}: decoded only {profile['pictures']} profiled pictures")
 
@@ -355,10 +588,14 @@ def main() -> int:
                 "decode_profile_on": on_execution,
                 "profile": profile,
             }
+            report["fused_window_summaries"][case_name] = fused_case_summary(profile)
             (output_dir / "decoder-batch-profile-report.json").write_text(
                 json.dumps(report, indent=2), encoding="utf-8")
 
     if not args.dry_run:
+        report["fused_window_aggregate"] = aggregate_fused_profiles(
+            [case["profile"] for case in report["cases"].values()]
+        )
         first_name, first_case = next(iter(report["cases"].items()))
         concurrent_dir = output_dir / "concurrent-profile"
         bitstream = Path(first_case["bitstream"]["path"])
