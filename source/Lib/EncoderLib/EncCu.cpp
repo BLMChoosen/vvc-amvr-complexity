@@ -481,6 +481,8 @@ bool EncCu::xCheckBestMode( CodingStructure *&tempCS, CodingStructure *&bestCS, 
 void EncCu::xCompressCU( CodingStructure*& tempCS, CodingStructure*& bestCS, Partitioner& partitioner, double maxCostAllowed )
 {
   TPROF_SCOPE(CTU_COMPRESS);
+  TPROF_COUNT(CU_COUNT);
+  TPROF_HIST(CU_DEPTH, (int) partitioner.currDepth);
 
   CHECK(maxCostAllowed < 0, "Wrong value of maxCostAllowed!");
 
@@ -1100,6 +1102,7 @@ void EncCu::updateLambda(Slice *slice,
 void EncCu::xCheckModeSplit(CodingStructure *&tempCS, CodingStructure *&bestCS, Partitioner &partitioner, const EncTestMode& encTestMode, const ModeType modeTypeParent, bool &skipInterPass, double *splitRdCostBest )
 {
   TPROF_SCOPE(MODE_SPLIT);
+  TPROF_COUNT(CU_SPLIT_COUNT);
 
   const int qp                = encTestMode.qp;
   const Slice &slice          = *tempCS->slice;

@@ -94,36 +94,63 @@
   X(ME_INT_REFINE, 6, "ME: integer MVP refinement (IMV)")                                                              \
   X(AFFINE_SEARCH, 6, "Affine: xPredAffineInterSearch")                                                                \
   X(AFFINE_ME, 7, "Affine: xAffineMotionEstimation")                                                                   \
+  X(AFFINE_MERGE, 4, "CU: affine merge mode test")                                                                     \
+  X(MODE_GEO, 3, "CU: GPM/GEO mode test")                                                                              \
+  X(MODE_CIIP, 3, "CU: CIIP mode test")                                                                                \
   X(INTER_RESIDUAL, 5, "Inter: residual coding + RD")                                                                  \
   X(MODE_MERGE, 3, "CU: merge/skip mode test")                                                                         \
   X(MODE_HASH_INTER, 3, "CU: hash inter mode test")                                                                    \
   X(MODE_INTRA, 3, "CU: intra mode test")                                                                              \
+  X(INTRA_EST_LUMA, 4, "Intra: luma mode estimation (SATD fast search)")                                              \
   X(INTRA_LUMA_QT, 4, "Intra: luma RD search")                                                                         \
   X(INTRA_CHROMA_QT, 4, "Intra: chroma RD search")                                                                     \
+  X(INTRA_ISP, 4, "Intra: ISP sub-partition search")                                                                  \
   X(MODE_IBC, 3, "CU: IBC mode test")                                                                                  \
   X(IBC_SEARCH, 4, "IBC: block vector search")                                                                         \
   X(MODE_PALETTE, 3, "CU: palette mode test")                                                                          \
+  X(TRANSFORM_QUANT, 4, "Transform + Quantization (xTransform/xQuant)")                                              \
   X(PIC_DEBLOCK, 1, "Picture: deblocking filter")                                                                      \
-  X(PIC_SAO, 1, "Picture: SAO")                                                                                        \
-  X(PIC_ALF, 1, "Picture: ALF")                                                                                        \
+  X(SAO_SEARCH, 2, "Picture: SAO search")                                                                              \
+  X(PIC_SAO, 1, "Picture: SAO execution")                                                                              \
+  X(ALF_SEARCH, 2, "Picture: ALF search")                                                                              \
+  X(PIC_ALF, 1, "Picture: ALF execution")                                                                              \
+  X(PIC_CCALF, 1, "Picture: CCALF execution")                                                                          \
+  X(PIC_LMCS, 1, "Picture: LMCS (Reshaper)")                                                                           \
   X(PIC_ENTROPY, 1, "Picture: entropy coding (encodeSlice)")
 
 // X( id, label )
 #define TPROF_COUNTER_LIST(X)                                                                                          \
+  X(CU_COUNT, "Total CUs evaluated")                                                                                   \
+  X(CU_SPLIT_COUNT, "Total split decisions tested")                                                                    \
   X(AMVR_TEST_HPEL_SKIPPED, "AMVR half-pel trials skipped by the early-exit heuristic")                                 \
   X(AMVR_TEST_VALID, "AMVR trials that produced a usable mode")                                                         \
   X(AMVR_TEST_ZERO_MVD_EXIT, "AMVR trials abandoned because all MVDs were zero")                                        \
   X(AMVR_AFFINE_ENABLED, "AMVR trials in which affine AMVR was enabled")                                                \
+  X(AMVR_HPEL_TRIALS, "AMVR half-pel trial count")                                                                     \
+  X(AMVR_FPEL_TRIALS, "AMVR full-pel trial count")                                                                     \
+  X(AMVR_4PEL_TRIALS, "AMVR 4-pel trial count")                                                                        \
   X(ME_UNI, "Uni-prediction motion estimations")                                                                        \
   X(ME_BI, "Bi-prediction motion estimations")                                                                          \
   X(AFFINE_ME_UNI, "Uni-prediction affine motion estimations")                                                          \
-  X(AFFINE_ME_BI, "Bi-prediction affine motion estimations")
+  X(AFFINE_ME_BI, "Bi-prediction affine motion estimations")                                                            \
+  X(AFFINE_MERGE_COUNT, "Affine merge mode trials")                                                                    \
+  X(GEO_TEST_COUNT, "GPM/GEO mode trials")                                                                             \
+  X(CIIP_TEST_COUNT, "CIIP mode trials")                                                                               \
+  X(INTER_SKIP_COUNT, "Inter skip mode selected")                                                                      \
+  X(TRANSFORM_SKIP_COUNT, "Transform skip mode selected")                                                              \
+  X(MTS_TEST_COUNT, "MTS transform candidates tested")                                                                 \
+  X(LFNST_TEST_COUNT, "LFNST candidates tested")                                                                       \
+  X(INTRA_MPM_COUNT, "Intra MPM candidates selected")
 
 // X( id, label ) - each histogram has TPROF_HIST_BINS bins, out-of-range bins are clamped.
 #define TPROF_HIST_LIST(X)                                                                                             \
   X(AMVR_TEST_PRECISION, "AMVR RD trials per cu.imv value (0=IMV_OFF, 1=IMV_FPEL, 2=IMV_4PEL, 3=IMV_HPEL)")             \
   X(INTER_CU_LOG2AREA, "log2(W*H) of CUs entering the inter ME mode test")                                              \
-  X(AFFINE_CU_LOG2AREA, "log2(W*H) of CUs entering the affine search")
+  X(AFFINE_CU_LOG2AREA, "log2(W*H) of CUs entering the affine search")                                                  \
+  X(CU_DEPTH, "CU depth level distribution")                                                                           \
+  X(TRANSFORM_SIZE_LOG2, "log2 size of transform blocks evaluated")                                                     \
+  X(INTRA_LUMA_MODE, "Selected Intra Luma mode distribution (0..66)")                                                  \
+  X(MTS_IDX, "Selected MTS transform index distribution")
 
 // ====================================================================================================================
 // Public API
@@ -132,6 +159,14 @@
 #if ENABLE_TIME_PROFILING
 
 #include <chrono>
+
+#if defined(_MSC_VER)
+#define TPROF_INLINE __forceinline
+#elif defined(__GNUC__) || defined(__clang__)
+#define TPROF_INLINE inline __attribute__((always_inline))
+#else
+#define TPROF_INLINE inline
+#endif
 
 // Pick the time source. The TSC path is roughly 3-4x cheaper than steady_clock and is the default
 // on x86; -DTPROF_USE_TSC=0 falls back to std::chrono::steady_clock everywhere.
@@ -216,9 +251,9 @@ namespace tprof
   struct alignas(64) ThreadState
   {
     int      depth;                            ///< current nesting depth, 0 == nothing running
+    uint16_t stkStage[MAX_STACK_DEPTH];        ///< stage id per nesting level (diagnostics only)
     uint64_t stkStart[MAX_STACK_DEPTH];        ///< entry timestamp per nesting level
     uint64_t stkChild[MAX_STACK_DEPTH];        ///< time spent in children per nesting level
-    uint16_t stkStage[MAX_STACK_DEPTH];        ///< stage id per nesting level (diagnostics only)
     StageAcc acc[NUM_STAGE_SLOTS];
     uint64_t counters[NUM_COUNTERS];
     uint64_t hists[NUM_HISTS][HIST_BINS];
@@ -234,17 +269,21 @@ namespace tprof
   /// Cold path: allocates and registers the accumulators of the calling thread.
   ThreadState *createThreadState();
 
-  static inline ThreadState &state()
+  static TPROF_INLINE ThreadState &state()
   {
     ThreadState *s = g_state;
+#if defined(__GNUC__) || defined(__clang__)
+    if (__builtin_expect(s == nullptr, 0))
+#else
     if (s == nullptr)
+#endif
     {
       s = createThreadState();
     }
     return *s;
   }
 
-  static inline uint64_t readTicks()
+  static TPROF_INLINE uint64_t readTicks()
   {
 #if TPROF_USE_TSC
     return (uint64_t) __rdtsc();
@@ -253,7 +292,7 @@ namespace tprof
 #endif
   }
 
-  static inline void begin(Stage s)
+  static TPROF_INLINE void begin(Stage s)
   {
     ThreadState &t = state();
     const int    d = t.depth + 1;
@@ -275,7 +314,7 @@ namespace tprof
     t.stkStart[d] = readTicks();   // read the clock last, so the bookkeeping above is not measured
   }
 
-  static inline void end(Stage s)
+  static TPROF_INLINE void end(Stage s)
   {
     const uint64_t stop = readTicks();   // read the clock first, for the same reason
     ThreadState   &t    = state();
@@ -310,9 +349,9 @@ namespace tprof
     t.stkChild[d - 1] += elapsed;
   }
 
-  static inline void addCounter(Counter c, uint64_t n) { state().counters[c] += n; }
+  static TPROF_INLINE void addCounter(Counter c, uint64_t n) { state().counters[c] += n; }
 
-  static inline void addHist(Hist h, int bin)
+  static TPROF_INLINE void addHist(Hist h, int bin)
   {
     const int b = bin < 0 ? 0 : (bin >= HIST_BINS ? HIST_BINS - 1 : bin);
     state().hists[h][b]++;
