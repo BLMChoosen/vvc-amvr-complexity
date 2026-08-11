@@ -39,6 +39,15 @@ endif()
 
 set( ENABLE_SEARCH_OPENSSL ON CACHE BOOL "ENABLE_SEARCH_OPENSSL will be set to this value" )
 
+# Time profiler (source/Lib/CommonLib/TimeProfiler.h). Switching it off removes every instrumentation
+# point from the generated code, restoring a bit-identical, uninstrumented upstream build.
+set( ENABLE_TIME_PROFILING ON CACHE BOOL "Compile the hierarchical encoder time profiler into the build" )
+# Time source of the profiler: the x86 TSC (cheapest) or std::chrono::steady_clock. Ignored on
+# non-x86 targets, where the profiler always falls back to steady_clock.
+set( TPROF_USE_TSC ON CACHE BOOL "Use the x86 TSC as the profiler time source instead of steady_clock" )
+# Extra begin/end pairing validation. Only useful while adding new instrumentation points.
+set( TPROF_CHECKS OFF CACHE BOOL "Validate profiler begin/end pairing at run time" )
+
 if( CMAKE_COMPILER_IS_GNUCC )
   set( BUILD_STATIC OFF CACHE BOOL "Build static executables" )
 endif()

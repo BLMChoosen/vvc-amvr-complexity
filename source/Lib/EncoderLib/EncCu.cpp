@@ -48,6 +48,7 @@
 
 
 #include "CommonLib/dtrace_buffer.h"
+#include "CommonLib/TimeProfiler.h"
 
 #include <stdio.h>
 #include <cmath>
@@ -479,6 +480,8 @@ bool EncCu::xCheckBestMode( CodingStructure *&tempCS, CodingStructure *&bestCS, 
 
 void EncCu::xCompressCU( CodingStructure*& tempCS, CodingStructure*& bestCS, Partitioner& partitioner, double maxCostAllowed )
 {
+  TPROF_SCOPE(CTU_COMPRESS);
+
   CHECK(maxCostAllowed < 0, "Wrong value of maxCostAllowed!");
 
   uint32_t compBegin;
@@ -754,6 +757,8 @@ void EncCu::xCompressCU( CodingStructure*& tempCS, CodingStructure*& bestCS, Par
 
     if( currTestMode.type == ETM_INTER_ME )
     {
+      TPROF_BEGIN(MODE_INTER_ME);
+      TPROF_HIST(INTER_CU_LOG2AREA, floorLog2(tempCS->area.lwidth() * tempCS->area.lheight()));
       if( ( currTestMode.opts & ETO_IMV ) != 0 )
       {
         const bool skipAltHpelIF = (currTestMode.getAmvrSearchMode() == EncTestMode::AmvrSearchMode::HALF_PEL)
@@ -766,6 +771,10 @@ void EncCu::xCompressCU( CodingStructure*& tempCS, CodingStructure*& bestCS, Par
           splitRdCostBest[CTU_LEVEL] = bestCS->cost;
           tempCS->splitRdCostBest = splitRdCostBest;
         }
+        else
+        {
+          TPROF_COUNT(AMVR_TEST_HPEL_SKIPPED);
+        }
       }
       else
       {
@@ -775,7 +784,7 @@ void EncCu::xCompressCU( CodingStructure*& tempCS, CodingStructure*& bestCS, Par
         splitRdCostBest[CTU_LEVEL] = bestCS->cost;
         tempCS->splitRdCostBest = splitRdCostBest;
       }
-
+      TPROF_END(MODE_INTER_ME);
     }
     else if (currTestMode.type == ETM_HASH_INTER)
     {
@@ -1090,6 +1099,8 @@ void EncCu::updateLambda(Slice *slice,
 
 void EncCu::xCheckModeSplit(CodingStructure *&tempCS, CodingStructure *&bestCS, Partitioner &partitioner, const EncTestMode& encTestMode, const ModeType modeTypeParent, bool &skipInterPass, double *splitRdCostBest )
 {
+  TPROF_SCOPE(MODE_SPLIT);
+
   const int qp                = encTestMode.qp;
   const Slice &slice          = *tempCS->slice;
   const int oldPrevQp         = tempCS->prevQP[partitioner.chType];
@@ -1528,6 +1539,8 @@ void EncCu::xCheckModeSplit(CodingStructure *&tempCS, CodingStructure *&bestCS, 
 
 bool EncCu::xCheckRDCostIntra(CodingStructure *&tempCS, CodingStructure *&bestCS, Partitioner &partitioner, const EncTestMode& encTestMode, bool adaptiveColorTrans)
 {
+  TPROF_SCOPE(MODE_INTRA);
+
   double          bestInterCost             = m_modeCtrl->getBestInterCost();
   double          costSize2Nx2NmtsFirstPass = m_modeCtrl->getMtsSize2Nx2NFirstPassCost();
   bool            skipSecondMtsPass         = m_modeCtrl->getSkipSecondMTSPass();
@@ -1916,6 +1929,8 @@ bool EncCu::xCheckRDCostIntra(CodingStructure *&tempCS, CodingStructure *&bestCS
 
 void EncCu::xCheckPLT(CodingStructure *&tempCS, CodingStructure *&bestCS, Partitioner &partitioner, const EncTestMode& encTestMode)
 {
+  TPROF_SCOPE(MODE_PALETTE);
+
   if (((partitioner.currArea().lumaSize().width * partitioner.currArea().lumaSize().height <= 16) && (isLuma(partitioner.chType)) )
         || ((partitioner.currArea().chromaSize().width * partitioner.currArea().chromaSize().height <= 16) && (!isLuma(partitioner.chType)) && partitioner.isSepTree(*tempCS) )
       || (partitioner.isLocalSepTree(*tempCS)  && (!isLuma(partitioner.chType))  )  )
@@ -2141,6 +2156,8 @@ void EncCu::xCheckChromaQPOffset( CodingStructure& cs, Partitioner& partitioner 
 
 void EncCu::xCheckRDCostHashInter( CodingStructure *&tempCS, CodingStructure *&bestCS, Partitioner &partitioner, const EncTestMode& encTestMode )
 {
+  TPROF_SCOPE(MODE_HASH_INTER);
+
   bool isPerfectMatch = false;
 
   tempCS->initStructData(encTestMode.qp);
@@ -2190,6 +2207,8 @@ int getDmvrMvdNum(const PredictionUnit& pu)
 
 void EncCu::xCheckRDCostUnifiedMerge(CodingStructure *&tempCS, CodingStructure *&bestCS, Partitioner &partitioner, const EncTestMode& encTestMode)
 {
+  TPROF_SCOPE(MODE_MERGE);
+
   const Slice &slice = *tempCS->slice;
 
   CHECK(slice.getSliceType() == I_SLICE, "Merge modes not available for I-slices");
@@ -2476,6 +2495,8 @@ void EncCu::xCheckRDCostUnifiedMerge(CodingStructure *&tempCS, CodingStructure *
 // ibc merge/skip mode check
 void EncCu::xCheckRDCostIBCModeMerge2Nx2N(CodingStructure *&tempCS, CodingStructure *&bestCS, Partitioner &partitioner, const EncTestMode& encTestMode)
 {
+  TPROF_SCOPE(MODE_IBC);
+
   CHECK(partitioner.chType == ChannelType::CHROMA, "chroma IBC is derived");
 
   if (!CU::canUseIbc(tempCS->area))
@@ -3334,6 +3355,8 @@ bool EncCu::prepareGpmComboList(const MergeCtx& mergeCtx, const UnitArea& localU
 
 void EncCu::xCheckRDCostIBCMode(CodingStructure *&tempCS, CodingStructure *&bestCS, Partitioner &partitioner, const EncTestMode& encTestMode)
 {
+  TPROF_SCOPE(MODE_IBC);
+
   if (!CU::canUseIbc(tempCS->area))
   {
     // skip IBC mode for blocks larger than 64x64
@@ -3421,6 +3444,8 @@ void EncCu::xCheckRDCostIBCMode(CodingStructure *&tempCS, CodingStructure *&best
 
 void EncCu::xCheckRDCostInter( CodingStructure *&tempCS, CodingStructure *&bestCS, Partitioner &partitioner, const EncTestMode& encTestMode )
 {
+  TPROF_SCOPE(MODE_INTER_NOAMVR);
+
   const EncType encType = dynamic_cast<EncLib*>(m_pcEncCfg)->getEncType();
   if (m_pcEncCfg->getDPF() && encType == ENC_PRE)
   {
@@ -3611,6 +3636,14 @@ bool EncCu::xCheckRDCostInterAmvr(CodingStructure *&tempCS, CodingStructure *&be
                                   const EncTestMode &encTestMode, double &bestIntPelCost)
 {
   const auto amvrSearchMode = encTestMode.getAmvrSearchMode();
+
+  TPROF_SCOPE(MODE_INTER_AMVR);
+  // second, finer-grained stage: which AMVR precision this RD trial is testing
+  TPROF_SCOPE_ID(amvrSearchMode == EncTestMode::AmvrSearchMode::FULL_PEL
+                   ? ::tprof::AMVR_FPEL
+                   : (amvrSearchMode == EncTestMode::AmvrSearchMode::HALF_PEL ? ::tprof::AMVR_HPEL
+                                                                             : ::tprof::AMVR_4PEL));
+
   m_pcInterSearch->setAffineModeSelected(false);
   // Only Half-Pel, int-Pel, 4-Pel and fast 4-Pel allowed
   CHECK(amvrSearchMode < EncTestMode::AmvrSearchMode::FULL_PEL
@@ -3702,6 +3735,12 @@ bool EncCu::xCheckRDCostInterAmvr(CodingStructure *&tempCS, CodingStructure *&be
 
     const bool affineAmvrEnabledFlag = !testAltHpelFilter && cu.slice->getSPS()->getAffineAmvrEnabledFlag();
 
+    TPROF_HIST(AMVR_TEST_PRECISION, cu.imv);
+    if (affineAmvrEnabledFlag)
+    {
+      TPROF_COUNT(AMVR_AFFINE_ENABLED);
+    }
+
     cu.bcwIdx = g_BcwSearchOrder[bcwLoopIdx];
 
     uint8_t    bcwIdx  = cu.bcwIdx;
@@ -3739,6 +3778,7 @@ bool EncCu::xCheckRDCostInterAmvr(CodingStructure *&tempCS, CodingStructure *&be
 
     if (!CU::hasSubCUNonZeroMVd(cu) && !CU::hasSubCUNonZeroAffineMVd(cu))
     {
+      TPROF_COUNT(AMVR_TEST_ZERO_MVD_EXIT);
       xCheckBestMode(tempCS, bestCS, partitioner, encTestModeBase);
       if (affineAmvrEnabledFlag)
       {
@@ -3845,6 +3885,7 @@ bool EncCu::xCheckRDCostInterAmvr(CodingStructure *&tempCS, CodingStructure *&be
     }
 
     validMode = true;
+    TPROF_COUNT(AMVR_TEST_VALID);
   }
 
   if ( m_bestModeUpdated && bestCS->cost != MAX_DOUBLE )

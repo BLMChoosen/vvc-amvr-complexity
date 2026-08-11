@@ -46,6 +46,7 @@
 
 #include "CommonLib/dtrace_next.h"
 #include "CommonLib/dtrace_buffer.h"
+#include "CommonLib/TimeProfiler.h"
 
 #include <math.h>
 #include <limits>
@@ -504,6 +505,8 @@ bool IntraSearch::isValidIntraPredChroma(PredictionUnit &pu, int lumaDirMode, in
 
 bool IntraSearch::estIntraPredLumaQT(CodingUnit &cu, Partitioner &partitioner, const double bestCostSoFar, bool mtsCheckRangeFlag, int mtsFirstCheckId, int mtsLastCheckId, bool moreProbMTSIdxFirst, CodingStructure* bestCS)
 {
+  TPROF_SCOPE(INTRA_LUMA_QT);
+
   CodingStructure &cs  = *cu.cs;
   const SPS       &sps = *cs.sps;
 
@@ -1424,6 +1427,8 @@ bool IntraSearch::estIntraPredLumaQT(CodingUnit &cu, Partitioner &partitioner, c
 
 void IntraSearch::estIntraPredChromaQT( CodingUnit &cu, Partitioner &partitioner, const double maxCostAllowed )
 {
+  TPROF_SCOPE(INTRA_CHROMA_QT);
+
   const ChromaFormat format   = cu.chromaFormat;
   const uint32_t    numberValidComponents = getNumberValidComponents(format);
   CodingStructure &cs = *cu.cs;

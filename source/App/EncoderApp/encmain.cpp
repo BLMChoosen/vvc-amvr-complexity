@@ -43,6 +43,7 @@
 #include "EncoderLib/EncLibCommon.h"
 #include "EncApp.h"
 #include "Utilities/program_options_lite.h"
+#include "CommonLib/TimeProfiler.h"
 
 //! \ingroup EncoderApp
 //! \{
@@ -259,6 +260,10 @@ int main(int argc, char* argv[])
   fprintf(stdout, " started @ %s", std::ctime(&startTime2) );
   clock_t startClock = clock();
 
+  // set up the time profiler (calibrates the clock and measures its own cost) and open the outermost stage
+  TPROF_INIT();
+  TPROF_BEGIN(ENCODER);
+
   // call encoding function per layer
   bool eos = false;
 
@@ -326,6 +331,8 @@ int main(int argc, char* argv[])
     }
   }
 
+  TPROF_END(ENCODER);
+
 #ifdef __linux
   int vm = getProcStatusValue("VmPeak:");
   int rm = getProcStatusValue("VmHWM:");
@@ -386,6 +393,8 @@ int main(int argc, char* argv[])
          (endClock - startClock) * 1.0 / CLOCKS_PER_SEC,
          encTime / 1000.0);
 #endif
+
+  TPROF_REPORT();
 
   return 0;
 }

@@ -43,6 +43,7 @@
 #if K0149_BLOCK_STATISTICS
 #include "CommonLib/dtrace_blockstatistics.h"
 #endif
+#include "CommonLib/TimeProfiler.h"
 
 
 #include <math.h>
@@ -1513,6 +1514,11 @@ void EncSlice::compressSlice( Picture* pcPic, const bool bCompressEntireSlice, c
 
   Slice* const pcSlice    = pcPic->slices[getSliceSegmentIdx()];
 
+  TPROF_SCOPE(PIC_COMPRESS);
+  // bCompressEntireSlice marks the pre-encoding trial passes issued by precompressSlice()
+  TPROF_PICTURE_SCOPE(pcSlice->getPOC(), (int) pcSlice->getSliceType(), pcSlice->getSliceQp(), (int) pcSlice->getTLayer(),
+                      bCompressEntireSlice);
+
   if (pcSlice->getSPS()->getSpsRangeExtension().getRrcRiceExtensionEnableFlag())
   {
     int bitDepth  = pcSlice->getSPS()->getBitDepth(ChannelType::LUMA);
@@ -2068,6 +2074,8 @@ void EncSlice::encodeCtus( Picture* pcPic, const bool bCompressEntireSlice, cons
 
 void EncSlice::encodeSlice   ( Picture* pcPic, OutputBitstream* pcSubstreams, uint32_t &numBinsCoded )
 {
+
+  TPROF_SCOPE(PIC_ENTROPY);
 
   Slice *const pcSlice                 = pcPic->slices[getSliceSegmentIdx()];
   const bool wavefrontsEnabled         = pcSlice->getSPS()->getEntropyCodingSyncEnabledFlag();

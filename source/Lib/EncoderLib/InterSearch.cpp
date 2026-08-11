@@ -46,6 +46,7 @@
 #include "CommonLib/dtrace_next.h"
 #include "CommonLib/dtrace_buffer.h"
 #include "CommonLib/MCTS.h"
+#include "CommonLib/TimeProfiler.h"
 
 #include "EncModeCtrl.h"
 #include "EncLib.h"
@@ -1611,6 +1612,8 @@ void InterSearch::xSetIntraSearchRange(PredictionUnit& pu, int iRoiWidth, int iR
 
 bool InterSearch::predIBCSearch(CodingUnit& cu, Partitioner& partitioner, const int localSearchRangeX, const int localSearchRangeY, IbcHashMap& ibcHashMap)
 {
+  TPROF_SCOPE(IBC_SEARCH);
+
   Mv           cMvSrchRngLT;
   Mv           cMvSrchRngRB;
 
@@ -2695,6 +2698,8 @@ bool InterSearch::predInterHashSearch(CodingUnit& cu, Partitioner& partitioner, 
 //! search of the best candidate for inter prediction
 void InterSearch::predInterSearch(CodingUnit& cu, Partitioner& partitioner)
 {
+  TPROF_SCOPE(INTER_SEARCH);
+
   CodingStructure& cs = *cu.cs;
 
   AMVPInfo     amvp[NUM_REF_PIC_LIST_01];
@@ -5022,6 +5027,17 @@ void InterSearch::xMotionEstimation(PredictionUnit &pu, PelUnitBuf &origBuf, Ref
   m_currRefPicList = eRefPicList;
   m_currRefPicIndex = refIdxPred;
   m_skipFracME = false;
+
+  if (bBi)
+  {
+    TPROF_COUNT(ME_BI);
+  }
+  else
+  {
+    TPROF_COUNT(ME_UNI);
+  }
+
+  TPROF_BEGIN(ME_INTEGER);
   //  Do integer search
   if (m_motionEstimationSearchMethod == MESearchMethod::FULL || bBi || bQTBTMV)
   {
@@ -5115,11 +5131,13 @@ void InterSearch::xMotionEstimation(PredictionUnit &pu, PelUnitBuf &origBuf, Ref
       m_integerMv2Nx2N[eRefPicList][refIdxPred] = rcMv;
     }
   }
+  TPROF_END(ME_INTEGER);
 
   DTRACE( g_trace_ctx, D_ME, "%d %d %d :MECostFPel<L%d,%d>: %d,%d,%dx%d, %d", DTRACE_GET_COUNTER( g_trace_ctx, D_ME ), pu.cu->slice->getPOC(), 0, ( int ) eRefPicList, ( int ) bBi, pu.Y().x, pu.Y().y, pu.Y().width, pu.Y().height, ruiCost );
   // sub-pel refinement for sub-pel resolution
   if ( pu.cu->imv == 0 || pu.cu->imv == IMV_HPEL )
   {
+    TPROF_SCOPE(ME_FRAC);
     if( m_pcEncCfg->getMCTSEncConstraint() )
     {
       Area curTileAreaSubPelRestricted = pu.cs->picture->mctsInfo.getTileAreaSubPelRestricted( pu );
@@ -5149,6 +5167,8 @@ void InterSearch::xMotionEstimation(PredictionUnit &pu, PelUnitBuf &origBuf, Ref
   }
   else // integer refinement for integer-pel and 4-pel resolution
   {
+    TPROF_SCOPE(ME_INT_REFINE);
+
     rcMv.changePrecision(MvPrecision::ONE, MvPrecision::INTERNAL);
 #if GDR_ENABLED
     xPatternSearchIntRefine(pu, cStruct, rcMv, rcMvPred, riMVPIdx, ruiBits, ruiCost, amvpInfo, fWeight, eRefPicList,
@@ -6408,6 +6428,9 @@ void InterSearch::xPredAffineInterSearch(PredictionUnit &pu, PelUnitBuf &origBuf
                                          int refIdx4Para[NUM_REF_PIC_LIST_01], uint8_t bcwIdx, bool enforceBcwPred,
                                          uint32_t bcwIdxBits)
 {
+  TPROF_SCOPE(AFFINE_SEARCH);
+  TPROF_HIST(AFFINE_CU_LOG2AREA, floorLog2(pu.cu->lumaSize().width * pu.cu->lumaSize().height));
+
   const Slice &slice = *pu.cu->slice;
 
   affineCost = std::numeric_limits<Distortion>::max();
@@ -8337,6 +8360,16 @@ void InterSearch::xAffineMotionEstimation(PredictionUnit &pu, PelUnitBuf &origBu
                                           Distortion &ruiCost, int &mvpIdx, const AffineAMVPInfo &aamvpi, bool bBi)
 #endif
 {
+  TPROF_SCOPE(AFFINE_ME);
+  if (bBi)
+  {
+    TPROF_COUNT(AFFINE_ME_BI);
+  }
+  else
+  {
+    TPROF_COUNT(AFFINE_ME_UNI);
+  }
+
 #if GDR_ENABLED
   if (pu.cu->cs->sps->getUseBcw() && pu.cu->bcwIdx != BCW_DEFAULT && !bBi
       && xReadBufferedAffineUniMv(pu, eRefPicList, refIdxPred, acMvPred, acMv, acMvSolid, ruiBits, ruiCost, mvpIdx,
@@ -10567,6 +10600,8 @@ void InterSearch::xEstimateInterResidualQT(CodingStructure &cs, Partitioner &par
 void InterSearch::encodeResAndCalcRdInterCU(CodingStructure &cs, Partitioner &partitioner, const bool &skipResidual,
                                             const bool luma, const bool chroma)
 {
+  TPROF_SCOPE(INTER_RESIDUAL);
+
   m_pcRdCost->setChromaFormat(cs.sps->getChromaFormatIdc());
 
   CodingUnit &cu = *cs.getCU( partitioner.chType );

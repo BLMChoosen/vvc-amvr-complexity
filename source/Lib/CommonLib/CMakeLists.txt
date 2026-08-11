@@ -73,6 +73,22 @@ if( DEFINED ENABLE_HIGH_BITDEPTH )
   endif()
 endif()
 
+# The profiler settings are PUBLIC so that every library and app linking CommonLib sees the same
+# instrumentation state as the header itself.
+if( ENABLE_TIME_PROFILING )
+  target_compile_definitions( ${LIB_NAME} PUBLIC ENABLE_TIME_PROFILING=1 )
+  if( TPROF_USE_TSC )
+    target_compile_definitions( ${LIB_NAME} PUBLIC TPROF_USE_TSC=1 )
+  else()
+    target_compile_definitions( ${LIB_NAME} PUBLIC TPROF_USE_TSC=0 )
+  endif()
+  if( TPROF_CHECKS )
+    target_compile_definitions( ${LIB_NAME} PUBLIC TPROF_CHECKS=1 )
+  endif()
+else()
+  target_compile_definitions( ${LIB_NAME} PUBLIC ENABLE_TIME_PROFILING=0 )
+endif()
+
 if ( ENABLE_SEARCH_OPENSSL )
   find_package(OpenSSL)
 endif()

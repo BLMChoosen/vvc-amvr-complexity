@@ -75,6 +75,22 @@ if( DEFINED ENABLE_HIGH_BITDEPTH )
   endif()
 endif()
 
+# Keep the profiler configuration identical to CommonLib, since this library compiles the very same
+# CommonLib sources (see the globs above).
+if( ENABLE_TIME_PROFILING )
+  target_compile_definitions( ${LIB_NAME} PUBLIC ENABLE_TIME_PROFILING=1 )
+  if( TPROF_USE_TSC )
+    target_compile_definitions( ${LIB_NAME} PUBLIC TPROF_USE_TSC=1 )
+  else()
+    target_compile_definitions( ${LIB_NAME} PUBLIC TPROF_USE_TSC=0 )
+  endif()
+  if( TPROF_CHECKS )
+    target_compile_definitions( ${LIB_NAME} PUBLIC TPROF_CHECKS=1 )
+  endif()
+else()
+  target_compile_definitions( ${LIB_NAME} PUBLIC ENABLE_TIME_PROFILING=0 )
+endif()
+
 if ( ENABLE_SEARCH_OPENSSL )
   find_package(OpenSSL)
 endif()

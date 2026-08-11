@@ -57,6 +57,7 @@
 #include "CommonLib/dtrace_codingstruct.h"
 #include "CommonLib/dtrace_buffer.h"
 #include "CommonLib/ProfileTierLevel.h"
+#include "CommonLib/TimeProfiler.h"
 
 #include "DecoderLib/DecLib.h"
 
@@ -3850,7 +3851,9 @@ void EncGOP::compressGOP(int pocLast, int numPicRcvd, PicList &rcListPic, std::l
 #if GREEN_METADATA_SEI_ENABLED
       cs.m_featureCounter.resetBoundaryStrengths();
 #endif
+      TPROF_BEGIN(PIC_DEBLOCK);
       m_pcLoopFilter->deblockingFilterPic( cs );
+      TPROF_END(PIC_DEBLOCK);
 #if GREEN_METADATA_SEI_ENABLED
       m_featureCounter.addBoundaryStrengths(cs.m_featureCounter);
 #endif
@@ -3864,11 +3867,13 @@ void EncGOP::compressGOP(int pocLast, int numPicRcvd, PicList &rcListPic, std::l
 #endif
         bool sliceEnabled[MAX_NUM_COMPONENT];
         m_pcSAO->initCABACEstimator( m_pcEncLib->getCABACEncoder(), m_pcEncLib->getCtxCache(), pcSlice );
+        TPROF_BEGIN(PIC_SAO);
         m_pcSAO->SAOProcess( cs, sliceEnabled, pcSlice->getLambdas(),
 #if ENABLE_QPA
                              (m_pcCfg->getUsePerceptQPA() && !m_pcCfg->getUseRateCtrl() && pcSlice->getPPS()->getUseDQP() ? m_pcEncLib->getRdCost ()->getChromaWeight() : 0.0),
 #endif
                              m_pcCfg->getTestSAODisableAtPictureLevel(), m_pcCfg->getSaoEncodingRate(), m_pcCfg->getSaoEncodingRateChroma(), m_pcCfg->getSaoCtuBoundary(), m_pcCfg->getSaoGreedyMergeEnc(), m_pcCfg->getSaoTrueOrg() );
+        TPROF_END(PIC_SAO);
         //assign SAO slice header
         for (int s = 0; s < numSliceSegments; s++)
         {
@@ -3904,6 +3909,7 @@ void EncGOP::compressGOP(int pocLast, int numPicRcvd, PicList &rcListPic, std::l
 #if GREEN_METADATA_SEI_ENABLED
         cs.m_featureCounter.resetALF();
 #endif
+        TPROF_BEGIN(PIC_ALF);
         m_pcALF->ALFProcess(cs, pcSlice->getLambdas()
 #if ENABLE_QPA
                                   ,
@@ -3913,6 +3919,7 @@ void EncGOP::compressGOP(int pocLast, int numPicRcvd, PicList &rcListPic, std::l
 #endif
                               ,
                             pcPic, numSliceSegments);
+        TPROF_END(PIC_ALF);
 #if GREEN_METADATA_SEI_ENABLED
         m_featureCounter.addALF(cs.m_featureCounter);
 #endif
