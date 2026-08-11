@@ -6,3 +6,4 @@ jctvcdoc.cls
 *.out
 *.toc
 *~
+build-*
