@@ -1595,6 +1595,11 @@ void EncApp::xInitLibCfg( int layerIdx )
   m_cEncLib.setSummaryVerboseness                                ( m_summaryVerboseness );
   m_cEncLib.setIMV                                               ( m_ImvMode );
   m_cEncLib.setIMV4PelFast                                       ( m_Imv4PelFast );
+  m_cEncLib.setAmvrNeuralMode                                    ( m_amvrNeuralMode );
+  m_cEncLib.setAmvrDumpFile                                      ( m_amvrDumpFile );
+  m_cEncLib.setAmvrThreshold                                     ( m_amvrThreshold );
+  m_cEncLib.setAmvrTargetPruneRate                               ( m_amvrTargetPruneRate );
+  m_cEncLib.setAmvrEwmaAlpha                                     ( m_amvrEwmaAlpha );
   m_cEncLib.setDecodeBitstream                                   ( 0, m_decodeBitstreams[0] );
   m_cEncLib.setDecodeBitstream                                   ( 1, m_decodeBitstreams[1] );
   m_cEncLib.setSwitchPOC                                         ( m_switchPOC );

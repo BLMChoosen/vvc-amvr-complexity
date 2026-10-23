@@ -1147,6 +1147,11 @@ protected:
   uint32_t        m_summaryVerboseness;                           ///< Specifies the level of the verboseness of the text output.
   int       m_ImvMode;
   int       m_Imv4PelFast;
+  int       m_amvrNeuralMode{ 0 };
+  std::string m_amvrDumpFile{ "amvr_dataset.bin" };
+  double    m_amvrThreshold{ 0.5 };
+  double    m_amvrTargetPruneRate{ 0.35 };
+  double    m_amvrEwmaAlpha{ 0.05 };
   std::string m_decodeBitstreams[2];                          ///< filename for decode bitstreams.
   bool        m_forceDecodeBitstream1;                        ///< guess what it means
   int         m_switchPOC;                                    ///< dbg poc.
@@ -3365,6 +3370,16 @@ public:
   int          getIMV() const                                        { return m_ImvMode; }
   void         setIMV4PelFast(int n)                                 { m_Imv4PelFast = n; }
   int          getIMV4PelFast() const                                { return m_Imv4PelFast; }
+  void         setAmvrNeuralMode(int n)                              { m_amvrNeuralMode = n; }
+  int          getAmvrNeuralMode() const                             { return m_amvrNeuralMode; }
+  void         setAmvrDumpFile(const std::string& s)                 { m_amvrDumpFile = s; }
+  const std::string& getAmvrDumpFile() const                         { return m_amvrDumpFile; }
+  void         setAmvrThreshold(double d)                            { m_amvrThreshold = d; }
+  double       getAmvrThreshold() const                              { return m_amvrThreshold; }
+  void         setAmvrTargetPruneRate(double d)                      { m_amvrTargetPruneRate = d; }
+  double       getAmvrTargetPruneRate() const                        { return m_amvrTargetPruneRate; }
+  void         setAmvrEwmaAlpha(double d)                            { m_amvrEwmaAlpha = d; }
+  double       getAmvrEwmaAlpha() const                              { return m_amvrEwmaAlpha; }
   void         setDecodeBitstream( int i, const std::string& s )     { m_decodeBitstreams[i] = s; }
   const std::string& getDecodeBitstream( int i )               const { return m_decodeBitstreams[i]; }
   bool         getForceDecodeBitstream1()                      const { return m_forceDecodeBitstream1; }

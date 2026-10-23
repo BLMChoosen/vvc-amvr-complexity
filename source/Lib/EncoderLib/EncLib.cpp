@@ -152,6 +152,10 @@ void EncLib::destroy ()
   m_cReshaper.          destroy();
   m_cInterSearch.       destroy();
   m_cIntraSearch.       destroy();
+  if (getAmvrNeuralMode() == 1)
+  {
+    m_amvrDatasetWriter.close();
+  }
 }
 
 void EncLib::init(AUWriterIf *auWriterIf)
@@ -519,6 +523,15 @@ void EncLib::init(AUWriterIf *auWriterIf)
   m_cGOPEncoder.  init( this );
   m_cSliceEncoder.init( this, sps0 );
   m_cCuEncoder.   init( this, sps0 );
+
+  m_amvrMemoryTracker.init(getAmvrEwmaAlpha(), getAmvrTargetPruneRate());
+  if (getAmvrNeuralMode() == 1)
+  {
+    m_amvrDatasetWriter.open(getAmvrDumpFile());
+  }
+  m_cCuEncoder.setAmvrMemoryTracker(&m_amvrMemoryTracker);
+  m_cCuEncoder.setAmvrDatasetWriter(&m_amvrDatasetWriter);
+  m_cCuEncoder.setAmvrNeuralController(&m_amvrNeuralController);
 
   if (m_priSEIEnabled)
   {

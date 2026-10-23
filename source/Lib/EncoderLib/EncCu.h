@@ -47,6 +47,11 @@
 #include "CommonLib/UnitPartitioner.h"
 #include "CommonLib/IbcHashMap.h"
 #include "CommonLib/DeblockingFilter.h"
+#include "AmvrController/AmvrDataTypes.h"
+#include "AmvrController/AmvrMemoryTracker.h"
+#include "AmvrController/AmvrDatasetWriter.h"
+#include "AmvrController/AmvrNeuralController.h"
+#include "AmvrController/AmvrFeatureExtractor.h"
 
 #include "DecoderLib/DecCu.h"
 
@@ -294,6 +299,19 @@ private:
 #endif
   double m_sbtCostSave[2];
 
+  AmvrMemoryTracker*    m_amvrMemoryTracker{ nullptr };
+  AmvrDatasetWriter*     m_amvrDatasetWriter{ nullptr };
+  AmvrNeuralController*  m_amvrNeuralController{ nullptr };
+  AmvrCuRecord          m_currAmvrRecord;
+  float                 m_currHead1Probs[8] = { 0.0f };
+  float                 m_currHead2Probs[2] = { 0.0f };
+  bool                  m_currAmvrPruneImv[4] = { false };
+  bool                  m_currAmvrPruneAffine[3] = { false };
+
+  void xAmvrOnQuarterPelDone(CodingStructure *&tempCS, CodingStructure *&bestCS, Partitioner &partitioner, double bestPrelimCost);
+  void xAmvrOnInterAmvrDone(CodingStructure *&tempCS, const EncTestMode &encTestMode);
+  void xAmvrOnCuFinished(CodingStructure *&tempCS, CodingStructure *&bestCS, Partitioner &partitioner);
+
   GeoComboCostList m_comboList;
   MergeItemList         m_mergeItemList;
 
@@ -326,6 +344,9 @@ public:
   double getAFFBestSATDCost()              { return m_AFFBestSATDCost; }
   IbcHashMap& getIbcHashMap()              { return m_ibcHashMap;        }
   EncCfg*     getEncCfg()            const { return m_pcEncCfg;          }
+  void        setAmvrMemoryTracker(AmvrMemoryTracker* p)       { m_amvrMemoryTracker = p; }
+  void        setAmvrDatasetWriter(AmvrDatasetWriter* p)       { m_amvrDatasetWriter = p; }
+  void        setAmvrNeuralController(AmvrNeuralController* p) { m_amvrNeuralController = p; }
 
   EncCu();
   ~EncCu();

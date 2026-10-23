@@ -2783,6 +2783,17 @@ void InterSearch::predInterSearch(CodingUnit& cu, Partitioner& partitioner)
   WPScalingParam *wp1;
   int tryBipred = 0;
   bool checkAffine    = (pu.cu->imv == 0 || pu.cu->slice->getSPS()->getAffineAmvrEnabledFlag()) && pu.cu->imv != IMV_HPEL;
+  if (m_pcEncCfg->getAmvrNeuralMode() == 2 && checkAffine && pu.cu->imv != 0)
+  {
+    if (pu.cu->imv == IMV_FPEL && m_amvrPruneAffine1_16)
+    {
+      checkAffine = false;
+    }
+    else if (pu.cu->imv == IMV_4PEL && m_amvrPruneAffine1Pel)
+    {
+      checkAffine = false;
+    }
+  }
   bool checkNonAffine = pu.cu->imv == 0 || pu.cu->imv == IMV_HPEL || (pu.cu->slice->getSPS()->getAMVREnabledFlag() &&
                                             pu.cu->imv <= (pu.cu->slice->getSPS()->getAMVREnabledFlag() ? IMV_4PEL : 0));
   CodingUnit *bestCU         = pu.cu->cs->bestCS != nullptr ? pu.cu->cs->bestCS->getCU(ChannelType::LUMA) : nullptr;

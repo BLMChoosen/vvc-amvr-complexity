@@ -127,6 +127,8 @@ private:
   uint32_t        m_estWeightIdxBits[BCW_NUM];
   BcwMotionParam  m_uniMotions;
   bool            m_affineModeSelected;
+  bool            m_amvrPruneAffine1_16{ false };
+  bool            m_amvrPruneAffine1Pel{ false };
   std::unordered_map< Position, std::unordered_map< Size, BlkRecord> > m_ctuRecord;
   AffineMVInfo       *m_affMVList;
 #if GDR_ENABLED
@@ -218,6 +220,7 @@ public:
   void setTempBuffers               (CodingStructure ****pSlitCS, CodingStructure ****pFullCS, CodingStructure **pSaveCS );
   void resetCtuRecord               ()             { m_ctuRecord.clear(); }
   void setAffineModeSelected        ( bool flag) { m_affineModeSelected = flag; }
+  void setAmvrPruneAffine           ( bool prune1_16, bool prune1Pel ) { m_amvrPruneAffine1_16 = prune1_16; m_amvrPruneAffine1Pel = prune1Pel; }
   void resetAffineMVList() { m_affMVListIdx = 0; m_affMVListSize = 0; }
 #if GDR_ENABLED
   void savePrevAffMVInfo(int idx, AffineMVInfo &tmpMVInfo, AffineMVInfoSolid &tmpMVInfoSolid, bool& isSaved)

@@ -1161,6 +1161,11 @@ bool EncAppCfg::parseCfg( int argc, char* argv[] )
                                                                                                                "\t0: disabled\n"
                                                                                                                "\t1: enabled (1/2-Pel, Full-Pel and 4-PEL)\n")
   ("IMV4PelFast",                                     m_Imv4PelFast,                                        1, "Fast 4-Pel Adaptive MV precision Mode 0:disabled, 1:enabled)  [default: 1]")
+  ("AmvrNeuralMode",                                  m_amvrNeuralMode,                                     0, "AMVR neural controller mode (0: disabled, 1: data collection, 2: adaptive inference)")
+  ("AmvrDumpFile",                                    m_amvrDumpFile,         std::string("amvr_dataset.bin"), "Output binary file for AMVR dataset collection")
+  ("AmvrThreshold",                                   m_amvrThreshold,                                    0.5, "AMVR neural pruning sensitivity threshold [0.0 - 1.0]")
+  ("AmvrTargetPruneRate",                             m_amvrTargetPruneRate,                             0.35, "Target pruning rate for online budget pressure [0.0 - 1.0]")
+  ("AmvrEwmaAlpha",                                   m_amvrEwmaAlpha,                                   0.05, "Decay factor for online EWMA memory tracker [0.0 - 1.0]")
   ("LMChroma",                                        m_LMChroma,                                           1, " LMChroma prediction "
                                                                                                                "\t0:  Disable LMChroma\n"
                                                                                                                "\t1:  Enable LMChroma\n")
@@ -6812,6 +6817,7 @@ void EncAppCfg::xPrintParameter()
     m_mergeRdCandQuotaSubBlk, m_mergeRdCandQuotaCiip, m_mergeRdCandQuotaGpm);
   msg( VERBOSE, "PBIntraFast:%d ", m_usePbIntraFast );
   if( m_ImvMode ) msg( VERBOSE, "IMV4PelFast:%d ", m_Imv4PelFast );
+  if( m_amvrNeuralMode ) msg( VERBOSE, "AmvrNeuralMode:%d AmvrTh:%.2f AmvrPruneRate:%.2f ", m_amvrNeuralMode, m_amvrThreshold, m_amvrTargetPruneRate );
   if (m_mtsMode)
   {
     msg(VERBOSE, "MTSMaxCand: %1d(intra) %1d(inter) ", m_MTSIntraMaxCand, m_MTSInterMaxCand);

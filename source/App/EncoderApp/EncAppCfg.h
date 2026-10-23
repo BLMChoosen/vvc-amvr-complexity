@@ -994,6 +994,11 @@ protected:
   bool      m_videoFullRangeFlag;                             ///< Indicates the black level and range of luma and chroma signals
   int       m_ImvMode;                                        ///< imv mode
   int       m_Imv4PelFast;                                    ///< imv 4-Pel fast mode
+  int       m_amvrNeuralMode;                                 ///< AMVR neural controller mode (0: disabled, 1: collect, 2: adaptive)
+  std::string m_amvrDumpFile;                                 ///< AMVR dataset output file
+  double    m_amvrThreshold;                                  ///< AMVR neural pruning sensitivity threshold
+  double    m_amvrTargetPruneRate;                            ///< AMVR target pruning rate
+  double    m_amvrEwmaAlpha;                                  ///< AMVR online EWMA alpha
 
   bool      m_siiSEIEnabled;
   uint32_t  m_siiSEINumUnitsInShutterInterval;

@@ -58,6 +58,9 @@
 #include "EncAdaptiveLoopFilter.h"
 #include "RateCtrl.h"
 #include "EncTemporalFilter.h"
+#include "AmvrController/AmvrMemoryTracker.h"
+#include "AmvrController/AmvrDatasetWriter.h"
+#include "AmvrController/AmvrNeuralController.h"
 
 #include "CommonLib/SEINeuralNetworkPostFiltering.h"
 #include "CommonLib/SEIPackedRegionsInfoProcess.h"
@@ -100,6 +103,9 @@ private:
   EncGOP                    m_cGOPEncoder;                        ///< GOP encoder
   EncSlice                  m_cSliceEncoder;                      ///< slice encoder
   EncCu                     m_cCuEncoder;                         ///< CU encoder
+  AmvrMemoryTracker         m_amvrMemoryTracker;                  ///< AMVR online EWMA memory tracker
+  AmvrDatasetWriter         m_amvrDatasetWriter;                  ///< AMVR dataset binary collector
+  AmvrNeuralController      m_amvrNeuralController;               ///< AMVR neural inference engine
   // SPS
   ParameterSetMap<SPS>     &m_spsMap;                             ///< SPS. This is the base value
   ParameterSetMap<PPS>     &m_ppsMap;                             ///< PPS. This is the base value
@@ -196,6 +202,9 @@ public:
   EncSlice*               getSliceEncoder       ()              { return  &m_cSliceEncoder;        }
   EncHRD*                 getHRD                ()              { return  &m_encHRD;               }
   EncCu*                  getCuEncoder          ()              { return  &m_cCuEncoder;           }
+  AmvrMemoryTracker*      getAmvrMemoryTracker  ()              { return  &m_amvrMemoryTracker;    }
+  AmvrDatasetWriter*      getAmvrDatasetWriter  ()              { return  &m_amvrDatasetWriter;    }
+  AmvrNeuralController*   getAmvrNeuralController()           { return  &m_amvrNeuralController; }
   HLSWriter*              getHLSWriter          ()              { return  &m_HLSWriter;            }
   CABACEncoder*           getCABACEncoder       ()              { return  &m_CABACEncoder;         }
 

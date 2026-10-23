@@ -2,10 +2,10 @@
 set( LIB_NAME EncoderLib )
 
 # get source files
-file( GLOB SRC_FILES "*.cpp" )
+file( GLOB SRC_FILES "*.cpp" "AmvrController/*.cpp" )
 
 # get include files
-file( GLOB INC_FILES "*.h" )
+file( GLOB INC_FILES "*.h" "AmvrController/*.h" )
 
 # NATVIS files for Visual Studio
 if( MSVC )
@@ -40,7 +40,7 @@ if( DEFINED ENABLE_HIGH_BITDEPTH )
   endif()
 endif()
 
-target_include_directories( ${LIB_NAME} PUBLIC . )
+target_include_directories( ${LIB_NAME} PUBLIC . AmvrController )
 target_link_libraries( ${LIB_NAME} CommonLib )
 
 if( CMAKE_COMPILER_IS_GNUCC )

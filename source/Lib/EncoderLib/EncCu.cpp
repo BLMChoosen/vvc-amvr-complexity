@@ -707,6 +707,13 @@ void EncCu::xCompressCU( CodingStructure*& tempCS, CodingStructure*& bestCS, Par
     m_bestBcwCost.fill(std::numeric_limits<double>::max());
     m_bestBcwIdx.fill(BCW_NUM);
   }
+  double bestPrelimCost = bestCS->cost;
+  if (m_pcEncCfg->getAmvrNeuralMode() != 0)
+  {
+    m_currAmvrRecord.reset();
+    for (int i = 0; i < 4; ++i) m_currAmvrPruneImv[i] = false;
+    for (int i = 0; i < 3; ++i) m_currAmvrPruneAffine[i] = false;
+  }
   do
   {
     for (int i = compBegin; i < (compBegin + numComp); i++)
@@ -763,15 +770,38 @@ void EncCu::xCompressCU( CodingStructure*& tempCS, CodingStructure*& bestCS, Par
       TPROF_HIST(INTER_CU_LOG2AREA, floorLog2(tempCS->area.lwidth() * tempCS->area.lheight()));
       if( ( currTestMode.opts & ETO_IMV ) != 0 )
       {
+        bool neuralPrune = false;
+        if (m_pcEncCfg->getAmvrNeuralMode() == 2)
+        {
+          const auto amvrSearchMode = currTestMode.getAmvrSearchMode();
+          if (amvrSearchMode == EncTestMode::AmvrSearchMode::HALF_PEL && m_currAmvrPruneImv[1])
+          {
+            neuralPrune = true;
+          }
+          else if (amvrSearchMode == EncTestMode::AmvrSearchMode::FULL_PEL && m_currAmvrPruneImv[2])
+          {
+            neuralPrune = true;
+          }
+          else if ((amvrSearchMode == EncTestMode::AmvrSearchMode::FOUR_PEL || amvrSearchMode == EncTestMode::AmvrSearchMode::FOUR_PEL_FAST) && m_currAmvrPruneImv[3])
+          {
+            neuralPrune = true;
+          }
+        }
+
         const bool skipAltHpelIF = (currTestMode.getAmvrSearchMode() == EncTestMode::AmvrSearchMode::HALF_PEL)
                                    && (bestIntPelCost > 1.25 * bestCS->cost);
-        if (!skipAltHpelIF)
+        if (!skipAltHpelIF && !neuralPrune)
         {
           tempCS->bestCS = bestCS;
           xCheckRDCostInterAmvr(tempCS, bestCS, partitioner, currTestMode, bestIntPelCost);
           tempCS->bestCS = nullptr;
           splitRdCostBest[CTU_LEVEL] = bestCS->cost;
           tempCS->splitRdCostBest = splitRdCostBest;
+
+          if (m_pcEncCfg->getAmvrNeuralMode() != 0)
+          {
+            xAmvrOnInterAmvrDone(tempCS, currTestMode);
+          }
         }
         else
         {
@@ -785,6 +815,11 @@ void EncCu::xCompressCU( CodingStructure*& tempCS, CodingStructure*& bestCS, Par
         tempCS->bestCS = nullptr;
         splitRdCostBest[CTU_LEVEL] = bestCS->cost;
         tempCS->splitRdCostBest = splitRdCostBest;
+
+        if (m_pcEncCfg->getAmvrNeuralMode() != 0)
+        {
+          xAmvrOnQuarterPelDone(tempCS, bestCS, partitioner, bestPrelimCost);
+        }
       }
       TPROF_END(MODE_INTER_ME);
     }
@@ -965,6 +1000,11 @@ void EncCu::xCompressCU( CodingStructure*& tempCS, CodingStructure*& bestCS, Par
       THROW( "Don't know how to handle mode: type = " << currTestMode.type << ", options = " << currTestMode.opts );
     }
   } while( m_modeCtrl->nextMode( *tempCS, partitioner ) );
+
+  if (m_pcEncCfg->getAmvrNeuralMode() != 0)
+  {
+    xAmvrOnCuFinished(tempCS, bestCS, partitioner);
+  }
 
 
   //////////////////////////////////////////////////////////////////////////
@@ -3750,6 +3790,10 @@ bool EncCu::xCheckRDCostInterAmvr(CodingStructure *&tempCS, CodingStructure *&be
     const bool testBcw = bcwIdx != BCW_DEFAULT;
 
     cu.firstPU->interDir = 10;
+    if (m_pcEncCfg->getAmvrNeuralMode() == 2)
+    {
+      m_pcInterSearch->setAmvrPruneAffine(m_currAmvrPruneAffine[1], m_currAmvrPruneAffine[2]);
+    }
 
     m_pcInterSearch->predInterSearch(cu, partitioner);
 
@@ -4993,6 +5037,170 @@ void MergeItemList::insertBackupItemsToList()
     m_mergeItemPool.giveBack(m_backupList.back());
   }
   m_backupList.clear();
+}
+
+
+// ====================================================================================================================
+// AMVR Neural Controller Hooks
+// ====================================================================================================================
+
+void EncCu::xAmvrOnQuarterPelDone(CodingStructure *&tempCS, CodingStructure *&bestCS, Partitioner &partitioner, double bestPrelimCost)
+{
+  if (!tempCS || tempCS->cost == MAX_DOUBLE || tempCS->cus.empty())
+  {
+    return;
+  }
+
+  const CodingUnit &cu = *tempCS->cus.front();
+  if (!cu.firstPU)
+  {
+    return;
+  }
+
+  m_currAmvrRecord.has14PelInter = true;
+  m_currAmvrRecord.cost14Pel   = tempCS->cost;
+  m_currAmvrRecord.cuArea      = cu.Y().width * cu.Y().height;
+
+  if (m_amvrMemoryTracker)
+  {
+    AmvrFeatureExtractor::extractFeatures(
+      m_currAmvrRecord.features,
+      cu,
+      *tempCS,
+      *bestCS,
+      partitioner,
+      *m_pcEncCfg,
+      *m_amvrMemoryTracker,
+      bestPrelimCost,
+      m_pcInterSearch
+    );
+  }
+
+  if (m_pcEncCfg->getAmvrNeuralMode() == 2 && m_amvrNeuralController && m_amvrMemoryTracker)
+  {
+    m_amvrNeuralController->forward(m_currAmvrRecord.features, m_currHead1Probs, m_currHead2Probs);
+    const double th = m_amvrMemoryTracker->getDynamicThreshold(m_pcEncCfg->getAmvrThreshold(), m_currAmvrRecord.cuArea);
+
+    m_currAmvrPruneImv[1] = m_amvrNeuralController->shouldPruneImvMode(AMVR_TARGET_IMV_1_2_PEL, m_currHead1Probs, th);
+    m_currAmvrPruneImv[2] = m_amvrNeuralController->shouldPruneImvMode(AMVR_TARGET_IMV_1_PEL,   m_currHead1Probs, th);
+    m_currAmvrPruneImv[3] = m_amvrNeuralController->shouldPruneImvMode(AMVR_TARGET_IMV_4_PEL,   m_currHead1Probs, th);
+
+    // Poda por arrasto: se todas as precisoes extras do IMV foram podadas, desativa Affine AMVR
+    if (m_currAmvrPruneImv[1] && m_currAmvrPruneImv[2] && m_currAmvrPruneImv[3])
+    {
+      m_currAmvrPruneAffine[1] = true;
+      m_currAmvrPruneAffine[2] = true;
+    }
+    else
+    {
+      m_currAmvrPruneAffine[1] = m_amvrNeuralController->shouldPruneAffinePrecision(AMVR_TARGET_AFFINE_1_16_PEL, m_currHead2Probs, th);
+      m_currAmvrPruneAffine[2] = m_amvrNeuralController->shouldPruneAffinePrecision(AMVR_TARGET_AFFINE_1_PEL,    m_currHead2Probs, th);
+    }
+
+    const bool anyPruned = m_currAmvrPruneImv[1] || m_currAmvrPruneImv[2] || m_currAmvrPruneImv[3];
+    m_amvrMemoryTracker->recordPruneDecision(anyPruned);
+  }
+}
+
+void EncCu::xAmvrOnInterAmvrDone(CodingStructure *&tempCS, const EncTestMode &encTestMode)
+{
+  if (!tempCS || tempCS->cost == MAX_DOUBLE)
+  {
+    return;
+  }
+
+  const auto amvrSearchMode = encTestMode.getAmvrSearchMode();
+  if (amvrSearchMode == EncTestMode::AmvrSearchMode::HALF_PEL)
+  {
+    m_currAmvrRecord.costHalfPel = tempCS->cost;
+  }
+  else if (amvrSearchMode == EncTestMode::AmvrSearchMode::FULL_PEL)
+  {
+    m_currAmvrRecord.cost1Pel = tempCS->cost;
+  }
+  else if (amvrSearchMode == EncTestMode::AmvrSearchMode::FOUR_PEL || amvrSearchMode == EncTestMode::AmvrSearchMode::FOUR_PEL_FAST)
+  {
+    m_currAmvrRecord.cost4Pel = tempCS->cost;
+  }
+}
+
+void EncCu::xAmvrOnCuFinished(CodingStructure *&tempCS, CodingStructure *&bestCS, Partitioner &partitioner)
+{
+  if (!m_currAmvrRecord.has14PelInter)
+  {
+    return;
+  }
+
+  // 1. Determine best IMV mode among tested candidates
+  double bestCost = m_currAmvrRecord.cost14Pel;
+  int bestImv = AMVR_TARGET_IMV_1_4_PEL;
+
+  if (m_currAmvrRecord.costHalfPel < bestCost)
+  {
+    bestCost = m_currAmvrRecord.costHalfPel;
+    bestImv = AMVR_TARGET_IMV_1_2_PEL;
+  }
+  if (m_currAmvrRecord.cost1Pel < bestCost)
+  {
+    bestCost = m_currAmvrRecord.cost1Pel;
+    bestImv = AMVR_TARGET_IMV_1_PEL;
+  }
+  if (m_currAmvrRecord.cost4Pel < bestCost)
+  {
+    bestCost = m_currAmvrRecord.cost4Pel;
+    bestImv = AMVR_TARGET_IMV_4_PEL;
+  }
+
+  // 2. Compute discrete combination id (0 to 7)
+  const bool bit0 = (m_currAmvrRecord.costHalfPel < m_currAmvrRecord.cost14Pel);
+  const bool bit1 = (m_currAmvrRecord.cost1Pel    < m_currAmvrRecord.cost14Pel);
+  const bool bit2 = (m_currAmvrRecord.cost4Pel    < m_currAmvrRecord.cost14Pel);
+  const int combId = (bit0 ? 1 : 0) | (bit1 ? 2 : 0) | (bit2 ? 4 : 0);
+
+  // 3. Determine best Affine AMVR mode from bestCS
+  int bestAffineAmvr = AMVR_TARGET_AFFINE_1_4_PEL;
+  if (bestCS && !bestCS->cus.empty() && bestCS->cus.front() && bestCS->cus.front()->affine)
+  {
+    m_currAmvrRecord.affineEvaluated = true;
+    m_currAmvrRecord.costAffine = bestCS->cost;
+    const int cuImv = bestCS->cus.front()->imv;
+    if (cuImv == IMV_FPEL)
+    {
+      bestAffineAmvr = AMVR_TARGET_AFFINE_1_16_PEL;
+    }
+    else if (cuImv == IMV_4PEL)
+    {
+      bestAffineAmvr = AMVR_TARGET_AFFINE_1_PEL;
+    }
+  }
+
+  // 4. In data collection mode (--AmvrNeuralMode 1), persist sample to binary dataset
+  if (m_pcEncCfg->getAmvrNeuralMode() == 1 && m_amvrDatasetWriter && m_amvrDatasetWriter->isOpen())
+  {
+    AmvrDatasetSample sample;
+    for (size_t i = 0; i < AMVR_NUM_FEATURES; ++i)
+    {
+      sample.features[i] = m_currAmvrRecord.features[i];
+    }
+    sample.target_best_imv           = bestImv;
+    sample.target_best_affine_amvr   = bestAffineAmvr;
+    sample.target_imv_combination_id = combId;
+    sample.cost_rd_quarter           = static_cast<float>(m_currAmvrRecord.cost14Pel);
+    sample.cost_rd_half              = static_cast<float>(m_currAmvrRecord.costHalfPel);
+    sample.cost_rd_1pel              = static_cast<float>(m_currAmvrRecord.cost1Pel);
+    sample.cost_rd_4pel              = static_cast<float>(m_currAmvrRecord.cost4Pel);
+    sample.cost_rd_affine            = static_cast<float>(m_currAmvrRecord.costAffine);
+
+    m_amvrDatasetWriter->writeSample(sample);
+  }
+
+  // 5. Update online memory tracker
+  if (m_amvrMemoryTracker)
+  {
+    m_amvrMemoryTracker->updateCU(m_currAmvrRecord, bestImv, bestAffineAmvr, bestCost);
+  }
+
+  m_currAmvrRecord.reset();
 }
 
 //! \}
